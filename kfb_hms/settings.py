@@ -118,6 +118,9 @@ X_FRAME_OPTIONS = "DENY"
 SECURE_SSL_REDIRECT = os.getenv("KFB_SECURE_SSL_REDIRECT", "0") == "1"
 SESSION_COOKIE_SECURE = os.getenv("KFB_SESSION_COOKIE_SECURE", "0") == "1"
 CSRF_COOKIE_SECURE = os.getenv("KFB_CSRF_COOKIE_SECURE", "0") == "1"
+SECURE_HSTS_SECONDS = int(os.getenv("KFB_SECURE_HSTS_SECONDS", "0"))
+SECURE_HSTS_INCLUDE_SUBDOMAINS = os.getenv("KFB_SECURE_HSTS_INCLUDE_SUBDOMAINS", "0") == "1"
+SECURE_HSTS_PRELOAD = os.getenv("KFB_SECURE_HSTS_PRELOAD", "0") == "1"
 
 HOSPITAL_NAME = os.getenv("KFB_HOSPITAL_NAME", "Kingdom Faith Based Hospital")
 MPESA_MODE = os.getenv("KFB_MPESA_MODE", "manual")
@@ -130,4 +133,3 @@ LOGGING = {
     "root": {"handlers": ["console"], "level": "INFO"},
     "loggers": {"django.request": {"handlers": ["console"], "level": "WARNING", "propagate": False}},
 }
-

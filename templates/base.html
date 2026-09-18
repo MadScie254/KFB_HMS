@@ -1,0 +1,67 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="Local-first hospital operations for Kingdom Faith Based Hospital">
+  <title>{% block title %}Hospital operations{% endblock %} · KFB</title>
+  <link rel="icon" href="{% static 'images/favicon.svg' %}" type="image/svg+xml">
+  <link rel="stylesheet" href="{% static 'css/app.css' %}">
+  <script src="{% static 'js/app.js' %}" defer></script>
+</head>
+<body class="{% if demo_mode %}demo-environment{% endif %}">
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  {% if user.is_authenticated %}
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Primary navigation">
+      <a class="brand" href="{% url 'dashboard' %}" aria-label="Kingdom Faith Based Hospital home">
+        <span class="brand-mark" aria-hidden="true">K+</span>
+        <span><strong>Kingdom Faith</strong><small>Based Hospital</small></span>
+      </a>
+      <div class="facility">Malaha · Webuye</div>
+      <nav>
+        <a href="{% url 'dashboard' %}" class="{% if request.resolver_match.url_name == 'dashboard' %}active{% endif %}">Home</a>
+        {% if 'patients' in allowed_navigation %}<a href="{% url 'patients' %}">Patients</a>{% endif %}
+        {% if 'queue' in allowed_navigation %}<a href="{% url 'queue' %}">Queue</a>{% endif %}
+        {% if 'payments' in allowed_navigation %}<a href="{% url 'pharmacy_orders' %}">Payments</a>{% endif %}
+        {% if 'pharmacy' in allowed_navigation %}<a href="{% url 'pharmacy_orders' %}">Pharmacy</a>{% endif %}
+        {% if 'wards' in allowed_navigation %}<a href="{% url 'wards' %}">Wards</a>{% endif %}
+        {% if 'eye' in allowed_navigation %}<a href="{% url 'eye_clinic' %}">Eye Clinic</a>{% endif %}
+        {% if 'departments' in allowed_navigation %}<a href="{% url 'departments' %}">Lab &amp; departments</a>{% endif %}
+        {% if 'reports' in allowed_navigation %}<a href="{% url 'reports' %}">Reports</a>{% endif %}
+        {% if 'stock' in allowed_navigation %}<a href="{% url 'stock' %}">Stock &amp; Purchasing</a>{% endif %}
+        {% if 'purchasing' in allowed_navigation %}<a href="{% url 'purchasing' %}">Purchasing</a>{% endif %}
+        {% if 'exceptions' in allowed_navigation %}<a href="{% url 'exceptions' %}">Exceptions</a>{% endif %}
+        {% if 'shifts' in allowed_navigation %}<a href="{% url 'shift_manage' %}">Cashier shift</a>{% endif %}
+        {% if 'settings' in allowed_navigation %}<a href="{% url 'settings' %}">Settings</a><a href="{% url 'csv_import' %}">CSV imports</a>{% endif %}
+      </nav>
+      <div class="sidebar-foot">
+        <a href="{% url 'downtime_forms' %}">Downtime forms</a>
+        <a href="{% url 'health' %}">System health</a>
+      </div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar">
+        <button class="menu-button" type="button" aria-label="Open menu" data-menu-toggle>Menu</button>
+        <div class="connection"><span class="status-dot"></span><span>Server connected</span><small>Updated {% now "H:i" %}</small></div>
+        <div class="topbar-actions">
+          <span class="shift-chip">{{ user.staff_profile.active_shift_label|default:"No shift label" }}</span>
+          <span class="user-chip"><strong>{{ user.staff_profile }}</strong><small>{{ current_role|title }}</small></span>
+          <a href="{% url 'screen_lock' %}" class="quiet-link">Lock</a>
+          <form action="{% url 'logout' %}" method="post" class="inline-form">{% csrf_token %}<button type="submit" class="quiet-button">Sign out</button></form>
+        </div>
+      </header>
+      {% if demo_mode %}<div class="demo-banner"><strong>Demonstration data</strong> · Not for real patient care or financial reporting</div>{% endif %}
+      <main id="main-content" class="content">
+        {% if messages %}<div class="messages" aria-live="polite">{% for message in messages %}<div class="message {{ message.tags }}">{{ message }}</div>{% endfor %}</div>{% endif %}
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+  </div>
+  {% else %}
+    {% block anonymous_content %}{% endblock %}
+  {% endif %}
+</body>
+</html>

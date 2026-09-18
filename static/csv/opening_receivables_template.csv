@@ -1,0 +1,3 @@
+external_patient_reference,external_invoice_reference,original_invoice_date,description,department,outstanding_amount,review_reference
+OLD-DEMO-001,OLD-INV-001,2026-01-01,Fictional opening balance,Outpatient,1000.00,REVIEW-DEMO-001
+

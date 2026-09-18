@@ -1,0 +1,7 @@
+{% extends "base.html" %}{% block title %}Register patient{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="breadcrumbs"><a href="{% url 'patients' %}">Patients</a> / Register</p><h1>Register patient</h1><p>Registration creates an identity record; start a visit separately.</p></div></div>
+{% if duplicates %}<section class="callout warning-callout"><h2>Possible matching record</h2>{% for patient in duplicates %}<p><a href="{% url 'patient_detail' patient.pk %}">{{ patient.patient_number }} · {{ patient.full_name }}</a></p>{% endfor %}<p>If this is a different person, confirm below. Records are never merged automatically.</p></section>{% endif %}
+<form method="post" class="panel form-panel" data-unsaved-warning>{% csrf_token %}<div class="form-grid">{% include "hospital/_form_fields.html" %}</div>{% if duplicates %}<label class="check-row"><input type="checkbox" name="confirm_duplicate" value="yes"> I reviewed the possible match and this is a different patient.</label>{% endif %}<div class="form-actions"><a class="button ghost" href="{% url 'patients' %}">Cancel</a><button class="button primary" type="submit">Register patient</button></div></form>
+{% endblock %}
+

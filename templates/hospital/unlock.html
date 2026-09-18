@@ -1,0 +1,3 @@
+{% extends "base.html" %}{% block title %}Unlock screen{% endblock %}
+{% block content %}<div class="lock-panel"><div class="brand-mark">K+</div><h1>Screen locked</h1><p>{{ user.staff_profile }} · Re-enter your password to continue.</p><form method="post" class="form-stack">{% csrf_token %}<label>Password<input class="field-control" type="password" name="password" autocomplete="current-password" autofocus></label><button class="button primary" type="submit">Unlock</button></form></div>{% endblock %}
+

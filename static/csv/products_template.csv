@@ -1,0 +1,3 @@
+code,name,department,base_unit,sale_unit,units_per_sale_unit,sale_price,reorder_level,prescription_required
+DEMO-NEW-001,Fictional product,Pharmacy,tablet,box,100,10.00,50,false
+

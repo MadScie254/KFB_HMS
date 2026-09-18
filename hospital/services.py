@@ -111,15 +111,18 @@ def record_payment(*, actor, invoice_id, amount, method, reference, idempotency_
         raise ValidationError("Open a cashier shift before recording cash.")
     verification = Payment.Verification.NOT_APPLICABLE if method == Payment.Method.CASH else Payment.Verification.UNVERIFIED
     try:
-        payment = Payment.objects.create(
-            amount=amount,
-            method=method,
-            reference=reference.strip().upper(),
-            verification_status=verification,
-            shift=shift,
-            received_by=actor,
-            idempotency_key=idempotency_key,
-        )
+        # A nested savepoint keeps the workflow queryable after a uniqueness
+        # constraint rejects a repeated button click or provider reference.
+        with transaction.atomic():
+            payment = Payment.objects.create(
+                amount=amount,
+                method=method,
+                reference=reference.strip().upper(),
+                verification_status=verification,
+                shift=shift,
+                received_by=actor,
+                idempotency_key=idempotency_key,
+            )
     except IntegrityError as exc:
         existing = Payment.objects.filter(idempotency_key=idempotency_key).first()
         if existing:
@@ -270,4 +273,3 @@ def complete_eye_case(*, actor, case_id, request=None):
 
 def deterministic_key(*parts):
     return hashlib.sha256(":".join(str(p) for p in parts).encode()).hexdigest()
-

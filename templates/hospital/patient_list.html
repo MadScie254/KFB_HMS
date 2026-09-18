@@ -1,0 +1,9 @@
+{% extends "base.html" %}{% block title %}Patients{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="breadcrumbs"><a href="{% url 'dashboard' %}">Home</a> / Patients</p><h1>Patients</h1><p>Search by patient number, name or phone.</p></div>{% if current_role == 'reception' %}<a class="button primary" href="{% url 'patient_create' %}">Register patient</a>{% endif %}</div>
+<section class="panel">
+  <form method="get" class="search-row" role="search"><label class="visually-hidden" for="patient-search">Search patients</label><input id="patient-search" name="q" value="{{ query }}" placeholder="Patient number, name or phone"><button class="button secondary" type="submit">Search</button></form>
+  {% if patients %}<div class="table-wrap"><table><thead><tr><th>Patient</th><th>Phone</th><th>Age / date of birth</th><th>Allergy status</th><th>Registered</th></tr></thead><tbody>{% for patient in patients %}<tr><td><a href="{% url 'patient_detail' patient.pk %}"><strong>{{ patient.full_name }}</strong><small>{{ patient.patient_number }}</small></a></td><td>{{ patient.phone|default:"Not recorded" }}</td><td>{% if patient.date_of_birth %}{{ patient.date_of_birth|date:"j M Y" }}{% else %}Estimated {{ patient.estimated_age_years }} years{% endif %}</td><td><span class="status">{{ patient.get_allergy_status_display }}</span></td><td>{{ patient.created_at|date:"j M Y, H:i" }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<div class="empty"><strong>No matching patients.</strong><p>Check the spelling or register a new patient after reviewing possible duplicates.</p></div>{% endif %}
+</section>
+{% endblock %}
+

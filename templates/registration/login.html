@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Sign in{% endblock %}
+{% block anonymous_content %}
+<main class="login-shell">
+  <section class="login-panel">
+    <div class="login-brand"><span class="brand-mark">K+</span><div><strong>Kingdom Faith Based Hospital</strong><small>Local operations system</small></div></div>
+    {% if demo_mode %}<div class="demo-banner"><strong>Demonstration environment</strong> · Fictional records only</div>{% endif %}
+    <h1>Sign in to your shift</h1>
+    <p>Use your named staff account. Do not share passwords.</p>
+    {% if form.errors %}<div class="message error">Username or password not accepted.</div>{% endif %}
+    <form method="post" class="form-stack">
+      {% csrf_token %}
+      <label>Username {{ form.username }}</label>
+      <label>Password {{ form.password }}</label>
+      <button class="button primary" type="submit">Sign in</button>
+    </form>
+    <p class="help-text">If the server is unavailable, use the numbered downtime forms at reception.</p>
+  </section>
+  <aside class="login-context"><p class="eyebrow">Malaha · Webuye</p><h2>One accountable record from service to settlement.</h2><p>Patient care, stock, payments and reviews stay linked—even when the internet is unavailable.</p></aside>
+</main>
+{% endblock %}
+

@@ -4,6 +4,8 @@ from django import forms
 from django.utils import timezone
 
 from .models import (
+    Admission,
+    Bed,
     CashShift,
     CatalogueItem,
     ClinicalNote,
@@ -12,6 +14,11 @@ from .models import (
     Patient,
     Payment,
     PharmacyOrder,
+    Prescription,
+    PrescriptionItem,
+    PurchaseOrder,
+    ServiceOrder,
+    Supplier,
 )
 
 
@@ -108,3 +115,80 @@ class CreditNoteForm(StyledFormMixin, forms.ModelForm):
         fields = ["amount", "reason"]
         widgets = {"reason": forms.Textarea(attrs={"rows": 3})}
 
+
+class ServiceOrderForm(StyledFormMixin, forms.ModelForm):
+    class Meta:
+        model = ServiceOrder
+        fields = ["service", "specimen_details"]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["service"].queryset = CatalogueItem.objects.filter(kind=CatalogueItem.Kind.SERVICE, active=True).order_by("department", "name")
+
+
+class ServiceResultForm(StyledFormMixin, forms.ModelForm):
+    class Meta:
+        model = ServiceOrder
+        fields = ["status", "result"]
+        widgets = {"result": forms.Textarea(attrs={"rows": 7})}
+
+    def clean(self):
+        data = super().clean()
+        if data.get("status") in {ServiceOrder.Status.REVIEW, ServiceOrder.Status.RELEASED} and not data.get("result", "").strip():
+            self.add_error("result", "Enter a result before review or release.")
+        return data
+
+
+class AdmissionForm(StyledFormMixin, forms.ModelForm):
+    class Meta:
+        model = Admission
+        fields = ["bed"]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        occupied = Admission.objects.filter(discharged_at__isnull=True).values_list("bed_id", flat=True)
+        self.fields["bed"].queryset = Bed.objects.filter(active=True).exclude(pk__in=occupied).select_related("ward")
+
+
+class PurchaseOrderForm(StyledFormMixin, forms.ModelForm):
+    product = forms.ModelChoiceField(queryset=CatalogueItem.objects.none())
+    quantity_base_units = forms.DecimalField(min_value=Decimal("0.001"), max_digits=14, decimal_places=3)
+    quoted_unit_cost = forms.DecimalField(min_value=Decimal("0.00"), max_digits=14, decimal_places=2)
+
+    class Meta:
+        model = PurchaseOrder
+        fields = ["supplier", "reference", "notes"]
+        widgets = {"notes": forms.Textarea(attrs={"rows": 3})}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["product"].queryset = CatalogueItem.objects.filter(kind=CatalogueItem.Kind.PRODUCT, active=True).order_by("name")
+        self.fields["supplier"].queryset = Supplier.objects.filter(active=True).order_by("name")
+
+
+class CsvImportForm(StyledFormMixin, forms.Form):
+    import_kind = forms.ChoiceField(choices=[("products", "Products and prices")])
+    csv_file = forms.FileField(help_text="UTF-8 CSV, maximum 1 MB. First row must contain column names.")
+
+    def clean_csv_file(self):
+        uploaded = self.cleaned_data["csv_file"]
+        if uploaded.size > 1024 * 1024:
+            raise forms.ValidationError("File exceeds the 1 MB limit.")
+        if not uploaded.name.lower().endswith(".csv"):
+            raise forms.ValidationError("Upload a .csv file.")
+        return uploaded
+
+
+class PrescriptionForm(StyledFormMixin, forms.Form):
+    product = forms.ModelChoiceField(queryset=CatalogueItem.objects.none())
+    strength = forms.CharField(max_length=80, required=False)
+    dose = forms.CharField(max_length=80)
+    route = forms.CharField(max_length=80)
+    frequency = forms.CharField(max_length=80)
+    duration = forms.CharField(max_length=80)
+    quantity_base_units = forms.DecimalField(min_value=Decimal("0.001"), max_digits=14, decimal_places=3, label="Total quantity")
+    instructions = forms.CharField(widget=forms.Textarea(attrs={"rows": 3}), required=False)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["product"].queryset = CatalogueItem.objects.filter(kind=CatalogueItem.Kind.PRODUCT, active=True).order_by("name")

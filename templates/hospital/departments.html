@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}Department work{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="breadcrumbs"><a href="{% url 'dashboard' %}">Home</a> / Departments</p><h1>Laboratory, imaging &amp; departmental work</h1><p>Results are released by authorised staff—not automatically by payment status.</p></div></div>
+<section class="panel">
+{% if work %}<div class="table-wrap"><table><thead><tr><th>Patient</th><th>Requested service</th><th>Department</th><th>Status</th><th>Requested by</th><th></th></tr></thead><tbody>
+{% for order in work %}<tr><td>{{ order.encounter.patient.full_name }}<small>{{ order.encounter.patient.patient_number }}</small></td><td>{{ order.service.name }}</td><td>{{ order.service.department }}</td><td><span class="status {{ order.status }}">{{ order.get_status_display }}</span></td><td>{{ order.requested_by.staff_profile }}</td><td><a href="{% url 'service_order_update' order.pk %}">Open work item</a></td></tr>{% endfor %}
+</tbody></table></div>{% else %}<div class="empty"><strong>No work is currently requested.</strong><p>Clinician orders will appear here with their encounter and charge references.</p></div>{% endif %}
+</section>
+{% endblock %}

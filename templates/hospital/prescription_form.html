@@ -1,0 +1,6 @@
+{% extends "base.html" %}
+{% block title %}Prescription{% endblock %}
+{% block content %}
+<div class="patient-banner"><div><p class="eyebrow">{{ encounter.patient.patient_number }} · {{ encounter.encounter_number }}</p><h1>{{ encounter.patient.full_name }}</h1><p>Confirm two identifiers and allergy status before prescribing.</p></div><div class="allergy {{ encounter.patient.allergy_status }}"><span>Allergy status</span><strong>{{ encounter.patient.get_allergy_status_display }}</strong><small>{{ encounter.patient.allergy_details }}</small></div></div>
+<form method="post" class="panel form-panel" data-unsaved-warning>{% csrf_token %}<div class="panel-head"><h2>Sign prescription</h2></div><div class="form-grid">{% include "hospital/_form_fields.html" %}</div><div class="callout"><strong>No stock or payment posts here.</strong><p>Pharmacy prices the signed prescription, reception collects, and pharmacy records the actual quantity dispensed.</p></div><div class="form-actions"><a class="button ghost" href="{% url 'patient_detail' encounter.patient_id %}">Cancel</a><button class="button primary" type="submit">Sign and send to pharmacy</button></div></form>
+{% endblock %}

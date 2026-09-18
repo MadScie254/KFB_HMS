@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Home{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div><p class="eyebrow">{{ now_local|date:"l, j F Y" }}</p><h1>{% if role == 'owner' %}Hospital overview{% elif role == 'reception' %}Reception desk{% elif role == 'pharmacy' %}Pharmacy worklist{% elif role == 'clinician' %}Clinical queue{% elif role == 'nurse' %}Ward work{% else %}Today’s work{% endif %}</h1></div>
+  {% if role == 'reception' %}<div class="actions"><a class="button secondary" href="{% url 'patients' %}">Find patient</a><a class="button primary" href="{% url 'patient_create' %}">Register patient</a></div>{% endif %}
+  {% if role == 'pharmacy' %}<a class="button primary" href="{% url 'pharmacy_order_create' %}">Prepare walk-in basket</a>{% endif %}
+</div>
+
+{% if role == 'owner' %}
+<section class="kpi-grid" aria-label="Today’s key indicators">
+  <a href="{% url 'reports' %}" class="kpi"><span>Net billed charges</span><strong>KES {{ net_billed|floatformat:2 }}</strong><small>Posted today</small></a>
+  <a href="{% url 'reports' %}" class="kpi"><span>Verified collections</span><strong>KES {{ verified_collections|floatformat:2 }}</strong><small>Cash + verified electronic</small></a>
+  <a href="{% url 'reports' %}" class="kpi warning"><span>Unverified M-PESA</span><strong>KES {{ unverified_mpesa|floatformat:2 }}</strong><small>Requires reconciliation</small></a>
+  <a href="{% url 'reports' %}" class="kpi"><span>Receivables</span><strong>KES {{ receivables|floatformat:2 }}</strong><small>Outstanding posted bills</small></a>
+  <a href="{% url 'wards' %}" class="kpi"><span>Bed occupancy</span><strong>{{ occupied_beds }} / {{ active_beds }}</strong><small>Configured usable beds</small></a>
+  <a href="{% url 'eye_clinic' %}" class="kpi"><span>Eye waiting list</span><strong>{{ eye_waiting }}</strong><small>Unique patients</small></a>
+</section>
+{% else %}
+<section class="task-grid">
+  {% if role == 'reception' %}
+    <a class="task-card primary-task" href="{% url 'patient_create' %}"><span>01</span><strong>Register patient</strong><small>Create a patient record before a visit.</small></a>
+    <a class="task-card" href="{% url 'patients' %}"><span>02</span><strong>Start visit</strong><small>Find an existing patient first.</small></a>
+    <a class="task-card" href="{% url 'pharmacy_orders' %}"><span>03</span><strong>Take payment</strong><small>Collect for a prepared basket or bill.</small></a>
+    <a class="task-card {% if not my_shift %}attention{% endif %}" href="{% url 'shift_manage' %}"><span>04</span><strong>{% if my_shift %}Close shift{% else %}Open shift{% endif %}</strong><small>{% if my_shift %}Expected cash KES {{ my_shift.expected_cash|floatformat:2 }}{% else %}Required before accepting cash.{% endif %}</small></a>
+  {% elif role == 'pharmacy' %}
+    <a class="task-card primary-task" href="{% url 'pharmacy_order_create' %}"><span>01</span><strong>Walk-in order</strong><small>Price basket, then send to reception.</small></a>
+    <a class="task-card" href="{% url 'pharmacy_orders' %}"><span>02</span><strong>Ready to dispense</strong><small>Open server-cleared orders.</small></a>
+    <a class="task-card" href="{% url 'stock' %}"><span>03</span><strong>Stock lookup</strong><small>Check batches, expiry and custody.</small></a>
+  {% elif role == 'clinician' %}
+    <a class="task-card primary-task" href="{% url 'queue' %}"><span>01</span><strong>My queue</strong><small>Open the next patient encounter.</small></a>
+    <a class="task-card" href="{% url 'patients' %}"><span>02</span><strong>Patient chart</strong><small>Review longitudinal records.</small></a>
+    <a class="task-card" href="{% url 'wards' %}"><span>03</span><strong>Admissions</strong><small>Clinical and financial discharge stay separate.</small></a>
+  {% else %}
+    <a class="task-card primary-task" href="{% url 'queue' %}"><span>01</span><strong>Assigned work</strong><small>Open the current departmental worklist.</small></a>
+    <a class="task-card" href="{% url 'wards' %}"><span>02</span><strong>Ward board</strong><small>Review active admissions.</small></a>
+  {% endif %}
+</section>
+{% endif %}
+
+<div class="content-grid">
+  <section class="panel span-2">
+    <div class="panel-head"><div><p class="eyebrow">Live operational record</p><h2>Active patient queue</h2></div><a href="{% url 'queue' %}">View all</a></div>
+    {% if queue %}<div class="table-wrap"><table><thead><tr><th>Patient</th><th>Visit</th><th>Department</th><th>Status</th><th>Waiting</th></tr></thead><tbody>{% for encounter in queue %}<tr><td><a href="{% url 'patient_detail' encounter.patient_id %}"><strong>{{ encounter.patient.full_name }}</strong><small>{{ encounter.patient.patient_number }}</small></a></td><td>{{ encounter.encounter_number }}</td><td>{{ encounter.department }}</td><td><span class="status {{ encounter.status }}">{{ encounter.get_status_display }}</span></td><td>{{ encounter.created_at|timesince }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<div class="empty"><strong>No patients are waiting.</strong><p>New visits will appear here after reception starts them.</p></div>{% endif %}
+  </section>
+  <section class="panel">
+    <div class="panel-head"><div><p class="eyebrow">Review, not accusation</p><h2>Exceptions</h2></div>{% if 'exceptions' in allowed_navigation %}<a href="{% url 'exceptions' %}">Open centre</a>{% endif %}</div>
+    {% if exceptions %}<ul class="exception-list">{% for item in exceptions %}<li><span class="severity {{ item.severity }}">{{ item.get_severity_display }}</span><div><strong>{{ item.summary }}</strong><small>{{ item.created_at|timesince }} ago</small></div></li>{% endfor %}</ul>{% else %}<div class="empty compact"><strong>No unresolved exceptions.</strong><p>Discrepancies will appear here for review.</p></div>{% endif %}
+  </section>
+</div>
+{% endblock %}
+

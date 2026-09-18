@@ -320,7 +320,7 @@ class InvoiceLine(models.Model):
     package_included = models.BooleanField(default=False)
 
     def save(self, *args, **kwargs):
-        self.line_total = (self.quantity * self.unit_price).quantize(Decimal("0.01"))
+        self.line_total = (Decimal(str(self.quantity)) * Decimal(str(self.unit_price))).quantize(Decimal("0.01"))
         super().save(*args, **kwargs)
 
 
@@ -479,6 +479,10 @@ class PharmacyOrderItem(models.Model):
     unit_price = models.DecimalField(**MONEY, validators=[MinValueValidator(Decimal("0.00"))])
     prescription_item = models.ForeignKey(PrescriptionItem, null=True, blank=True, on_delete=models.PROTECT)
 
+    @property
+    def line_total(self):
+        return (Decimal(str(self.quantity_base_units)) * Decimal(str(self.unit_price))).quantize(Decimal("0.01"))
+
 
 class Ward(TimeStampedModel):
     name = models.CharField(max_length=80, unique=True)
@@ -517,6 +521,25 @@ class MedicationAdministration(TimeStampedModel):
     administered_at = models.DateTimeField(default=timezone.now)
     reason = models.TextField(blank=True)
     recorded_by = models.ForeignKey(User, on_delete=models.PROTECT)
+
+
+class NursingHandover(TimeStampedModel):
+    ward = models.ForeignKey(Ward, on_delete=models.PROTECT, related_name="handovers")
+    from_shift = models.CharField(max_length=40)
+    to_shift = models.CharField(max_length=40)
+    summary = models.TextField()
+    authored_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="handovers_authored")
+    accepted_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="handovers_accepted")
+    accepted_at = models.DateTimeField(null=True, blank=True)
+
+
+class BedTransfer(TimeStampedModel):
+    admission = models.ForeignKey(Admission, on_delete=models.PROTECT, related_name="transfers")
+    from_bed = models.ForeignKey(Bed, on_delete=models.PROTECT, related_name="transfers_from")
+    to_bed = models.ForeignKey(Bed, on_delete=models.PROTECT, related_name="transfers_to")
+    transferred_at = models.DateTimeField(default=timezone.now)
+    reason = models.CharField(max_length=255)
+    transferred_by = models.ForeignKey(User, on_delete=models.PROTECT)
 
 
 class ServiceOrder(TimeStampedModel):
@@ -565,6 +588,16 @@ class ClinicianPayable(TimeStampedModel):
     approved_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT)
 
 
+class EyePackageItem(TimeStampedModel):
+    package_code = models.CharField(max_length=40)
+    item = models.ForeignKey(CatalogueItem, on_delete=models.PROTECT)
+    quantity = models.DecimalField(**QUANTITY, validators=[MinValueValidator(Decimal("0.001"))])
+    active = models.BooleanField(default=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["package_code", "item"], name="unique_eye_package_item")]
+
+
 class Supplier(TimeStampedModel):
     name = models.CharField(max_length=160, unique=True)
     phone = models.CharField(max_length=30, blank=True)
@@ -587,6 +620,132 @@ class PurchaseOrder(TimeStampedModel):
         if self.approved_by_id and self.approved_by_id == self.requested_by_id:
             raise ValidationError("The requester cannot approve their own purchase order.")
         super().save(*args, **kwargs)
+
+
+class PurchaseOrderLine(models.Model):
+    order = models.ForeignKey(PurchaseOrder, on_delete=models.PROTECT, related_name="lines")
+    item = models.ForeignKey(CatalogueItem, on_delete=models.PROTECT, limit_choices_to={"kind": CatalogueItem.Kind.PRODUCT})
+    quantity_base_units = models.DecimalField(**QUANTITY, validators=[MinValueValidator(Decimal("0.001"))])
+    quoted_unit_cost = models.DecimalField(**MONEY, validators=[MinValueValidator(Decimal("0.00"))])
+
+    @property
+    def line_total(self):
+        return (self.quantity_base_units * self.quoted_unit_cost).quantize(Decimal("0.01"))
+
+
+class GoodsReceipt(TimeStampedModel):
+    purchase_order = models.ForeignKey(PurchaseOrder, on_delete=models.PROTECT, related_name="receipts")
+    supplier_invoice_reference = models.CharField(max_length=100)
+    received_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="goods_received")
+    checked_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="goods_checked")
+    checked_at = models.DateTimeField(null=True, blank=True)
+    discrepancy_notes = models.TextField(blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["purchase_order", "supplier_invoice_reference"], name="unique_supplier_invoice_per_order")]
+
+    def clean(self):
+        if self.checked_by_id and self.checked_by_id == self.received_by_id:
+            raise ValidationError("The delivery checker must differ from the receiver.")
+
+
+class GoodsReceiptLine(models.Model):
+    receipt = models.ForeignKey(GoodsReceipt, on_delete=models.PROTECT, related_name="lines")
+    order_line = models.ForeignKey(PurchaseOrderLine, on_delete=models.PROTECT)
+    quantity_received = models.DecimalField(**QUANTITY, validators=[MinValueValidator(Decimal("0.001"))])
+    batch_number = models.CharField(max_length=80)
+    expiry_date = models.DateField(null=True, blank=True)
+    actual_unit_cost = models.DecimalField(**MONEY, validators=[MinValueValidator(Decimal("0.00"))])
+
+
+class StockCount(TimeStampedModel):
+    status = models.CharField(max_length=16, choices=[("frozen", "Snapshot frozen"), ("submitted", "Submitted"), ("approved", "Approved")], default="frozen")
+    location = models.CharField(max_length=80, default="Pharmacy")
+    cutoff_at = models.DateTimeField(default=timezone.now)
+    blind_count = models.BooleanField(default=True)
+    counted_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="stock_counts")
+    witnessed_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="stock_counts_witnessed")
+    reviewed_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="stock_counts_reviewed")
+
+
+class StockCountLine(models.Model):
+    count = models.ForeignKey(StockCount, on_delete=models.PROTECT, related_name="lines")
+    batch = models.ForeignKey(StockBatch, on_delete=models.PROTECT)
+    expected_quantity = models.DecimalField(**QUANTITY)
+    counted_quantity = models.DecimalField(**QUANTITY)
+    reason = models.CharField(max_length=255, blank=True)
+
+    @property
+    def variance(self):
+        return self.counted_quantity - self.expected_quantity
+
+
+class TheatreCase(TimeStampedModel):
+    encounter = models.ForeignKey(Encounter, on_delete=models.PROTECT, related_name="theatre_cases")
+    procedure_label = models.CharField(max_length=200)
+    scheduled_at = models.DateTimeField(null=True, blank=True)
+    team = models.TextField(blank=True)
+    consent_recorded = models.BooleanField(default=False)
+    preoperative_documentation = models.TextField(blank=True)
+    anaesthetic_record = models.TextField(blank=True)
+    procedure_record = models.TextField(blank=True)
+    recovery_observations = models.TextField(blank=True)
+    status = models.CharField(max_length=16, choices=[("scheduled", "Scheduled"), ("completed", "Completed"), ("cancelled", "Cancelled")], default="scheduled")
+    recorded_by = models.ForeignKey(User, on_delete=models.PROTECT)
+
+
+class DentalRecord(TimeStampedModel):
+    encounter = models.ForeignKey(Encounter, on_delete=models.PROTECT, related_name="dental_records")
+    complaint = models.TextField()
+    findings = models.TextField(blank=True)
+    tooth_identifier = models.CharField(max_length=40, blank=True)
+    procedure_label = models.CharField(max_length=160, blank=True)
+    follow_up = models.TextField(blank=True)
+    clinician = models.ForeignKey(User, on_delete=models.PROTECT)
+
+
+class MaternityRecord(TimeStampedModel):
+    encounter = models.OneToOneField(Encounter, on_delete=models.PROTECT, related_name="maternity_record")
+    maternal_observations = models.TextField(blank=True)
+    labour_delivery_record = models.TextField(blank=True)
+    outcome = models.TextField(blank=True)
+    template_reviewed_for_production = models.BooleanField(default=False)
+    authored_by = models.ForeignKey(User, on_delete=models.PROTECT)
+
+
+class NewbornLink(TimeStampedModel):
+    maternity_record = models.ForeignKey(MaternityRecord, on_delete=models.PROTECT, related_name="newborns")
+    newborn = models.ForeignKey(Patient, on_delete=models.PROTECT, related_name="birth_links")
+    relationship_notes = models.CharField(max_length=255, blank=True)
+
+
+class ClinicalAttachment(TimeStampedModel):
+    patient = models.ForeignKey(Patient, on_delete=models.PROTECT, related_name="attachments")
+    encounter = models.ForeignKey(Encounter, null=True, blank=True, on_delete=models.PROTECT, related_name="attachments")
+    file = models.FileField(upload_to="clinical/%Y/%m/")
+    original_name = models.CharField(max_length=255)
+    description = models.CharField(max_length=255, blank=True)
+    uploaded_by = models.ForeignKey(User, on_delete=models.PROTECT)
+
+
+class Refund(TimeStampedModel):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending review"
+        APPROVED = "approved", "Approved"
+        PAID = "paid", "Paid"
+        REJECTED = "rejected", "Rejected"
+    payment = models.ForeignKey(Payment, on_delete=models.PROTECT, related_name="refunds")
+    amount = models.DecimalField(**MONEY, validators=[MinValueValidator(Decimal("0.01"))])
+    reason = models.TextField()
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.PENDING)
+    requested_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="refunds_requested")
+    reviewed_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="refunds_reviewed")
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    @property
+    def refundable_remaining(self):
+        already = self.payment.refunds.filter(status__in=[self.Status.APPROVED, self.Status.PAID]).exclude(pk=self.pk).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+        return self.payment.amount - already
 
 
 class ExceptionRecord(TimeStampedModel):
@@ -649,4 +808,3 @@ class AuditEvent(models.Model):
         if self.pk and AuditEvent.objects.filter(pk=self.pk).exists():
             raise ValidationError("Audit events are append-only.")
         super().save(*args, **kwargs)
-

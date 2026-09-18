@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Queue{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div><p class="breadcrumbs"><a href="{% url 'dashboard' %}">Home</a> / Queue</p><h1>Patient queue</h1><p>Clinical urgency can override routine payment gates when the reason is recorded.</p></div>
+</div>
+<section class="panel">
+{% if encounters %}
+  <div class="table-wrap"><table><thead><tr><th>Patient</th><th>Identifiers</th><th>Department</th><th>Urgency</th><th>Status</th><th>Actions</th></tr></thead><tbody>
+  {% for e in encounters %}<tr>
+    <td><strong>{{ e.patient.full_name }}</strong></td>
+    <td>{{ e.patient.patient_number }}<small>{{ e.patient.phone|default:"No phone" }}</small></td>
+    <td>{{ e.department }}</td><td><span class="status {{ e.urgency }}">{{ e.get_urgency_display }}</span></td><td>{{ e.get_status_display }}</td>
+    <td>{% if current_role == 'clinician' %}<div class="table-actions"><a href="{% url 'clinical_note' e.pk %}">Clinical note</a><a href="{% url 'prescription_create' e.pk %}">Prescription</a><a href="{% url 'service_order_create' e.pk %}">Request service</a><a href="{% url 'admission_create' e.pk %}">Admit</a></div>{% else %}<a href="{% url 'patient_detail' e.patient_id %}">View patient</a>{% endif %}</td>
+  </tr>{% endfor %}
+  </tbody></table></div>
+{% else %}<div class="empty"><strong>The queue is clear.</strong><p>Visits started at reception will appear here.</p></div>{% endif %}
+</section>
+{% endblock %}
