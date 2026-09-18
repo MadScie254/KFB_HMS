@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.sqlite3
+*.log
+.env
+media/
+staticfiles/
+backups/
+.sites-runtime/
+.pytest_cache/
+coverage.xml
+.coverage
+

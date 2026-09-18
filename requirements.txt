@@ -1,0 +1,4 @@
+Django==5.2.17
+psycopg[binary]==3.3.5
+waitress==3.0.2
+
