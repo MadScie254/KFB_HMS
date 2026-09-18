@@ -1,7 +1,6 @@
-from pathlib import Path
 import os
-from urllib.parse import urlparse, unquote
-
+from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 ENVIRONMENT = os.getenv("KFB_ENV", "demo").lower()
@@ -102,6 +101,8 @@ STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_DIRS = [BASE_DIR / "static"]
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
+LOG_ROOT = BASE_DIR / "logs"
+LOG_ROOT.mkdir(exist_ok=True)
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 LOGIN_URL = "login"
@@ -116,6 +117,7 @@ SECURE_CONTENT_TYPE_NOSNIFF = True
 SECURE_REFERRER_POLICY = "same-origin"
 X_FRAME_OPTIONS = "DENY"
 SECURE_SSL_REDIRECT = os.getenv("KFB_SECURE_SSL_REDIRECT", "0") == "1"
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 SESSION_COOKIE_SECURE = os.getenv("KFB_SESSION_COOKIE_SECURE", "0") == "1"
 CSRF_COOKIE_SECURE = os.getenv("KFB_CSRF_COOKIE_SECURE", "0") == "1"
 SECURE_HSTS_SECONDS = int(os.getenv("KFB_SECURE_HSTS_SECONDS", "0"))
@@ -128,8 +130,21 @@ MPESA_MODE = os.getenv("KFB_MPESA_MODE", "manual")
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
-    "formatters": {"plain": {"format": "{asctime} {levelname} {name}: {message}", "style": "{"}},
-    "handlers": {"console": {"class": "logging.StreamHandler", "formatter": "plain"}},
-    "root": {"handlers": ["console"], "level": "INFO"},
-    "loggers": {"django.request": {"handlers": ["console"], "level": "WARNING", "propagate": False}},
+    "formatters": {
+        "plain": {"format": "{asctime} {levelname} {name}: {message}", "style": "{"},
+        "json": {"()": "hospital.logging.JsonFormatter"},
+    },
+    "handlers": {
+        "console": {"class": "logging.StreamHandler", "formatter": "plain"},
+        "json_file": {
+            "class": "logging.handlers.RotatingFileHandler",
+            "filename": LOG_ROOT / "kfb-hms.jsonl",
+            "maxBytes": 10 * 1024 * 1024,
+            "backupCount": 10,
+            "encoding": "utf-8",
+            "formatter": "json",
+        },
+    },
+    "root": {"handlers": ["console", "json_file"], "level": "INFO"},
+    "loggers": {"django.request": {"handlers": ["console", "json_file"], "level": "WARNING", "propagate": False}},
 }

@@ -7,7 +7,7 @@
     {% if demo_mode %}<div class="demo-banner"><strong>Demonstration environment</strong> · Fictional records only</div>{% endif %}
     <h1>Sign in to your shift</h1>
     <p>Use your named staff account. Do not share passwords.</p>
-    {% if form.errors %}<div class="message error">Username or password not accepted.</div>{% endif %}
+    {% if lockout_minutes %}<div class="message error"><strong>Too many failed attempts.</strong> This username is locked for up to {{ lockout_minutes }} minutes. Contact the system custodian if you are locked out during a shift.</div>{% elif form.errors %}<div class="message error">Username or password not accepted.</div>{% endif %}
     <form method="post" class="form-stack">
       {% csrf_token %}
       <label>Username {{ form.username }}</label>

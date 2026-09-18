@@ -1,32 +1,41 @@
 import csv
 import hashlib
 import io
-import json
+import mimetypes
 import uuid
 from datetime import timedelta
 from decimal import Decimal
+from pathlib import Path
 
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import authenticate, login
 from django.contrib.auth.decorators import login_required
-from django.core.exceptions import PermissionDenied, ValidationError
+from django.contrib.auth.views import LoginView
+from django.core.exceptions import ValidationError
+from django.core.paginator import Paginator
 from django.db import connection, transaction
-from django.db.models import Count, F, Q, Sum
-from django.http import Http404, HttpResponse, JsonResponse
+from django.db.models import Case, Count, DecimalField, F, IntegerField, Max, Q, Sum, Value, When
+from django.db.models.functions import Coalesce
+from django.http import FileResponse, Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
+from django.utils.http import content_disposition_header
 
 from .forms import (
     AdmissionForm,
+    ClinicalAttachmentForm,
     ClinicalNoteForm,
+    CreditNoteForm,
     CsvImportForm,
     EncounterForm,
     PatientForm,
     PaymentForm,
     PharmacyBasketForm,
     PrescriptionForm,
+    PrescriptionFormSet,
     PurchaseOrderForm,
+    PurchaseOrderLineFormSet,
     ServiceOrderForm,
     ServiceResultForm,
     ShiftCloseForm,
@@ -35,18 +44,24 @@ from .forms import (
 from .models import (
     Admission,
     AuditEvent,
+    Bed,
     CashShift,
     CatalogueItem,
+    ClinicalAttachment,
     ClinicalNote,
     ClinicianPayable,
+    CreditNote,
     Encounter,
     ExceptionRecord,
     EyeCase,
     EyeSession,
     ImportJob,
     Invoice,
+    InvoiceLine,
+    LoginAttempt,
     Patient,
     Payment,
+    PaymentAllocation,
     PharmacyOrder,
     Prescription,
     PrescriptionItem,
@@ -60,14 +75,61 @@ from .models import (
     StockMovement,
     Ward,
 )
+from .pdf_reports import build_financial_report_pdf, build_patient_access_pdf
 from .permissions import role_required, user_role
-from .services import approve_purchase_order, audit, deterministic_key, dispense_order, prepare_pharmacy_order, record_payment
+from .services import (
+    approve_credit_note,
+    approve_purchase_order,
+    audit,
+    complete_eye_case,
+    dispense_order,
+    prepare_pharmacy_order,
+    record_payment,
+    verify_mpesa,
+)
+
+ZERO_MONEY = Value(Decimal("0.00"), output_field=DecimalField(max_digits=14, decimal_places=2))
+ZERO_QUANTITY = Value(Decimal("0.000"), output_field=DecimalField(max_digits=14, decimal_places=3))
 
 
 def _validation_message(exc):
     if hasattr(exc, "messages"):
         return " ".join(exc.messages)
     return str(exc)
+
+
+def batches_with_balance(queryset=None):
+    """Stock batches carrying their ledger balance as one aggregated query.
+
+    Reading ``StockBatch.quantity_on_hand`` inside a loop or template issues one
+    SUM per row; on a real catalogue that is hundreds of queries per page.
+    """
+    base = queryset if queryset is not None else StockBatch.objects.all()
+    return base.select_related("item").annotate(
+        on_hand=Coalesce(Sum("movements__quantity_delta"), ZERO_QUANTITY)
+    )
+
+
+def invoiced_total(invoices):
+    """Billed value of an invoice queryset in one query."""
+    return InvoiceLine.objects.filter(invoice__in=invoices).aggregate(v=Sum("line_total"))["v"] or Decimal("0.00")
+
+
+def outstanding_receivables():
+    """Posted-but-unsettled value: billed − approved credits − valid allocations.
+
+    Three aggregates regardless of ledger size, in place of two queries per
+    open invoice.
+    """
+    open_invoices = Invoice.objects.exclude(status__in=[Invoice.Status.DRAFT, Invoice.Status.PAID])
+    billed = invoiced_total(open_invoices)
+    credited = CreditNote.objects.filter(
+        invoice__in=open_invoices, status=CreditNote.Status.APPROVED
+    ).aggregate(v=Sum("amount"))["v"] or Decimal("0.00")
+    paid = PaymentAllocation.objects.filter(
+        invoice__in=open_invoices, payment__status=Payment.Status.VALID
+    ).aggregate(v=Sum("amount"))["v"] or Decimal("0.00")
+    return billed - credited - paid
 
 
 def health(request):
@@ -94,7 +156,7 @@ def dashboard(request):
         "open_encounters": Encounter.objects.exclude(status=Encounter.Status.CLOSED).count(),
         "today_patients": Patient.objects.filter(created_at__gte=start).count(),
         "open_orders": PharmacyOrder.objects.exclude(status__in=[PharmacyOrder.Status.DISPENSED, PharmacyOrder.Status.CANCELLED]).count(),
-        "low_stock": [b for b in StockBatch.objects.select_related("item").all() if b.quantity_on_hand <= b.item.reorder_level][:8],
+        "low_stock": batches_with_balance().filter(on_hand__lte=F("item__reorder_level"))[:8],
         "exceptions": ExceptionRecord.objects.exclude(status=ExceptionRecord.Status.RESOLVED).order_by("-created_at")[:6],
         "queue": Encounter.objects.exclude(status=Encounter.Status.CLOSED).select_related("patient").order_by("created_at")[:8],
         "my_shift": CashShift.objects.filter(cashier=request.user, status=CashShift.Status.OPEN).first(),
@@ -103,12 +165,12 @@ def dashboard(request):
         valid_payments = Payment.objects.filter(status=Payment.Status.VALID, received_at__gte=start)
         posted = Invoice.objects.filter(posted_at__gte=start).exclude(status=Invoice.Status.DRAFT)
         context.update({
-            "net_billed": sum((invoice.total for invoice in posted), Decimal("0.00")),
+            "net_billed": invoiced_total(posted),
             "verified_collections": valid_payments.filter(Q(method=Payment.Method.CASH) | Q(verification_status__in=[Payment.Verification.MANUAL, Payment.Verification.PROVIDER])).aggregate(v=Sum("amount"))["v"] or Decimal("0.00"),
             "unverified_mpesa": valid_payments.filter(method=Payment.Method.MPESA, verification_status=Payment.Verification.UNVERIFIED).aggregate(v=Sum("amount"))["v"] or Decimal("0.00"),
-            "receivables": sum((invoice.balance for invoice in Invoice.objects.exclude(status__in=[Invoice.Status.DRAFT, Invoice.Status.PAID])), Decimal("0.00")),
+            "receivables": outstanding_receivables(),
             "occupied_beds": Admission.objects.filter(discharged_at__isnull=True).count(),
-            "active_beds": sum(w.beds.filter(active=True).count() for w in Ward.objects.filter(active=True)),
+            "active_beds": Bed.objects.filter(active=True, ward__active=True).count(),
             "eye_waiting": EyeCase.objects.filter(status="waiting").count(),
         })
     return render(request, "hospital/dashboard.html", context)
@@ -119,8 +181,16 @@ def patient_list(request):
     query = request.GET.get("q", "").strip()
     patients = Patient.objects.all()
     if query:
-        patients = patients.filter(Q(patient_number__icontains=query) | Q(first_name__icontains=query) | Q(last_name__icontains=query) | Q(phone__icontains=query))
-    return render(request, "hospital/patient_list.html", {"patients": patients[:100], "query": query})
+        patients = patients.filter(
+            Q(patient_number__icontains=query)
+            | Q(first_name__icontains=query)
+            | Q(last_name__icontains=query)
+            | Q(phone__icontains=query)
+            | Q(id_number__iexact=query)
+            | Q(guardian_phone__icontains=query)
+        )
+    page = Paginator(patients, 50).get_page(request.GET.get("page"))
+    return render(request, "hospital/patient_list.html", {"patients": page, "page": page, "query": query})
 
 
 @role_required(Role.RECEPTION)
@@ -154,7 +224,83 @@ def patient_detail(request, pk):
     audit(request.user, "patient.viewed", patient, request=request)
     invoices = patient.invoices.all() if role in {Role.RECEPTION, Role.OWNER} else []
     notes = ClinicalNote.objects.filter(encounter__patient=patient) if role in {Role.CLINICIAN, Role.NURSE, Role.OWNER} else []
-    return render(request, "hospital/patient_detail.html", {"patient": patient, "invoices": invoices, "notes": notes, "encounters": patient.encounters.all()})
+    attachments = patient.attachments.select_related("uploaded_by", "encounter") if role in {Role.CLINICIAN, Role.NURSE, Role.OWNER} else []
+    return render(request, "hospital/patient_detail.html", {
+        "patient": patient,
+        "invoices": invoices,
+        "notes": notes,
+        "encounters": patient.encounters.all(),
+        "attachments": attachments,
+        "attachment_form": ClinicalAttachmentForm() if role in {Role.CLINICIAN, Role.NURSE} else None,
+    })
+
+
+@role_required(Role.CLINICIAN, Role.NURSE)
+def patient_attachment_upload(request, pk):
+    if request.method != "POST":
+        raise Http404
+    patient = get_object_or_404(Patient, pk=pk)
+    form = ClinicalAttachmentForm(request.POST, request.FILES)
+    if form.is_valid():
+        attachment = form.save(commit=False)
+        attachment.patient = patient
+        attachment.original_name = Path(attachment.file.name).name[:255]
+        attachment.uploaded_by = request.user
+        attachment.save()
+        audit(request.user, "clinical_attachment.uploaded", attachment, after={"name": attachment.original_name}, request=request)
+        messages.success(request, "Clinical attachment uploaded securely.")
+    else:
+        messages.error(request, " ".join(
+            error for errors in form.errors.values() for error in errors
+        ))
+    return redirect("patient_detail", pk=patient.pk)
+
+
+@role_required(Role.CLINICIAN, Role.NURSE, Role.OWNER)
+def patient_attachment_download(request, pk):
+    attachment = get_object_or_404(ClinicalAttachment.objects.select_related("patient"), pk=pk)
+    content_type = mimetypes.guess_type(attachment.original_name)[0] or "application/octet-stream"
+    attachment.file.open("rb")
+    response = FileResponse(attachment.file, content_type=content_type)
+    response["Content-Disposition"] = content_disposition_header(True, attachment.original_name)
+    response["X-Content-Type-Options"] = "nosniff"
+    audit(request.user, "clinical_attachment.downloaded", attachment, request=request)
+    return response
+
+
+@role_required(Role.RECEPTION, Role.OWNER)
+def patient_access_pdf(request, pk):
+    patient = get_object_or_404(Patient.objects.prefetch_related("encounters__clinical_notes__author"), pk=pk)
+    pdf = build_patient_access_pdf(
+        patient=patient,
+        hospital_name=settings.HOSPITAL_NAME,
+        generated_by=str(request.user.staff_profile),
+    )
+    response = HttpResponse(pdf, content_type="application/pdf")
+    response["Content-Disposition"] = content_disposition_header(
+        True, f"KFBH-patient-record-{patient.patient_number}.pdf"
+    )
+    response["X-Content-Type-Options"] = "nosniff"
+    audit(request.user, "patient.exported_pdf", patient, request=request)
+    return response
+
+
+@role_required(Role.RECEPTION, Role.OWNER)
+def credit_note_create(request, pk):
+    invoice = get_object_or_404(Invoice.objects.select_related("patient"), pk=pk)
+    form = CreditNoteForm(request.POST or None)
+    if request.method == "POST" and form.is_valid():
+        note = form.save(commit=False)
+        if note.amount > invoice.balance:
+            form.add_error("amount", "Credit cannot exceed the current invoice balance.")
+        else:
+            note.invoice = invoice
+            note.requested_by = request.user
+            note.save()
+            audit(request.user, "credit_note.requested", note, reason=note.reason, request=request)
+            messages.success(request, "Credit note sent for independent review.")
+            return redirect("patient_detail", pk=invoice.patient_id) if invoice.patient_id else redirect("reports")
+    return render(request, "hospital/credit_note_form.html", {"form": form, "invoice": invoice})
 
 
 @role_required(Role.RECEPTION, Role.CLINICIAN)
@@ -175,9 +321,25 @@ def encounter_create(request, patient_id):
     return render(request, "hospital/encounter_form.html", {"form": form, "patient": patient})
 
 
+#: Clinical priority. Never sort the queue on the raw ``urgency`` string —
+#: alphabetically "routine" precedes "urgent", which pushes urgent patients
+#: below routine ones.
+TRIAGE_RANK = Case(
+    When(urgency="emergency", then=Value(0)),
+    When(urgency="urgent", then=Value(1)),
+    default=Value(2),
+    output_field=IntegerField(),
+)
+
+
 @role_required(Role.RECEPTION, Role.CLINICIAN, Role.NURSE, Role.LAB)
 def queue(request):
-    encounters = Encounter.objects.exclude(status=Encounter.Status.CLOSED).select_related("patient", "assigned_clinician").order_by("urgency", "created_at")
+    encounters = (
+        Encounter.objects.exclude(status=Encounter.Status.CLOSED)
+        .select_related("patient", "assigned_clinician")
+        .annotate(triage_rank=TRIAGE_RANK)
+        .order_by("triage_rank", "created_at")
+    )
     return render(request, "hospital/queue.html", {"encounters": encounters})
 
 
@@ -185,45 +347,75 @@ def queue(request):
 def clinical_note(request, encounter_id):
     encounter = get_object_or_404(Encounter.objects.select_related("patient"), pk=encounter_id)
     draft = ClinicalNote.objects.filter(encounter=encounter, author=request.user, status=ClinicalNote.Status.DRAFT).first()
-    form = ClinicalNoteForm(request.POST or None, instance=draft)
+    form = ClinicalNoteForm(request.POST or None, instance=draft, initial={"expected_version": draft.version if draft else 0})
     if request.method == "POST" and form.is_valid():
-        note = form.save(commit=False)
-        if not note.pk:
-            note.encounter = encounter
-            note.author = request.user
-            note.version = (ClinicalNote.objects.filter(encounter=encounter, author=request.user).aggregate(v=models_max_version())["v"] or 0) + 1
-        note.save()
-        if request.POST.get("action") == "sign":
-            note.sign()
-            encounter.status = Encounter.Status.PHARMACY
-            encounter.save(update_fields=["status", "updated_at"])
-            audit(request.user, "clinical_note.signed", note, request=request)
-            messages.success(request, "Clinical note signed. Future changes require an attributed amendment.")
-        else:
-            audit(request.user, "clinical_note.saved", note, request=request)
-            messages.success(request, "Draft saved on the server.")
-        return redirect("patient_detail", pk=encounter.patient_id)
+        with transaction.atomic():
+            # Serialise note numbering on the encounter. Two tabs can no longer
+            # calculate the same next version and collide on the unique key.
+            locked_encounter = Encounter.objects.select_for_update().get(pk=encounter.pk)
+            current_draft = ClinicalNote.objects.select_for_update().filter(
+                encounter=locked_encounter,
+                author=request.user,
+                status=ClinicalNote.Status.DRAFT,
+            ).first()
+            expected_version = form.cleaned_data.get("expected_version") or 0
+            if current_draft and expected_version not in {0, current_draft.version}:
+                form.add_error(None, "This note changed in another tab. Reload before saving again.")
+            else:
+                locked_form = ClinicalNoteForm(request.POST, instance=current_draft)
+                if locked_form.is_valid():
+                    note = locked_form.save(commit=False)
+                    if not note.pk:
+                        note.encounter = locked_encounter
+                        note.author = request.user
+                        note.version = (
+                            ClinicalNote.objects.filter(
+                                encounter=locked_encounter, author=request.user
+                            ).aggregate(v=Max("version"))["v"]
+                            or 0
+                        ) + 1
+                    note.save()
+                    if request.POST.get("action") == "sign":
+                        note.sign()
+                        locked_encounter.status = Encounter.Status.PHARMACY
+                        locked_encounter.save(update_fields=["status", "updated_at"])
+                        audit(request.user, "clinical_note.signed", note, request=request)
+                        messages.success(request, "Clinical note signed. Future changes require an attributed amendment.")
+                    else:
+                        audit(request.user, "clinical_note.saved", note, request=request)
+                        messages.success(request, "Draft saved on the server.")
+                    return redirect("patient_detail", pk=encounter.patient_id)
     return render(request, "hospital/clinical_note_form.html", {"form": form, "encounter": encounter, "draft": draft})
 
 
 @role_required(Role.CLINICIAN)
 def prescription_create(request, encounter_id):
     encounter = get_object_or_404(Encounter.objects.select_related("patient"), pk=encounter_id)
-    form = PrescriptionForm(request.POST or None)
-    if request.method == "POST" and form.is_valid():
+    # Accept the original single-line payload as well as the new formset so
+    # bookmarked clients and downtime back-entry tools keep working.
+    legacy_payload = request.method == "POST" and "items-TOTAL_FORMS" not in request.POST
+    form = PrescriptionForm(request.POST or None) if legacy_payload else None
+    formset = PrescriptionFormSet(request.POST or None, prefix="items")
+    is_valid = form.is_valid() if legacy_payload else formset.is_valid()
+    if request.method == "POST" and is_valid:
+        lines = [form.cleaned_data] if legacy_payload else [
+            row.cleaned_data for row in formset
+            if row.cleaned_data and not row.cleaned_data.get("DELETE")
+        ]
         with transaction.atomic():
             prescription = Prescription.objects.create(encounter=encounter, prescriber=request.user, signed_at=timezone.now())
-            PrescriptionItem.objects.create(
-                prescription=prescription,
-                product=form.cleaned_data["product"], strength=form.cleaned_data["strength"],
-                dose=form.cleaned_data["dose"], route=form.cleaned_data["route"], frequency=form.cleaned_data["frequency"],
-                duration=form.cleaned_data["duration"], quantity_base_units=form.cleaned_data["quantity_base_units"],
-                instructions=form.cleaned_data["instructions"],
-            )
+            for line in lines:
+                PrescriptionItem.objects.create(
+                    prescription=prescription,
+                    product=line["product"], strength=line["strength"],
+                    dose=line["dose"], route=line["route"], frequency=line["frequency"],
+                    duration=line["duration"], quantity_base_units=line["quantity_base_units"],
+                    instructions=line["instructions"],
+                )
             audit(request.user, "prescription.signed", prescription, request=request)
-        messages.success(request, "Prescription signed and sent to pharmacy for pricing.")
+        messages.success(request, f"Prescription with {len(lines)} item(s) signed and sent to pharmacy for pricing.")
         return redirect("patient_detail", pk=encounter.patient_id)
-    return render(request, "hospital/prescription_form.html", {"form": form, "encounter": encounter})
+    return render(request, "hospital/prescription_form.html", {"form": form, "formset": formset, "encounter": encounter})
 
 
 @role_required(Role.CLINICIAN)
@@ -241,11 +433,6 @@ def service_order_create(request, encounter_id):
         messages.success(request, f"{order.service.name} sent to {order.service.department}.")
         return redirect("departments")
     return render(request, "hospital/service_order_form.html", {"form": form, "encounter": encounter})
-
-
-def models_max_version():
-    from django.db.models import Max
-    return Max("version")
 
 
 @role_required(Role.PHARMACY, Role.RECEPTION)
@@ -382,34 +569,133 @@ def shift_manage(request):
 
 @role_required(Role.PHARMACY, Role.PROCUREMENT, Role.OWNER)
 def stock_view(request):
-    batches = StockBatch.objects.select_related("item").order_by("item__name", "expiry_date")
-    movements = StockMovement.objects.select_related("batch__item", "entered_by")[:50]
+    batches = batches_with_balance().order_by("item__name", "expiry_date")
+    # entered_by.staff_profile is read per row in the template; without it that
+    # is one extra query per movement.
+    movements = StockMovement.objects.select_related("batch__item", "entered_by__staff_profile")[:50]
     return render(request, "hospital/stock.html", {"batches": batches, "movements": movements})
 
 
 @role_required(Role.OWNER, Role.REVIEWER)
 def reports(request):
-    days = int(request.GET.get("days", "7")) if request.GET.get("days", "7").isdigit() else 7
-    start = timezone.now() - timedelta(days=min(days, 365))
+    context = _report_context(request.GET.get("days", "7"))
+    context.update({
+        "unverified_payments": Payment.objects.filter(
+            method=Payment.Method.MPESA,
+            status=Payment.Status.VALID,
+            verification_status=Payment.Verification.UNVERIFIED,
+        ).select_related("received_by").order_by("-received_at")[:50],
+        "pending_credits": CreditNote.objects.filter(
+            status=CreditNote.Status.PENDING
+        ).select_related("invoice", "requested_by").order_by("-created_at")[:50],
+    })
+    return render(request, "hospital/reports.html", context)
+
+
+def _report_context(days_value):
+    days = int(days_value) if str(days_value).isdigit() else 7
+    days = max(1, min(days, 365))
+    start = timezone.now() - timedelta(days=days)
     invoices = Invoice.objects.filter(posted_at__gte=start).exclude(status=Invoice.Status.DRAFT)
     payments = Payment.objects.filter(received_at__gte=start, status=Payment.Status.VALID)
-    context = {
+    return {
         "days": days,
-        "net_billed": sum((invoice.total for invoice in invoices), Decimal("0.00")),
+        "net_billed": invoiced_total(invoices),
         "verified_collections": payments.filter(Q(method=Payment.Method.CASH) | Q(verification_status__in=[Payment.Verification.MANUAL, Payment.Verification.PROVIDER])).aggregate(v=Sum("amount"))["v"] or Decimal("0.00"),
         "unverified_mpesa": payments.filter(method=Payment.Method.MPESA, verification_status=Payment.Verification.UNVERIFIED).aggregate(v=Sum("amount"))["v"] or Decimal("0.00"),
-        "receivables": sum((invoice.balance for invoice in Invoice.objects.exclude(status__in=[Invoice.Status.DRAFT, Invoice.Status.PAID])), Decimal("0.00")),
+        "receivables": outstanding_receivables(),
         "department_activity": Encounter.objects.filter(created_at__gte=start).values("department").annotate(total=Count("id")).order_by("-total"),
         "recent_invoices": invoices.select_related("patient").order_by("-posted_at")[:25],
         "last_refresh": timezone.now(),
     }
-    return render(request, "hospital/reports.html", context)
+
+
+@role_required(Role.OWNER, Role.REVIEWER)
+def report_download_pdf(request):
+    context = _report_context(request.GET.get("days", "7"))
+    pdf = build_financial_report_pdf(
+        context=context,
+        hospital_name=settings.HOSPITAL_NAME,
+        generated_by=str(request.user.staff_profile),
+    )
+    response = HttpResponse(pdf, content_type="application/pdf")
+    response["Content-Disposition"] = content_disposition_header(
+        True, f"KFBH-owner-report-{context['days']}-days.pdf"
+    )
+    response["X-Content-Type-Options"] = "nosniff"
+    audit(request.user, "report.exported_pdf", request.user.staff_profile, after={"days": context["days"]}, request=request)
+    return response
+
+
+@role_required(Role.OWNER, Role.REVIEWER)
+def payment_verify(request, pk):
+    if request.method != "POST":
+        raise Http404
+    try:
+        payment = verify_mpesa(
+            actor=request.user,
+            payment_id=pk,
+            provider_confirmed=request.POST.get("provider_confirmed") == "1",
+            request=request,
+        )
+        ExceptionRecord.objects.filter(
+            category="unverified_mpesa",
+            summary__icontains=payment.reference,
+        ).update(status=ExceptionRecord.Status.RESOLVED, resolved_at=timezone.now(), resolution="Payment verified through the reviewer workflow.")
+        messages.success(request, f"M-PESA {payment.reference} verified independently.")
+    except ValidationError as exc:
+        messages.error(request, _validation_message(exc))
+    return redirect("reports")
+
+
+@role_required(Role.REVIEWER, Role.OWNER)
+def credit_note_review(request, pk):
+    if request.method != "POST":
+        raise Http404
+    try:
+        note = approve_credit_note(
+            actor=request.user,
+            credit_note_id=pk,
+            approve=request.POST.get("decision") == "approve",
+            request=request,
+        )
+        messages.success(request, f"Credit note {note.get_status_display().lower()}.")
+    except ValidationError as exc:
+        messages.error(request, _validation_message(exc))
+    return redirect("reports")
 
 
 @role_required(Role.REVIEWER, Role.OWNER)
 def exceptions(request):
     records = ExceptionRecord.objects.select_related("assigned_to").order_by("status", "-severity", "-created_at")
     return render(request, "hospital/exceptions.html", {"records": records})
+
+
+@role_required(Role.OWNER, Role.REVIEWER)
+def audit_review(request):
+    records = AuditEvent.objects.select_related("actor__staff_profile")
+    query = request.GET.get("q", "").strip()
+    action = request.GET.get("action", "").strip()
+    role = request.GET.get("role", "").strip()
+    if query:
+        records = records.filter(
+            Q(entity_id__icontains=query)
+            | Q(reason__icontains=query)
+            | Q(actor__username__icontains=query)
+        )
+    if action:
+        records = records.filter(action__icontains=action)
+    if role:
+        records = records.filter(effective_role=role)
+    page = Paginator(records, 75).get_page(request.GET.get("page"))
+    return render(request, "hospital/audit_review.html", {
+        "records": page,
+        "page": page,
+        "query": query,
+        "action_filter": action,
+        "role_filter": role,
+        "role_choices": Role.choices,
+    })
 
 
 @role_required(Role.CLINICIAN, Role.NURSE, Role.LAB)
@@ -424,13 +710,16 @@ def service_order_update(request, pk):
     form = ServiceResultForm(request.POST or None, instance=order)
     if request.method == "POST" and form.is_valid():
         updated = form.save(commit=False)
-        updated.performer = request.user
-        if updated.status == ServiceOrder.Status.RELEASED:
-            updated.released_at = timezone.now()
-        updated.save()
-        audit(request.user, f"service_order.{updated.status}", updated, request=request)
-        messages.success(request, "Department work item updated.")
-        return redirect("departments")
+        if updated.status == ServiceOrder.Status.RELEASED and order.requested_by_id == request.user.id:
+            form.add_error("status", "The requester cannot release their own result. Send it for independent review.")
+        else:
+            updated.performer = request.user
+            if updated.status == ServiceOrder.Status.RELEASED:
+                updated.released_at = timezone.now()
+            updated.save()
+            audit(request.user, f"service_order.{updated.status}", updated, request=request)
+            messages.success(request, "Department work item updated.")
+            return redirect("departments")
     return render(request, "hospital/service_result_form.html", {"form": form, "order": order})
 
 
@@ -464,6 +753,18 @@ def eye_clinic(request):
     return render(request, "hospital/eye.html", {"waiting": waiting, "sessions": sessions, "payables": payables})
 
 
+@role_required(Role.EYE, Role.CLINICIAN)
+def eye_case_complete(request, pk):
+    if request.method != "POST":
+        raise Http404
+    try:
+        case = complete_eye_case(actor=request.user, case_id=pk, request=request)
+        messages.success(request, f"Case for {case.patient.full_name} completed and one clinician payable accrued.")
+    except ValidationError as exc:
+        messages.error(request, _validation_message(exc))
+    return redirect("eye_clinic")
+
+
 def models_eye_count():
     from django.db.models import Case, IntegerField, When
     return Case(When(cases__eye="both", then=2), default=1, output_field=IntegerField())
@@ -484,21 +785,27 @@ def purchasing(request):
 @role_required(Role.PROCUREMENT)
 def purchase_order_create(request):
     form = PurchaseOrderForm(request.POST or None)
-    if request.method == "POST" and form.is_valid():
+    lines = PurchaseOrderLineFormSet(request.POST or None, prefix="lines")
+    if request.method == "POST" and form.is_valid() and lines.is_valid():
+        line_data = [
+            row.cleaned_data for row in lines
+            if row.cleaned_data and not row.cleaned_data.get("DELETE")
+        ]
         with transaction.atomic():
             order = form.save(commit=False)
             order.requested_by = request.user
             order.save()
-            PurchaseOrderLine.objects.create(
-                order=order,
-                item=form.cleaned_data["product"],
-                quantity_base_units=form.cleaned_data["quantity_base_units"],
-                quoted_unit_cost=form.cleaned_data["quoted_unit_cost"],
-            )
+            for line in line_data:
+                PurchaseOrderLine.objects.create(
+                    order=order,
+                    item=line["product"],
+                    quantity_base_units=line["quantity_base_units"],
+                    quoted_unit_cost=line["quoted_unit_cost"],
+                )
             audit(request.user, "purchase_order.requested", order, request=request)
-        messages.success(request, f"Purchase request {order.order_number} submitted for independent review.")
+        messages.success(request, f"Purchase request {order.order_number} with {len(line_data)} line(s) submitted for independent review.")
         return redirect("purchasing")
-    return render(request, "hospital/purchase_order_form.html", {"form": form})
+    return render(request, "hospital/purchase_order_form.html", {"form": form, "formset": lines})
 
 
 @role_required(Role.REVIEWER, Role.OWNER)
@@ -616,3 +923,23 @@ def screen_unlock(request):
 @login_required
 def downtime_forms(request):
     return render(request, "hospital/downtime_forms.html")
+
+
+class ThrottledLoginView(LoginView):
+    """Sign-in with a per-username lockout.
+
+    Django authenticates in constant work per attempt and never rate-limits, so
+    an unauthenticated workstation on the ward LAN can try passwords for as long
+    as it likes. Failures are counted in the database so a service restart does
+    not hand an attacker a clean slate.
+    """
+
+    template_name = "registration/login.html"
+
+    def post(self, request, *args, **kwargs):
+        username = (request.POST.get("username") or "").strip()
+        if LoginAttempt.is_locked(username):
+            context = self.get_context_data(form=self.get_form())
+            context["lockout_minutes"] = LoginAttempt.LOCKOUT_WINDOW_MINUTES
+            return self.render_to_response(context, status=429)
+        return super().post(request, *args, **kwargs)

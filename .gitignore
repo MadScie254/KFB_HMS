@@ -2,6 +2,8 @@
 __pycache__/
 *.py[cod]
 *.sqlite3
+logs/
+media/
 *.log
 .env
 media/
@@ -11,4 +13,3 @@ backups/
 .pytest_cache/
 coverage.xml
 .coverage
-

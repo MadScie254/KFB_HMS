@@ -1,0 +1,9 @@
+<div class="repeatable-row" data-form-row>
+  <div class="repeatable-fields">
+    {% include "hospital/_form_fields.html" with form=line_form %}
+  </div>
+  {% if line_form.DELETE %}<div class="delete-field">{{ line_form.DELETE }}</div>{% endif %}
+  <button class="icon-button danger-action" type="button" data-remove-form aria-label="Remove this line" title="Remove line">
+    {% include "hospital/_icon.html" with name="trash" %}
+  </button>
+</div>

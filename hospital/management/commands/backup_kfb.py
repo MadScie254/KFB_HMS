@@ -31,8 +31,12 @@ class Command(BaseCommand):
             work = Path(temp_dir)
             database_file = work / ("database.sqlite3" if connection.vendor == "sqlite" else "database.dump")
             if connection.vendor == "sqlite":
-                connection.close()
-                shutil.copy2(Path(settings.DATABASES["default"]["NAME"]), database_file)
+                # VACUUM INTO takes a consistent snapshot through SQLite itself.
+                # A plain file copy can capture a torn page set while another
+                # Waitress thread is mid-write, and silently omits the -wal
+                # sidecar, so the restored copy loses committed transactions.
+                with connection.cursor() as cursor:
+                    cursor.execute("VACUUM INTO %s", [str(database_file)])
             elif connection.vendor == "postgresql":
                 config = settings.DATABASES["default"]
                 env = os.environ.copy()

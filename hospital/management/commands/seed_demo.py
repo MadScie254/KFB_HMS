@@ -5,12 +5,9 @@ from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
-from django.utils import timezone
 
 from hospital.models import (
-    Admission,
     Bed,
-    CashShift,
     CatalogueItem,
     Encounter,
     ExceptionRecord,
@@ -26,7 +23,6 @@ from hospital.models import (
     Ward,
 )
 from hospital.services import prepare_pharmacy_order
-
 
 DEMO_PASSWORD = "Demo-Only-2026!"
 

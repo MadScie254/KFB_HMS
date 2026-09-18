@@ -2,22 +2,22 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.contrib.auth.models import User
-from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.exceptions import ValidationError
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
 from .models import (
-    CatalogueItem,
     CashShift,
+    CatalogueItem,
     ClinicalNote,
     CreditNote,
     Encounter,
     EyeCase,
+    ImportJob,
     Invoice,
     InvoiceLine,
-    ImportJob,
     Patient,
     Payment,
     PaymentAllocation,
@@ -40,8 +40,9 @@ from .services import (
 )
 
 
-@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
-class WorkflowTests(TestCase):
+class HospitalFixtureMixin:
+    """Shared demo fixture: one of each role, a priced product and a stocked batch."""
+
     password = "Safe-Test-Password-2026!"
 
     def make_user(self, username, role):
@@ -70,6 +71,10 @@ class WorkflowTests(TestCase):
 
     def prepare(self, qty=15):
         return prepare_pharmacy_order(actor=self.pharmacist, customer_name="Walk-in Test", patient=None, items=[(self.product, Decimal(qty))])
+
+
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
+class WorkflowTests(HospitalFixtureMixin, TestCase):
 
     def test_walk_in_payment_and_dispense_reconcile(self):
         order = self.prepare(15)
@@ -125,7 +130,7 @@ class WorkflowTests(TestCase):
         self.assertEqual(payment.unapplied_amount, Decimal("1000"))
 
     def test_cash_shift_equation_excludes_mpesa(self):
-        cash = Payment.objects.create(amount=8000, method="cash", received_by=self.reception, shift=self.shift, idempotency_key="cash-shift-test")
+        Payment.objects.create(amount=8000, method="cash", received_by=self.reception, shift=self.shift, idempotency_key="cash-shift-test")
         Payment.objects.create(amount=5000, method="mpesa", reference="MPESA-UNIQUE", verification_status="unverified", received_by=self.reception, shift=self.shift, idempotency_key="mpesa-shift-test")
         self.shift.cash_refunds = 500
         self.shift.transfers_out = 6000
@@ -231,3 +236,140 @@ class WorkflowTests(TestCase):
         prescription.items.get().refresh_from_db()
         self.assertEqual(prescription.items.get().dispensed_quantity, Decimal("3"))
         self.assertEqual(self.batch.quantity_on_hand, Decimal("197"))
+
+
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
+class RegressionTests(HospitalFixtureMixin, TestCase):
+    """Regressions for defects found in the September 2026 audit.
+
+    Each test fails against the pre-audit code; see docs/AUDIT_2026-09-18.md.
+    """
+
+    # C1 — the lock screen was a no-op: the middleware read resolver_match
+    # before URL resolution, and unlocked_required was applied to no view.
+    def test_locked_session_cannot_reach_clinical_screens(self):
+        self.client.login(username=self.clinician.username, password=self.password)
+        profile = self.clinician.staff_profile
+        profile.locked_at = timezone.now()
+        profile.save(update_fields=["locked_at"])
+        response = self.client.get(reverse("queue"))
+        self.assertRedirects(response, reverse("screen_unlock"), fetch_redirect_response=False)
+        self.assertEqual(self.client.get(reverse("screen_unlock")).status_code, 200)
+
+    def test_unlocking_restores_access(self):
+        self.client.login(username=self.clinician.username, password=self.password)
+        profile = self.clinician.staff_profile
+        profile.locked_at = timezone.now()
+        profile.save(update_fields=["locked_at"])
+        self.client.post(reverse("screen_unlock"), {"password": self.password})
+        self.assertEqual(self.client.get(reverse("queue")).status_code, 200)
+
+    # C2 — two lines for the same product each read the untouched batch
+    # balance, so one order could dispense more than the hospital held.
+    def test_repeated_product_lines_cannot_overdraw_a_batch(self):
+        order = prepare_pharmacy_order(
+            actor=self.pharmacist, customer_name="Walk-in", patient=None,
+            items=[(self.product, Decimal("150")), (self.product, Decimal("150"))])
+        record_payment(actor=self.reception, invoice_id=order.invoice_id, amount=Decimal("1500"),
+                       method="cash", reference="", idempotency_key="overdraw-pay")
+        with self.assertRaisesMessage(ValidationError, "Insufficient valid stock"):
+            dispense_order(actor=self.pharmacist, order_id=order.pk, idempotency_key="overdraw-disp")
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity_on_hand, Decimal("200"))
+
+    def test_repeated_product_lines_within_stock_still_dispense(self):
+        order = prepare_pharmacy_order(
+            actor=self.pharmacist, customer_name="Walk-in", patient=None,
+            items=[(self.product, Decimal("60")), (self.product, Decimal("60"))])
+        record_payment(actor=self.reception, invoice_id=order.invoice_id, amount=Decimal("600"),
+                       method="cash", reference="", idempotency_key="split-pay")
+        dispense_order(actor=self.pharmacist, order_id=order.pk, idempotency_key="split-disp")
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity_on_hand, Decimal("80"))
+
+    # C3 — order_by("urgency") sorts alphabetically, placing urgent after routine.
+    def test_queue_ranks_urgent_above_routine(self):
+        for urgency in ["routine", "urgent", "emergency"]:
+            Encounter.objects.create(
+                patient=self.patient, started_by=self.reception, urgency=urgency,
+                emergency_override_reason="Documented" if urgency == "emergency" else "")
+        self.client.login(username=self.clinician.username, password=self.password)
+        listed = self.client.get(reverse("queue")).context["encounters"]
+        self.assertEqual([e.urgency for e in listed], ["emergency", "urgent", "routine"])
+
+    # C4 — save() guarded the audit trail; the ORM bulk paths did not.
+    def test_audit_events_reject_bulk_update_and_delete(self):
+        from .models import AuditEvent
+        event = AuditEvent.objects.create(actor=self.owner, action="probe", entity_type="Test", entity_id="1")
+        with self.assertRaises(ValidationError):
+            AuditEvent.objects.filter(pk=event.pk).update(action="tampered")
+        with self.assertRaises(ValidationError):
+            AuditEvent.objects.filter(pk=event.pk).delete()
+        with self.assertRaises(ValidationError):
+            event.delete()
+        event.refresh_from_db()
+        self.assertEqual(event.action, "probe")
+
+    # C5 — unlimited password attempts against an unauthenticated endpoint.
+    def test_repeated_failed_logins_lock_the_username(self):
+        from .models import LoginAttempt
+        for _ in range(LoginAttempt.LOCKOUT_THRESHOLD):
+            self.client.post(reverse("login"), {"username": "clinician", "password": "wrong"})
+        blocked = self.client.post(reverse("login"), {"username": "clinician", "password": "wrong"})
+        self.assertEqual(blocked.status_code, 429)
+        correct = self.client.post(reverse("login"), {"username": "clinician", "password": self.password})
+        self.assertEqual(correct.status_code, 429, "A locked username must not fall through on a correct password")
+
+    def test_successful_login_clears_earlier_failures(self):
+        from .models import LoginAttempt
+        self.client.post(reverse("login"), {"username": "clinician", "password": "wrong"})
+        self.client.post(reverse("login"), {"username": "clinician", "password": self.password})
+        self.assertEqual(LoginAttempt.recent_failures("clinician"), 0)
+
+    # C6 — reception could not find a patient by the identifier on their ID card.
+    def test_patient_search_matches_national_id(self):
+        Patient.objects.create(first_name="Aisha", last_name="Wafula", estimated_age_years=41,
+                               id_number="24681012", registered_by=self.reception)
+        self.client.login(username=self.reception.username, password=self.password)
+        response = self.client.get(reverse("patients"), {"q": "24681012"})
+        self.assertContains(response, "Aisha")
+
+    # C7 — one aggregate query per batch and two per open invoice, so the
+    # owner dashboard and stock ledger got slower as the hospital used them.
+    def _seed_ledger(self, batches, orders, tag):
+        for index in range(batches):
+            batch = StockBatch.objects.create(
+                item=self.product, batch_number=f"{tag}-{index}",
+                expiry_date=timezone.localdate() + timedelta(days=200),
+                purchase_cost_per_base_unit=Decimal("1.00"))
+            StockMovement.objects.create(
+                batch=batch, movement_type="receipt", quantity_delta=5, reference_type="Opening",
+                reference_id="1", idempotency_key=f"{tag}-{index}", entered_by=self.pharmacist)
+        for index in range(orders):
+            prepare_pharmacy_order(actor=self.pharmacist, customer_name=f"{tag} {index}",
+                                   patient=None, items=[(self.product, Decimal("1"))])
+
+    def _count_queries(self, url):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        with CaptureQueriesContext(connection) as captured:
+            self.client.get(url)
+        return len(captured)
+
+    def test_owner_dashboard_cost_does_not_grow_with_the_ledger(self):
+        self.client.login(username=self.owner.username, password=self.password)
+        self._seed_ledger(5, 3, "small")
+        small = self._count_queries(reverse("dashboard"))
+        self._seed_ledger(40, 25, "large")
+        large = self._count_queries(reverse("dashboard"))
+        self.assertEqual(small, large, "Dashboard query count must not scale with rows")
+        self.assertLess(large, 30)
+
+    def test_stock_page_cost_does_not_grow_with_the_ledger(self):
+        self.client.login(username=self.pharmacist.username, password=self.password)
+        self._seed_ledger(5, 0, "stock-small")
+        small = self._count_queries(reverse("stock"))
+        self._seed_ledger(40, 0, "stock-large")
+        large = self._count_queries(reverse("stock"))
+        self.assertEqual(small, large, "Stock ledger query count must not scale with batches")
+        self.assertLess(large, 15)

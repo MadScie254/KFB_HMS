@@ -1,21 +1,20 @@
 from decimal import Decimal
 
 from django import forms
-from django.utils import timezone
+from django.core.validators import FileExtensionValidator
+from django.forms import formset_factory
 
 from .models import (
     Admission,
     Bed,
     CashShift,
     CatalogueItem,
+    ClinicalAttachment,
     ClinicalNote,
     CreditNote,
     Encounter,
     Patient,
     Payment,
-    PharmacyOrder,
-    Prescription,
-    PrescriptionItem,
     PurchaseOrder,
     ServiceOrder,
     Supplier,
@@ -151,10 +150,6 @@ class AdmissionForm(StyledFormMixin, forms.ModelForm):
 
 
 class PurchaseOrderForm(StyledFormMixin, forms.ModelForm):
-    product = forms.ModelChoiceField(queryset=CatalogueItem.objects.none())
-    quantity_base_units = forms.DecimalField(min_value=Decimal("0.001"), max_digits=14, decimal_places=3)
-    quoted_unit_cost = forms.DecimalField(min_value=Decimal("0.00"), max_digits=14, decimal_places=2)
-
     class Meta:
         model = PurchaseOrder
         fields = ["supplier", "reference", "notes"]
@@ -162,12 +157,37 @@ class PurchaseOrderForm(StyledFormMixin, forms.ModelForm):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["product"].queryset = CatalogueItem.objects.filter(kind=CatalogueItem.Kind.PRODUCT, active=True).order_by("name")
         self.fields["supplier"].queryset = Supplier.objects.filter(active=True).order_by("name")
 
 
+class PurchaseOrderLineForm(StyledFormMixin, forms.Form):
+    product = forms.ModelChoiceField(queryset=CatalogueItem.objects.none())
+    quantity_base_units = forms.DecimalField(
+        min_value=Decimal("0.001"), max_digits=14, decimal_places=3, label="Quantity"
+    )
+    quoted_unit_cost = forms.DecimalField(
+        min_value=Decimal("0.00"), max_digits=14, decimal_places=2, label="Quoted unit cost"
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["product"].queryset = CatalogueItem.objects.filter(
+            kind=CatalogueItem.Kind.PRODUCT, active=True
+        ).order_by("name")
+
+
+PurchaseOrderLineFormSet = formset_factory(
+    PurchaseOrderLineForm, extra=2, min_num=1, validate_min=True, can_delete=True
+)
+
+
 class CsvImportForm(StyledFormMixin, forms.Form):
-    import_kind = forms.ChoiceField(choices=[("products", "Products and prices")])
+    import_kind = forms.ChoiceField(choices=[
+        ("products", "Products and prices"),
+        ("patients", "Patients"),
+        ("opening_stock", "Opening stock counts"),
+        ("opening_receivables", "Opening receivables"),
+    ])
     csv_file = forms.FileField(help_text="UTF-8 CSV, maximum 1 MB. First row must contain column names.")
 
     def clean_csv_file(self):
@@ -192,3 +212,28 @@ class PrescriptionForm(StyledFormMixin, forms.Form):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields["product"].queryset = CatalogueItem.objects.filter(kind=CatalogueItem.Kind.PRODUCT, active=True).order_by("name")
+
+
+PrescriptionFormSet = formset_factory(
+    PrescriptionForm, extra=2, min_num=1, validate_min=True, can_delete=True
+)
+
+
+class ClinicalAttachmentForm(StyledFormMixin, forms.ModelForm):
+    file = forms.FileField(
+        validators=[FileExtensionValidator(["pdf", "jpg", "jpeg", "png"])],
+        help_text="PDF, JPG or PNG. Maximum 10 MB.",
+    )
+
+    class Meta:
+        model = ClinicalAttachment
+        fields = ["file", "description"]
+
+    def clean_file(self):
+        uploaded = self.cleaned_data["file"]
+        if uploaded.size > 10 * 1024 * 1024:
+            raise forms.ValidationError("File exceeds the 10 MB limit.")
+        allowed_types = {"application/pdf", "image/jpeg", "image/png"}
+        if uploaded.content_type not in allowed_types:
+            raise forms.ValidationError("Upload a PDF, JPG or PNG file.")
+        return uploaded

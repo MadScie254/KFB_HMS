@@ -8,19 +8,18 @@ from django.utils import timezone
 
 from .models import (
     AuditEvent,
-    CatalogueItem,
     CashShift,
+    CatalogueItem,
     ClinicianPayable,
     CreditNote,
-    EyeCase,
     ExceptionRecord,
+    EyeCase,
     Invoice,
     InvoiceLine,
     Payment,
     PaymentAllocation,
     PharmacyOrder,
     PharmacyOrderItem,
-    PriceVersion,
     PurchaseOrder,
     Role,
     StockBatch,
@@ -177,8 +176,12 @@ def dispense_order(*, actor, order_id, idempotency_key, request=None):
         raise ValidationError("Payment clearance is required before dispensing.")
 
     allocations = []
+    # Quantity already earmarked inside THIS call, keyed by batch id. Without it,
+    # two lines for the same product each read the untouched batch balance and
+    # the order dispenses more than the hospital physically holds.
+    reserved = {}
     for line in order.items.select_related("product"):
-        remaining = line.quantity_base_units
+        remaining = Decimal(str(line.quantity_base_units))
         batches = list(
             StockBatch.objects.select_for_update()
             .filter(item=line.product, status=StockBatch.Status.ACTIVE)
@@ -187,11 +190,13 @@ def dispense_order(*, actor, order_id, idempotency_key, request=None):
         for batch in batches:
             if not batch.can_dispense:
                 continue
-            available = batch.movements.aggregate(total=Sum("quantity_delta"))["total"] or Decimal("0.000")
+            on_hand = batch.movements.aggregate(total=Sum("quantity_delta"))["total"] or Decimal("0.000")
+            available = on_hand - reserved.get(batch.pk, Decimal("0.000"))
             if available <= 0:
                 continue
             take = min(available, remaining)
             allocations.append((batch, take, line))
+            reserved[batch.pk] = reserved.get(batch.pk, Decimal("0.000")) + take
             remaining -= take
             if remaining <= 0:
                 break

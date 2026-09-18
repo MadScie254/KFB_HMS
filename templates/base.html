@@ -15,42 +15,44 @@
   <a class="skip-link" href="#main-content">Skip to content</a>
   {% if user.is_authenticated %}
   <div class="app-shell">
-    <aside class="sidebar" aria-label="Primary navigation">
+    <aside class="sidebar" aria-label="Primary navigation" data-sidebar>
       <a class="brand" href="{% url 'dashboard' %}" aria-label="Kingdom Faith Based Hospital home">
         <span class="brand-mark" aria-hidden="true">K+</span>
         <span><strong>Kingdom Faith</strong><small>Based Hospital</small></span>
       </a>
       <div class="facility">Malaha · Webuye</div>
       <nav>
-        <a href="{% url 'dashboard' %}" class="{% if request.resolver_match.url_name == 'dashboard' %}active{% endif %}">Home</a>
-        {% if 'patients' in allowed_navigation %}<a href="{% url 'patients' %}">Patients</a>{% endif %}
-        {% if 'queue' in allowed_navigation %}<a href="{% url 'queue' %}">Queue</a>{% endif %}
-        {% if 'payments' in allowed_navigation %}<a href="{% url 'pharmacy_orders' %}">Payments</a>{% endif %}
-        {% if 'pharmacy' in allowed_navigation %}<a href="{% url 'pharmacy_orders' %}">Pharmacy</a>{% endif %}
-        {% if 'wards' in allowed_navigation %}<a href="{% url 'wards' %}">Wards</a>{% endif %}
-        {% if 'eye' in allowed_navigation %}<a href="{% url 'eye_clinic' %}">Eye Clinic</a>{% endif %}
-        {% if 'departments' in allowed_navigation %}<a href="{% url 'departments' %}">Lab &amp; departments</a>{% endif %}
-        {% if 'reports' in allowed_navigation %}<a href="{% url 'reports' %}">Reports</a>{% endif %}
-        {% if 'stock' in allowed_navigation %}<a href="{% url 'stock' %}">Stock &amp; Purchasing</a>{% endif %}
-        {% if 'purchasing' in allowed_navigation %}<a href="{% url 'purchasing' %}">Purchasing</a>{% endif %}
-        {% if 'exceptions' in allowed_navigation %}<a href="{% url 'exceptions' %}">Exceptions</a>{% endif %}
-        {% if 'shifts' in allowed_navigation %}<a href="{% url 'shift_manage' %}">Cashier shift</a>{% endif %}
-        {% if 'settings' in allowed_navigation %}<a href="{% url 'settings' %}">Settings</a><a href="{% url 'csv_import' %}">CSV imports</a>{% endif %}
+        <a href="{% url 'dashboard' %}" class="{% if request.resolver_match.url_name == 'dashboard' %}active{% endif %}" {% if request.resolver_match.url_name == 'dashboard' %}aria-current="page"{% endif %}>{% include "hospital/_icon.html" with name="home" %}<span>Home</span></a>
+        {% if 'patients' in allowed_navigation %}<a href="{% url 'patients' %}" class="{% if 'patient' in request.resolver_match.url_name %}active{% endif %}">{% include "hospital/_icon.html" with name="users" %}<span>Patients</span></a>{% endif %}
+        {% if 'queue' in allowed_navigation %}<a href="{% url 'queue' %}" class="{% if request.resolver_match.url_name == 'queue' %}active{% endif %}">{% include "hospital/_icon.html" with name="queue" %}<span>Queue</span></a>{% endif %}
+        {% if 'payments' in allowed_navigation %}<a href="{% url 'pharmacy_orders' %}">{% include "hospital/_icon.html" with name="wallet" %}<span>Payments</span></a>{% endif %}
+        {% if 'pharmacy' in allowed_navigation %}<a href="{% url 'pharmacy_orders' %}" class="{% if 'pharmacy' in request.resolver_match.url_name %}active{% endif %}">{% include "hospital/_icon.html" with name="pharmacy" %}<span>Pharmacy</span></a>{% endif %}
+        {% if 'wards' in allowed_navigation %}<a href="{% url 'wards' %}" class="{% if request.resolver_match.url_name == 'wards' %}active{% endif %}">{% include "hospital/_icon.html" with name="bed" %}<span>Wards</span></a>{% endif %}
+        {% if 'eye' in allowed_navigation %}<a href="{% url 'eye_clinic' %}" class="{% if 'eye' in request.resolver_match.url_name %}active{% endif %}">{% include "hospital/_icon.html" with name="eye" %}<span>Eye Clinic</span></a>{% endif %}
+        {% if 'departments' in allowed_navigation %}<a href="{% url 'departments' %}" class="{% if 'service_order' in request.resolver_match.url_name or request.resolver_match.url_name == 'departments' %}active{% endif %}">{% include "hospital/_icon.html" with name="lab" %}<span>Lab and departments</span></a>{% endif %}
+        {% if 'reports' in allowed_navigation %}<a href="{% url 'reports' %}" class="{% if 'report' in request.resolver_match.url_name %}active{% endif %}">{% include "hospital/_icon.html" with name="report" %}<span>Reports</span></a>{% endif %}
+        {% if 'stock' in allowed_navigation %}<a href="{% url 'stock' %}" class="{% if request.resolver_match.url_name == 'stock' %}active{% endif %}">{% include "hospital/_icon.html" with name="stock" %}<span>Stock</span></a>{% endif %}
+        {% if 'purchasing' in allowed_navigation %}<a href="{% url 'purchasing' %}" class="{% if 'purchase' in request.resolver_match.url_name or request.resolver_match.url_name == 'purchasing' %}active{% endif %}">{% include "hospital/_icon.html" with name="cart" %}<span>Purchasing</span></a>{% endif %}
+        {% if 'exceptions' in allowed_navigation %}<a href="{% url 'exceptions' %}" class="{% if request.resolver_match.url_name == 'exceptions' %}active{% endif %}">{% include "hospital/_icon.html" with name="alert" %}<span>Exceptions</span></a>{% endif %}
+        {% if 'audit' in allowed_navigation %}<a href="{% url 'audit_review' %}" class="{% if request.resolver_match.url_name == 'audit_review' %}active{% endif %}">{% include "hospital/_icon.html" with name="shield" %}<span>Audit review</span></a>{% endif %}
+        {% if 'shifts' in allowed_navigation %}<a href="{% url 'shift_manage' %}" class="{% if request.resolver_match.url_name == 'shift_manage' %}active{% endif %}">{% include "hospital/_icon.html" with name="clock" %}<span>Cashier shift</span></a>{% endif %}
+        {% if 'settings' in allowed_navigation %}<a href="{% url 'settings' %}" class="{% if request.resolver_match.url_name == 'settings' %}active{% endif %}">{% include "hospital/_icon.html" with name="settings" %}<span>Settings</span></a><a href="{% url 'csv_import' %}" class="{% if request.resolver_match.url_name == 'csv_import' %}active{% endif %}">{% include "hospital/_icon.html" with name="upload" %}<span>CSV imports</span></a>{% endif %}
       </nav>
       <div class="sidebar-foot">
-        <a href="{% url 'downtime_forms' %}">Downtime forms</a>
-        <a href="{% url 'health' %}">System health</a>
+        <a href="{% url 'downtime_forms' %}">{% include "hospital/_icon.html" with name="file" %}<span>Downtime forms</span></a>
+        <a href="{% url 'health' %}">{% include "hospital/_icon.html" with name="activity" %}<span>System health</span></a>
       </div>
     </aside>
+    <button class="sidebar-scrim" type="button" data-menu-toggle aria-label="Close navigation"></button>
     <div class="workspace">
       <header class="topbar">
-        <button class="menu-button" type="button" aria-label="Open menu" data-menu-toggle>Menu</button>
+        <button class="menu-button icon-button" type="button" aria-label="Open navigation" aria-expanded="false" data-menu-toggle>{% include "hospital/_icon.html" with name="menu" %}</button>
         <div class="connection"><span class="status-dot"></span><span>Server connected</span><small>Updated {% now "H:i" %}</small></div>
         <div class="topbar-actions">
           <span class="shift-chip">{{ user.staff_profile.active_shift_label|default:"No shift label" }}</span>
           <span class="user-chip"><strong>{{ user.staff_profile }}</strong><small>{{ current_role|title }}</small></span>
-          <a href="{% url 'screen_lock' %}" class="quiet-link">Lock</a>
-          <form action="{% url 'logout' %}" method="post" class="inline-form">{% csrf_token %}<button type="submit" class="quiet-button">Sign out</button></form>
+          <a href="{% url 'screen_lock' %}" class="icon-button" aria-label="Lock screen" title="Lock screen">{% include "hospital/_icon.html" with name="lock" %}</a>
+          <form action="{% url 'logout' %}" method="post" class="inline-form">{% csrf_token %}<button type="submit" class="icon-button" aria-label="Sign out" title="Sign out">{% include "hospital/_icon.html" with name="logout" %}</button></form>
         </div>
       </header>
       {% if demo_mode %}<div class="demo-banner"><strong>Demonstration data</strong> · Not for real patient care or financial reporting</div>{% endif %}

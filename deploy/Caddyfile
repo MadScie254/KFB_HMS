@@ -1,0 +1,14 @@
+# Replace the hostname with the hospital's internal DNS name, then install
+# Caddy's local root certificate on authorised ward workstations.
+hospital.kfb.internal {
+    tls internal
+    encode zstd gzip
+    reverse_proxy 127.0.0.1:8000
+
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "same-origin"
+    }
+}

@@ -1,3 +1,15 @@
 {% extends "base.html" %}{% block title %}Purchase request{% endblock %}
-{% block content %}<div class="page-heading"><div><p class="breadcrumbs"><a href="{% url 'purchasing' %}">Purchasing</a> / New request</p><h1>Create purchase request</h1><p>This records intent only. It does not receive stock or transfer money.</p></div></div><form method="post" class="panel form-panel" data-unsaved-warning>{% csrf_token %}<div class="form-grid">{% include "hospital/_form_fields.html" %}</div><div class="callout warning-callout"><strong>Independent approval required.</strong><p>The requester cannot approve the order or their own later discrepancy.</p></div><div class="form-actions"><a class="button ghost" href="{% url 'purchasing' %}">Cancel</a><button class="button primary" type="submit">Submit request</button></div></form>{% endblock %}
-
+{% block content %}
+<div class="page-heading"><div><p class="breadcrumbs"><a href="{% url 'purchasing' %}">Purchasing</a> / New request</p><h1>Create purchase request</h1><p>Group everything for one supplier into a single independently reviewed request.</p></div></div>
+<form method="post" class="panel form-panel" data-unsaved-warning data-formset>{% csrf_token %}
+  <div class="panel-head"><div><p class="eyebrow">Request details</p><h2>Supplier and reference</h2></div></div>
+  <div class="form-grid">{% include "hospital/_form_fields.html" %}</div>
+  <div class="section-divider"><div><p class="eyebrow">Items</p><h2>Requested stock</h2></div><button class="button secondary small" type="button" data-add-form>{% include "hospital/_icon.html" with name="plus" %} Add item</button></div>
+  {{ formset.management_form }}
+  {% if formset.non_form_errors %}<div class="message error">{{ formset.non_form_errors }}</div>{% endif %}
+  <div class="repeatable-list" data-form-list>{% for item_form in formset %}{% include "hospital/_formset_row.html" with line_form=item_form %}{% endfor %}</div>
+  <template data-form-template>{% include "hospital/_formset_row.html" with line_form=formset.empty_form %}</template>
+  <div class="callout warning-callout"><strong>Independent approval required.</strong><p>The requester cannot approve the order or their own later discrepancy.</p></div>
+  <div class="form-actions"><a class="button ghost" href="{% url 'purchasing' %}">Cancel</a><button class="button primary" type="submit">Submit request</button></div>
+</form>
+{% endblock %}

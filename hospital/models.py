@@ -1,14 +1,13 @@
 import uuid
+from datetime import timedelta
 from decimal import Decimal
 
-from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator
 from django.db import models
 from django.db.models import Q, Sum
 from django.utils import timezone
-
 
 MONEY = {"max_digits": 14, "decimal_places": 2, "default": Decimal("0.00")}
 QUANTITY = {"max_digits": 14, "decimal_places": 3, "default": Decimal("0.000")}
@@ -66,6 +65,7 @@ class Patient(TimeStampedModel):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     patient_number = models.CharField(max_length=20, unique=True, blank=True)
+    external_reference = models.CharField(max_length=80, blank=True, db_index=True)
     first_name = models.CharField(max_length=80)
     last_name = models.CharField(max_length=80)
     date_of_birth = models.DateField(null=True, blank=True)
@@ -82,7 +82,11 @@ class Patient(TimeStampedModel):
 
     class Meta:
         ordering = ["-created_at"]
-        indexes = [models.Index(fields=["last_name", "first_name"]), models.Index(fields=["phone"])]
+        indexes = [
+            models.Index(fields=["last_name", "first_name"]),
+            models.Index(fields=["phone"]),
+            models.Index(fields=["id_number"]),
+        ]
 
     def save(self, *args, **kwargs):
         if not self.patient_number:
@@ -275,6 +279,8 @@ class Invoice(TimeStampedModel):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     invoice_number = models.CharField(max_length=30, unique=True, blank=True)
+    external_reference = models.CharField(max_length=100, blank=True, db_index=True)
+    original_invoice_date = models.DateField(null=True, blank=True)
     patient = models.ForeignKey(Patient, null=True, blank=True, on_delete=models.PROTECT, related_name="invoices")
     encounter = models.ForeignKey(Encounter, null=True, blank=True, on_delete=models.PROTECT, related_name="invoices")
     customer_name = models.CharField(max_length=160, blank=True)
@@ -785,7 +791,19 @@ class DowntimeEntry(TimeStampedModel):
     reconciled = models.BooleanField(default=False)
 
 
+class AppendOnlyQuerySet(models.QuerySet):
+    """Refuse the bulk paths that bypass Model.save()."""
+
+    def update(self, **kwargs):
+        raise ValidationError("Audit events are append-only; they cannot be updated.")
+
+    def delete(self):
+        raise ValidationError("Audit events are append-only; they cannot be deleted.")
+
+
 class AuditEvent(models.Model):
+    objects = AppendOnlyQuerySet.as_manager()
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     actor = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT)
     effective_role = models.CharField(max_length=24, blank=True)
@@ -808,3 +826,41 @@ class AuditEvent(models.Model):
         if self.pk and AuditEvent.objects.filter(pk=self.pk).exists():
             raise ValidationError("Audit events are append-only.")
         super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("Audit events are append-only; they cannot be deleted.")
+
+
+class LoginAttempt(models.Model):
+    """Failed sign-in evidence. Kept in the database, not process memory, so a
+    restart does not clear a lockout and the owner can review attempts."""
+
+    username = models.CharField(max_length=150, db_index=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    user_agent = models.CharField(max_length=255, blank=True)
+    attempted_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ["-attempted_at"]
+        indexes = [models.Index(fields=["username", "attempted_at"])]
+
+    LOCKOUT_THRESHOLD = 8
+    LOCKOUT_WINDOW_MINUTES = 15
+
+    @classmethod
+    def window_start(cls):
+        return timezone.now() - timedelta(minutes=cls.LOCKOUT_WINDOW_MINUTES)
+
+    @classmethod
+    def recent_failures(cls, username):
+        return cls.objects.filter(username=username[:150], attempted_at__gte=cls.window_start()).count()
+
+    @classmethod
+    def is_locked(cls, username):
+        if not username:
+            return False
+        return cls.recent_failures(username) >= cls.LOCKOUT_THRESHOLD
+
+    @classmethod
+    def clear(cls, username):
+        cls.objects.filter(username=username[:150]).delete()

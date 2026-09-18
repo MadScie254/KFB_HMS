@@ -46,7 +46,7 @@ def unlocked_required(view):
 
 
 ROLE_NAVIGATION = {
-    Role.OWNER: ["dashboard", "patients", "reports", "exceptions", "purchasing", "settings"],
+    Role.OWNER: ["dashboard", "patients", "reports", "exceptions", "audit", "purchasing", "settings"],
     Role.RECEPTION: ["dashboard", "patients", "queue", "payments", "pharmacy", "shifts"],
     Role.CLINICIAN: ["dashboard", "patients", "queue", "clinical", "wards", "departments"],
     Role.NURSE: ["dashboard", "patients", "wards", "departments"],
@@ -54,5 +54,5 @@ ROLE_NAVIGATION = {
     Role.LAB: ["dashboard", "queue", "departments"],
     Role.EYE: ["dashboard", "patients", "eye"],
     Role.PROCUREMENT: ["dashboard", "stock", "purchasing"],
-    Role.REVIEWER: ["dashboard", "exceptions", "purchasing", "reports"],
+    Role.REVIEWER: ["dashboard", "exceptions", "audit", "purchasing", "reports"],
 }
