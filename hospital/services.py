@@ -14,6 +14,8 @@ from .models import (
     CreditNote,
     ExceptionRecord,
     EyeCase,
+    GoodsReceipt,
+    GoodsReceiptLine,
     Invoice,
     InvoiceLine,
     Payment,
@@ -22,10 +24,35 @@ from .models import (
     PharmacyOrderItem,
     PurchaseOrder,
     Role,
+    Setting,
     StockBatch,
+    StockCount,
+    StockCountLine,
     StockMovement,
 )
 from .permissions import user_role
+
+# Defaults for thresholds an implementer is expected to review. They are read
+# through Setting so a site can change them without a code change, and they are
+# deliberately conservative rather than silent.
+NEAR_EXPIRY_DAYS = 90
+COST_VARIANCE_FRACTION = Decimal("0.10")
+INVOICE_TOLERANCE = Decimal("1.00")
+
+
+def setting_decimal(key, default):
+    """Read a numeric Setting, falling back to the documented default.
+
+    A site that has not configured a threshold gets the default rather than a
+    crash or a silently disabled control.
+    """
+    row = Setting.objects.filter(key=key).first()
+    if not row or not row.value.strip():
+        return default
+    try:
+        return Decimal(row.value.strip())
+    except (ArithmeticError, ValueError):
+        return default
 
 
 def audit(actor, action, entity, *, reason="", before=None, after=None, request=None):
@@ -278,3 +305,329 @@ def complete_eye_case(*, actor, case_id, request=None):
 
 def deterministic_key(*parts):
     return hashlib.sha256(":".join(str(p) for p in parts).encode()).hexdigest()
+
+
+@transaction.atomic
+def receive_delivery(
+    *,
+    actor,
+    purchase_order_id,
+    supplier_invoice_reference,
+    invoice_amount,
+    invoice_date,
+    invoice_photo,
+    lines,
+    delivered_at=None,
+    request=None,
+):
+    """Post a physical delivery into the stock ledger against its invoice.
+
+    This is the only way stock enters the hospital through the application.
+    The supplier's invoice photograph is mandatory: a receipt keyed in without
+    the document it claims to match is exactly the entry this control exists to
+    prevent. Quantity and price differences are recorded and flagged rather
+    than blocked, because the balance must follow what physically arrived.
+    """
+    if user_role(actor) not in {Role.PROCUREMENT, Role.PHARMACY}:
+        raise ValidationError("Only procurement or pharmacy staff may receive a delivery.")
+    if invoice_photo is None:
+        raise ValidationError("Attach a photograph or scan of the supplier invoice before posting stock.")
+    if not lines:
+        raise ValidationError("Record at least one delivered line.")
+
+    order = PurchaseOrder.objects.select_for_update().select_related("supplier").get(pk=purchase_order_id)
+    if order.status not in {"approved", "part_received"}:
+        raise ValidationError("Only an independently approved order can receive stock.")
+
+    reference = supplier_invoice_reference.strip().upper()
+    if not reference:
+        raise ValidationError("Enter the supplier invoice or delivery note reference.")
+    invoice_amount = Decimal(invoice_amount)
+    if invoice_amount < 0:
+        raise ValidationError("The supplier invoice amount cannot be negative.")
+
+    today = timezone.localdate()
+    near_expiry_days = int(setting_decimal("near_expiry_days", Decimal(NEAR_EXPIRY_DAYS)))
+    prepared = []
+    for row in lines:
+        order_line = row["order_line"]
+        if order_line.order_id != order.pk:
+            raise ValidationError("A delivered line must belong to the order being received.")
+        quantity = Decimal(str(row["quantity_received"]))
+        if quantity <= 0:
+            raise ValidationError("Each delivered line needs a positive quantity.")
+        batch_number = str(row["batch_number"]).strip()
+        if not batch_number:
+            raise ValidationError(f"Record the batch number printed on {order_line.item.name}.")
+        expiry = row.get("expiry_date")
+        if expiry and expiry < today:
+            raise ValidationError(
+                f"{order_line.item.name} batch {batch_number} expired on {expiry:%d %b %Y}. Expired stock cannot be received into sellable inventory."
+            )
+        prepared.append((order_line, quantity, batch_number, expiry, Decimal(str(row["actual_unit_cost"]))))
+
+    try:
+        # A savepoint keeps the outer transaction usable when the per-order
+        # invoice uniqueness constraint rejects a repeated submission.
+        with transaction.atomic():
+            receipt = GoodsReceipt.objects.create(
+                purchase_order=order,
+                supplier_invoice_reference=reference,
+                invoice_photo=invoice_photo,
+                invoice_photo_name=getattr(invoice_photo, "name", "")[:255],
+                invoice_amount=invoice_amount,
+                invoice_date=invoice_date,
+                delivered_at=delivered_at or timezone.now(),
+                received_by=actor,
+            )
+    except IntegrityError as exc:
+        raise ValidationError(
+            f"Supplier invoice {reference} has already been received against {order.order_number}."
+        ) from exc
+
+    flags = []
+    duplicate = GoodsReceipt.objects.filter(
+        purchase_order__supplier=order.supplier, supplier_invoice_reference=reference
+    ).exclude(pk=receipt.pk).first()
+    if duplicate:
+        flags.append((
+            "urgent",
+            f"Supplier invoice {reference} recorded twice for {order.supplier.name}",
+            f"Also received on {duplicate.receipt_number} against {duplicate.purchase_order.order_number}. Confirm this is a genuinely separate delivery before paying.",
+        ))
+
+    cost_threshold = setting_decimal("purchase_cost_variance_fraction", COST_VARIANCE_FRACTION)
+    for index, (order_line, quantity, batch_number, expiry, unit_cost) in enumerate(prepared):
+        batch, created = StockBatch.objects.get_or_create(
+            item=order_line.item,
+            batch_number=batch_number,
+            defaults={"expiry_date": expiry, "purchase_cost_per_base_unit": unit_cost},
+        )
+        if not created and batch.expiry_date != expiry:
+            raise ValidationError(
+                f"Batch {batch_number} of {order_line.item.name} is already recorded with expiry "
+                f"{batch.expiry_date or 'not recorded'}. Two different expiry dates cannot share one batch number."
+            )
+        StockMovement.objects.create(
+            batch=batch,
+            movement_type=StockMovement.MovementType.RECEIPT,
+            quantity_delta=quantity,
+            from_location=order.supplier.name[:80],
+            to_location="Pharmacy",
+            reference_type="GoodsReceipt",
+            reference_id=str(receipt.pk),
+            reason=f"{receipt.receipt_number} · invoice {reference}",
+            idempotency_key=deterministic_key("goods_receipt", receipt.pk, order_line.pk, index),
+            entered_by=actor,
+        )
+        GoodsReceiptLine.objects.create(
+            receipt=receipt,
+            order_line=order_line,
+            batch=batch,
+            quantity_received=quantity,
+            batch_number=batch_number,
+            expiry_date=expiry,
+            actual_unit_cost=unit_cost,
+        )
+
+        quoted = Decimal(str(order_line.quoted_unit_cost))
+        if quoted > 0 and abs(unit_cost - quoted) > (quoted * cost_threshold):
+            flags.append((
+                "warning",
+                f"Delivered cost differs from the approved order for {order_line.item.name}",
+                f"{receipt.receipt_number}: quoted KES {quoted:,.2f}, invoiced KES {unit_cost:,.2f} per {order_line.item.base_unit or 'unit'}.",
+            ))
+        if expiry and (expiry - today).days <= near_expiry_days:
+            flags.append((
+                "warning",
+                f"Short-dated stock received: {order_line.item.name} batch {batch_number}",
+                f"{receipt.receipt_number}: expires {expiry:%d %b %Y}, within the {near_expiry_days}-day review window.",
+            ))
+
+        received_total = GoodsReceiptLine.objects.filter(order_line=order_line).aggregate(
+            total=Sum("quantity_received")
+        )["total"] or Decimal("0.000")
+        if received_total > Decimal(str(order_line.quantity_base_units)):
+            flags.append((
+                "warning",
+                f"Delivered quantity exceeds the approved order for {order_line.item.name}",
+                f"{receipt.receipt_number}: ordered {order_line.quantity_base_units}, received {received_total} {order_line.item.base_unit or 'units'} in total.",
+            ))
+
+    receipt.posted_at = timezone.now()
+    receipt.save(update_fields=["posted_at", "updated_at"])
+
+    order_lines = list(order.lines.select_related("item"))
+    fully_received = all(
+        (GoodsReceiptLine.objects.filter(order_line=line).aggregate(total=Sum("quantity_received"))["total"] or Decimal("0.000"))
+        >= Decimal(str(line.quantity_base_units))
+        for line in order_lines
+    )
+    order.status = "received" if fully_received else "part_received"
+    order.save(update_fields=["status", "updated_at"])
+
+    tolerance = setting_decimal("supplier_invoice_tolerance", INVOICE_TOLERANCE)
+    variance = receipt.invoice_variance
+    if abs(variance) > tolerance:
+        flags.append((
+            "warning",
+            f"Supplier invoice {reference} does not match the goods counted in",
+            f"{receipt.receipt_number}: invoice KES {invoice_amount:,.2f}, delivered value KES {receipt.received_value:,.2f}, difference KES {variance:,.2f}.",
+        ))
+
+    for severity, summary, evidence in flags:
+        ExceptionRecord.objects.get_or_create(
+            category="purchase_discrepancy",
+            summary=summary[:255],
+            defaults={"severity": severity, "evidence": evidence},
+        )
+
+    audit(
+        actor,
+        "goods_receipt.posted",
+        receipt,
+        after={
+            "order": order.order_number,
+            "invoice": reference,
+            "lines": len(prepared),
+            "delivered_value": str(receipt.received_value),
+            "invoice_amount": str(invoice_amount),
+            "order_status": order.status,
+            "flags": len(flags),
+        },
+        request=request,
+    )
+    return receipt
+
+
+@transaction.atomic
+def check_delivery(*, actor, receipt_id, discrepancy_notes="", request=None):
+    """Second-person confirmation that the delivery matches its invoice."""
+    if user_role(actor) not in {Role.PROCUREMENT, Role.PHARMACY, Role.REVIEWER, Role.OWNER}:
+        raise ValidationError("Your role cannot check a delivery.")
+    receipt = GoodsReceipt.objects.select_for_update().select_related("purchase_order").get(pk=receipt_id)
+    if receipt.received_by_id == actor.id:
+        raise ValidationError("The person who received a delivery cannot also check it.")
+    if receipt.checked_by_id:
+        raise ValidationError("This delivery has already been checked.")
+    receipt.checked_by = actor
+    receipt.checked_at = timezone.now()
+    receipt.discrepancy_notes = discrepancy_notes.strip()
+    receipt.save(update_fields=["checked_by", "checked_at", "discrepancy_notes", "updated_at"])
+    audit(actor, "goods_receipt.checked", receipt, reason=receipt.discrepancy_notes, request=request)
+    return receipt
+
+
+@transaction.atomic
+def open_stock_count(*, actor, location="Pharmacy", blind_count=True, notes="", request=None):
+    """Freeze a count sheet: every batch with its ledger balance at the cutoff.
+
+    Expected quantities are captured once, at the cutoff, so a movement posted
+    while the shelf is being counted cannot quietly change what the count is
+    later judged against.
+    """
+    if user_role(actor) not in {Role.PHARMACY, Role.PROCUREMENT}:
+        raise ValidationError("Only pharmacy or procurement staff may open a stock count.")
+    cutoff = timezone.now()
+    count = StockCount.objects.create(
+        location=location,
+        cutoff_at=cutoff,
+        blind_count=blind_count,
+        notes=notes.strip(),
+        counted_by=actor,
+    )
+    batches = StockBatch.objects.select_related("item").order_by("item__name", "expiry_date")
+    for batch in batches:
+        StockCountLine.objects.create(
+            count=count,
+            batch=batch,
+            expected_quantity=batch.balance_at(cutoff),
+            counted_quantity=Decimal("0.000"),
+        )
+    audit(actor, "stock_count.opened", count, after={"lines": count.lines.count(), "blind": blind_count}, request=request)
+    return count
+
+
+@transaction.atomic
+def submit_stock_count(*, actor, count_id, counted, reasons=None, request=None):
+    """Record the counted quantities and send the sheet for independent review."""
+    reasons = reasons or {}
+    count = StockCount.objects.select_for_update().get(pk=count_id)
+    if count.counted_by_id != actor.id:
+        raise ValidationError("Only the person who opened this count may submit it.")
+    if count.status != StockCount.Status.FROZEN:
+        raise ValidationError("This count has already been submitted.")
+    for line in count.lines.select_for_update():
+        if line.pk not in counted:
+            raise ValidationError("Enter a counted quantity for every line on the frozen sheet.")
+        quantity = Decimal(str(counted[line.pk]))
+        if quantity < 0:
+            raise ValidationError("A counted quantity cannot be negative.")
+        line.counted_quantity = quantity
+        line.reason = str(reasons.get(line.pk, ""))[:255]
+        line.save(update_fields=["counted_quantity", "reason"])
+    count.status = StockCount.Status.SUBMITTED
+    count.save(update_fields=["status", "updated_at"])
+    audit(actor, "stock_count.submitted", count, after={"net_variance": str(count.net_variance)}, request=request)
+    return count
+
+
+@transaction.atomic
+def review_stock_count(*, actor, count_id, approve, review_notes="", request=None):
+    """Approve or reject a count; approval is what posts the correcting movements.
+
+    Nothing in the application edits a quantity directly. A difference between
+    the shelf and the ledger becomes an approved adjustment movement with a
+    named reviewer, or it does not happen at all.
+    """
+    if user_role(actor) not in {Role.REVIEWER, Role.OWNER}:
+        raise ValidationError("Only a delegated reviewer may approve a stock count.")
+    count = StockCount.objects.select_for_update().get(pk=count_id)
+    if count.counted_by_id == actor.id or count.witnessed_by_id == actor.id:
+        raise ValidationError("A stock count cannot be reviewed by the person who counted it.")
+    if count.status != StockCount.Status.SUBMITTED:
+        raise ValidationError("Only a submitted count can be reviewed.")
+
+    posted = 0
+    if approve:
+        for line in count.lines.select_related("batch__item").select_for_update():
+            variance = line.variance
+            if not variance:
+                continue
+            StockMovement.objects.create(
+                batch=line.batch,
+                movement_type=StockMovement.MovementType.ADJUSTMENT,
+                quantity_delta=variance,
+                from_location=count.location if variance < 0 else "",
+                to_location=count.location if variance > 0 else "",
+                reference_type="StockCount",
+                reference_id=str(count.pk),
+                reason=f"{count.reference} approved variance · cutoff {timezone.localtime(count.cutoff_at):%d %b %Y %H:%M} · {line.reason}"[:255],
+                idempotency_key=deterministic_key("stock_count", count.pk, line.pk),
+                entered_by=actor,
+            )
+            posted += 1
+            if abs(line.variance_value) > setting_decimal("stock_variance_review_value", Decimal("500.00")):
+                ExceptionRecord.objects.get_or_create(
+                    category="stock_discrepancy",
+                    summary=f"Approved stock adjustment for {line.batch.item.name} batch {line.batch.batch_number}"[:255],
+                    defaults={
+                        "severity": "warning",
+                        "evidence": f"{count.reference}: counted {line.counted_quantity}, expected {line.expected_quantity}, value KES {line.variance_value:,.2f}. Reason recorded: {line.reason or 'none given'}.",
+                    },
+                )
+
+    count.status = StockCount.Status.APPROVED if approve else StockCount.Status.REJECTED
+    count.reviewed_by = actor
+    count.reviewed_at = timezone.now()
+    count.review_notes = review_notes.strip()
+    count.save(update_fields=["status", "reviewed_by", "reviewed_at", "review_notes", "updated_at"])
+    audit(
+        actor,
+        f"stock_count.{count.status}",
+        count,
+        reason=count.review_notes,
+        after={"adjustments_posted": posted, "net_variance": str(count.net_variance)},
+        request=request,
+    )
+    return count

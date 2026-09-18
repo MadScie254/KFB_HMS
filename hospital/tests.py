@@ -1,20 +1,26 @@
+import shutil
+import tempfile
 from datetime import timedelta
 from decimal import Decimal
 
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.management import call_command
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
 from .models import (
+    AuditEvent,
     CashShift,
     CatalogueItem,
     ClinicalNote,
     CreditNote,
     Encounter,
+    ExceptionRecord,
     EyeCase,
+    GoodsReceipt,
     ImportJob,
     Invoice,
     InvoiceLine,
@@ -24,19 +30,27 @@ from .models import (
     PharmacyOrder,
     PriceVersion,
     PurchaseOrder,
+    PurchaseOrderLine,
     Role,
     ServiceOrder,
     StockBatch,
+    StockCount,
     StockMovement,
     Supplier,
 )
+from .permissions import user_role
 from .services import (
     approve_credit_note,
     approve_purchase_order,
+    check_delivery,
     complete_eye_case,
     dispense_order,
+    open_stock_count,
     prepare_pharmacy_order,
+    receive_delivery,
     record_payment,
+    review_stock_count,
+    submit_stock_count,
 )
 
 
@@ -373,3 +387,411 @@ class RegressionTests(HospitalFixtureMixin, TestCase):
         large = self._count_queries(reverse("stock"))
         self.assertEqual(small, large, "Stock ledger query count must not scale with batches")
         self.assertLess(large, 15)
+
+    def _seed_orders(self, count, tag):
+        supplier, _ = Supplier.objects.get_or_create(name="Query Supplies")
+        for index in range(count):
+            order = PurchaseOrder.objects.create(
+                supplier=supplier, requested_by=self.procurement, reference=f"{tag}-{index}"
+            )
+            PurchaseOrderLine.objects.create(
+                order=order, item=self.product,
+                quantity_base_units=Decimal("10"), quoted_unit_cost=Decimal("1.00"),
+            )
+
+    def test_purchasing_page_cost_does_not_grow_with_the_order_book(self):
+        # The page prints the requester's and approver's staff profiles per row.
+        # Neither was on the select_related chain, so every purchase order cost
+        # two extra queries.
+        self.client.login(username=self.owner.username, password=self.password)
+        self._seed_orders(3, "small")
+        small = self._count_queries(reverse("purchasing"))
+        self._seed_orders(25, "large")
+        large = self._count_queries(reverse("purchasing"))
+        self.assertEqual(small, large, "Purchasing query count must not scale with orders")
+        self.assertLess(large, 15)
+
+    def test_deliveries_page_cost_does_not_grow_with_the_receipt_history(self):
+        self.client.login(username=self.procurement.username, password=self.password)
+        self._seed_orders(3, "deliveries-small")
+        small = self._count_queries(reverse("deliveries"))
+        self._seed_orders(25, "deliveries-large")
+        large = self._count_queries(reverse("deliveries"))
+        self.assertEqual(small, large, "Deliveries query count must not scale with orders")
+        self.assertLess(large, 20)
+
+
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
+class StockControlTests(HospitalFixtureMixin, TestCase):
+    """Stock entering the hospital, and the shelf being reconciled with the ledger.
+
+    Before these workflows existed the ledger could only ever go down: a sale
+    deducted stock and nothing put any back. Each test here pins one of the
+    controls that make the balance trustworthy in both directions.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.media_root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.media_root, ignore_errors=True)
+        self.supplier = Supplier.objects.create(name="Demo Medical Supplies")
+
+    def photo(self, name="invoice.jpg"):
+        return SimpleUploadedFile(name, b"fake-jpeg-bytes", content_type="image/jpeg")
+
+    def approved_order(self, quantity=Decimal("100"), unit_cost=Decimal("2.00")):
+        order = PurchaseOrder.objects.create(supplier=self.supplier, requested_by=self.procurement)
+        PurchaseOrderLine.objects.create(
+            order=order, item=self.product, quantity_base_units=quantity, quoted_unit_cost=unit_cost
+        )
+        approve_purchase_order(actor=self.reviewer, order_id=order.pk)
+        order.refresh_from_db()
+        return order
+
+    def delivery_line(self, order, quantity=Decimal("100"), batch="B-NEW", expiry_days=365, unit_cost=Decimal("2.00")):
+        return {
+            "order_line": order.lines.first(),
+            "quantity_received": quantity,
+            "batch_number": batch,
+            "expiry_date": timezone.localdate() + timedelta(days=expiry_days),
+            "actual_unit_cost": unit_cost,
+        }
+
+    def receive(self, order, *, reference="SUP-INV-001", amount=Decimal("200.00"), actor=None, lines=None, photo=True):
+        with override_settings(MEDIA_ROOT=self.media_root):
+            return receive_delivery(
+                actor=actor or self.procurement,
+                purchase_order_id=order.pk,
+                supplier_invoice_reference=reference,
+                invoice_amount=amount,
+                invoice_date=timezone.localdate(),
+                invoice_photo=self.photo() if photo else None,
+                lines=lines if lines is not None else [self.delivery_line(order)],
+            )
+
+    def test_delivery_increases_stock_and_balances_against_the_invoice(self):
+        order = self.approved_order()
+        receipt = self.receive(order)
+        batch = StockBatch.objects.get(item=self.product, batch_number="B-NEW")
+        self.assertEqual(batch.quantity_on_hand, Decimal("100"))
+        self.assertEqual(receipt.received_value, Decimal("200.00"))
+        self.assertEqual(receipt.invoice_variance, Decimal("0.00"))
+        self.assertTrue(receipt.invoice_photo)
+        self.assertIsNotNone(receipt.posted_at)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "received")
+        movement = StockMovement.objects.get(reference_type="GoodsReceipt", reference_id=str(receipt.pk))
+        self.assertEqual(movement.movement_type, StockMovement.MovementType.RECEIPT)
+        self.assertEqual(movement.quantity_delta, Decimal("100.000"))
+
+    def test_delivery_without_an_invoice_photograph_is_refused(self):
+        order = self.approved_order()
+        with self.assertRaisesMessage(ValidationError, "photograph"):
+            self.receive(order, photo=False)
+        self.assertFalse(StockBatch.objects.filter(batch_number="B-NEW").exists())
+
+    def test_same_supplier_invoice_cannot_be_received_twice_on_one_order(self):
+        order = self.approved_order(quantity=Decimal("200"))
+        self.receive(order, lines=[self.delivery_line(order, quantity=Decimal("50"))])
+        with self.assertRaisesMessage(ValidationError, "already been received"):
+            self.receive(order, lines=[self.delivery_line(order, quantity=Decimal("50"), batch="B-TWO")])
+        self.assertEqual(
+            StockMovement.objects.filter(movement_type=StockMovement.MovementType.RECEIPT, reference_type="GoodsReceipt").count(),
+            1,
+        )
+
+    def test_expired_stock_cannot_be_received(self):
+        order = self.approved_order()
+        line = self.delivery_line(order, expiry_days=-1)
+        with self.assertRaisesMessage(ValidationError, "Expired stock cannot be received"):
+            self.receive(order, lines=[line])
+        self.assertFalse(GoodsReceipt.objects.exists())
+
+    def test_partial_delivery_leaves_the_order_open(self):
+        order = self.approved_order(quantity=Decimal("100"))
+        self.receive(order, amount=Decimal("80.00"), lines=[self.delivery_line(order, quantity=Decimal("40"))])
+        order.refresh_from_db()
+        self.assertEqual(order.status, "part_received")
+        self.receive(
+            order,
+            reference="SUP-INV-002",
+            amount=Decimal("120.00"),
+            lines=[self.delivery_line(order, quantity=Decimal("60"), batch="B-NEW-2")],
+        )
+        order.refresh_from_db()
+        self.assertEqual(order.status, "received")
+
+    def test_price_and_invoice_differences_are_flagged_not_hidden(self):
+        order = self.approved_order(quantity=Decimal("100"), unit_cost=Decimal("2.00"))
+        # Invoiced at 3.00 against a 2.00 quote, and the invoice total does not
+        # match the goods either: both are review items, neither blocks the post.
+        self.receive(
+            order,
+            amount=Decimal("500.00"),
+            lines=[self.delivery_line(order, unit_cost=Decimal("3.00"))],
+        )
+        flags = ExceptionRecord.objects.filter(category="purchase_discrepancy")
+        self.assertTrue(flags.filter(summary__icontains="cost differs").exists())
+        self.assertTrue(flags.filter(summary__icontains="does not match the goods").exists())
+        self.assertEqual(
+            StockBatch.objects.get(batch_number="B-NEW").quantity_on_hand,
+            Decimal("100"),
+            "The stock that arrived must still be recorded when a price is queried.",
+        )
+
+    def test_receiver_cannot_check_their_own_delivery(self):
+        order = self.approved_order()
+        receipt = self.receive(order)
+        with self.assertRaisesMessage(ValidationError, "cannot also check"):
+            check_delivery(actor=self.procurement, receipt_id=receipt.pk)
+        checked = check_delivery(actor=self.pharmacist, receipt_id=receipt.pk, discrepancy_notes="One box dented.")
+        self.assertEqual(checked.checked_by, self.pharmacist)
+        self.assertEqual(checked.discrepancy_notes, "One box dented.")
+
+    def test_reception_cannot_receive_stock(self):
+        order = self.approved_order()
+        with self.assertRaisesMessage(ValidationError, "procurement or pharmacy"):
+            self.receive(order, actor=self.reception)
+
+    def test_unapproved_order_cannot_receive_stock(self):
+        order = PurchaseOrder.objects.create(supplier=self.supplier, requested_by=self.procurement)
+        PurchaseOrderLine.objects.create(
+            order=order, item=self.product, quantity_base_units=Decimal("10"), quoted_unit_cost=Decimal("2.00")
+        )
+        with self.assertRaisesMessage(ValidationError, "independently approved"):
+            self.receive(order, lines=[self.delivery_line(order, quantity=Decimal("10"))])
+
+    def test_sale_and_delivery_reconcile_in_one_balance(self):
+        order = self.approved_order()
+        self.receive(order)
+        basket = self.prepare(15)
+        record_payment(
+            actor=self.reception, invoice_id=basket.invoice_id, amount=75,
+            method=Payment.Method.CASH, reference="", idempotency_key="pay-reconcile",
+        )
+        dispense_order(actor=self.pharmacist, order_id=basket.pk, idempotency_key="dispense-reconcile")
+        # 200 opening + 100 received - 15 sold, with FEFO taking from the
+        # earliest-expiring batch first.
+        total = sum(batch.quantity_on_hand for batch in StockBatch.objects.filter(item=self.product))
+        self.assertEqual(total, Decimal("285"))
+
+    def test_approved_count_posts_an_adjustment_and_corrects_the_balance(self):
+        count = open_stock_count(actor=self.pharmacist, location="Pharmacy", blind_count=True)
+        line = count.lines.get(batch=self.batch)
+        self.assertEqual(line.expected_quantity, Decimal("200.000"))
+        submit_stock_count(
+            actor=self.pharmacist, count_id=count.pk,
+            counted={line.pk: Decimal("194")}, reasons={line.pk: "Three damaged, three unexplained"},
+        )
+        count.refresh_from_db()
+        self.assertEqual(count.status, StockCount.Status.SUBMITTED)
+        self.assertEqual(self.batch.quantity_on_hand, Decimal("200"), "Submitting must not move stock.")
+
+        review_stock_count(actor=self.reviewer, count_id=count.pk, approve=True, review_notes="Damage witnessed.")
+        count.refresh_from_db()
+        self.assertEqual(count.status, StockCount.Status.APPROVED)
+        self.assertEqual(self.batch.quantity_on_hand, Decimal("194"))
+        adjustment = StockMovement.objects.get(movement_type=StockMovement.MovementType.ADJUSTMENT)
+        self.assertEqual(adjustment.quantity_delta, Decimal("-6.000"))
+        self.assertEqual(adjustment.entered_by, self.reviewer)
+
+    def test_counter_cannot_approve_their_own_count(self):
+        count = open_stock_count(actor=self.pharmacist)
+        line = count.lines.get(batch=self.batch)
+        submit_stock_count(actor=self.pharmacist, count_id=count.pk, counted={line.pk: Decimal("190")})
+        self.pharmacist.staff_profile.role = Role.REVIEWER
+        self.pharmacist.staff_profile.save(update_fields=["role"])
+        with self.assertRaisesMessage(ValidationError, "cannot be reviewed by the person who counted"):
+            review_stock_count(actor=self.pharmacist, count_id=count.pk, approve=True)
+        self.assertEqual(self.batch.quantity_on_hand, Decimal("200"))
+
+    def test_rejected_count_changes_no_balance(self):
+        count = open_stock_count(actor=self.pharmacist)
+        line = count.lines.get(batch=self.batch)
+        submit_stock_count(actor=self.pharmacist, count_id=count.pk, counted={line.pk: Decimal("150")})
+        review_stock_count(actor=self.reviewer, count_id=count.pk, approve=False, review_notes="Recount required.")
+        count.refresh_from_db()
+        self.assertEqual(count.status, StockCount.Status.REJECTED)
+        self.assertEqual(self.batch.quantity_on_hand, Decimal("200"))
+        self.assertFalse(StockMovement.objects.filter(movement_type=StockMovement.MovementType.ADJUSTMENT).exists())
+
+    def test_count_snapshot_is_frozen_at_its_cutoff(self):
+        count = open_stock_count(actor=self.pharmacist)
+        StockMovement.objects.create(
+            batch=self.batch, movement_type=StockMovement.MovementType.RECEIPT, quantity_delta=Decimal("50"),
+            reference_type="Opening", reference_id="later", idempotency_key="after-cutoff", entered_by=self.pharmacist,
+        )
+        line = count.lines.get(batch=self.batch)
+        self.assertEqual(
+            line.expected_quantity, Decimal("200.000"),
+            "A movement posted after the cutoff must not change what the count is judged against.",
+        )
+
+
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
+class StockScreenTests(HospitalFixtureMixin, TestCase):
+    """The screens themselves: a control nobody can reach is not a control."""
+
+    def setUp(self):
+        super().setUp()
+        self.media_root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.media_root, ignore_errors=True)
+        self.supplier = Supplier.objects.create(name="Demo Medical Supplies")
+        self.order = PurchaseOrder.objects.create(supplier=self.supplier, requested_by=self.procurement)
+        self.order_line = PurchaseOrderLine.objects.create(
+            order=self.order, item=self.product,
+            quantity_base_units=Decimal("100"), quoted_unit_cost=Decimal("2.00"),
+        )
+        approve_purchase_order(actor=self.reviewer, order_id=self.order.pk)
+
+    def post_delivery(self, reference="SUP-INV-100"):
+        return self.client.post(
+            reverse("goods_receipt_create", args=[self.order.pk]),
+            {
+                "supplier_invoice_reference": reference,
+                "invoice_amount": "200.00",
+                "invoice_date": timezone.localdate().isoformat(),
+                "delivered_on": timezone.localdate().isoformat(),
+                "invoice_photo": SimpleUploadedFile("invoice.jpg", b"fake-jpeg-bytes", content_type="image/jpeg"),
+                "lines-TOTAL_FORMS": "1",
+                "lines-INITIAL_FORMS": "0",
+                "lines-MIN_NUM_FORMS": "1",
+                "lines-MAX_NUM_FORMS": "1000",
+                "lines-0-order_line": str(self.order_line.pk),
+                "lines-0-quantity_received": "100",
+                "lines-0-batch_number": "B-SCREEN",
+                "lines-0-expiry_date": (timezone.localdate() + timedelta(days=400)).isoformat(),
+                "lines-0-actual_unit_cost": "2.00",
+            },
+            follow=True,
+        )
+
+    def test_stock_page_shows_valuation_and_shortages(self):
+        self.client.login(username=self.pharmacist.username, password=self.password)
+        response = self.client.get(reverse("stock"))
+        self.assertEqual(response.status_code, 200)
+        position = response.context["position"]
+        # 200 tablets at a 2.00 purchase cost, priced for sale at 5.00.
+        self.assertEqual(position["stock_value_cost"], Decimal("400.00"))
+        self.assertEqual(position["stock_value_retail"], Decimal("1000.00"))
+        self.assertContains(response, "Stock value at cost")
+
+    def test_stock_page_filters_to_products_below_reorder_level(self):
+        self.client.login(username=self.pharmacist.username, password=self.password)
+        self.assertEqual(len(self.client.get(reverse("stock"), {"view": "low"}).context["products"]), 0)
+        StockMovement.objects.create(
+            batch=self.batch, movement_type=StockMovement.MovementType.ADJUSTMENT, quantity_delta=Decimal("-195"),
+            reference_type="Test", reference_id="low", idempotency_key="drop-to-low", entered_by=self.pharmacist,
+        )
+        low = self.client.get(reverse("stock"), {"view": "low"}).context["products"]
+        self.assertEqual([row["item"].code for row in low], ["TEST-TAB"])
+
+    def test_procurement_can_record_a_delivery_through_the_screen(self):
+        self.client.login(username=self.procurement.username, password=self.password)
+        with override_settings(MEDIA_ROOT=self.media_root):
+            response = self.post_delivery()
+        self.assertEqual(response.status_code, 200)
+        receipt = GoodsReceipt.objects.get()
+        self.assertEqual(receipt.received_by, self.procurement)
+        self.assertTrue(receipt.invoice_photo)
+        self.assertEqual(StockBatch.objects.get(batch_number="B-SCREEN").quantity_on_hand, Decimal("100"))
+
+    def test_delivery_screen_refuses_a_submission_without_a_photograph(self):
+        self.client.login(username=self.procurement.username, password=self.password)
+        response = self.client.post(
+            reverse("goods_receipt_create", args=[self.order.pk]),
+            {
+                "supplier_invoice_reference": "SUP-INV-200",
+                "invoice_amount": "200.00",
+                "delivered_on": timezone.localdate().isoformat(),
+                "lines-TOTAL_FORMS": "1",
+                "lines-INITIAL_FORMS": "0",
+                "lines-MIN_NUM_FORMS": "1",
+                "lines-MAX_NUM_FORMS": "1000",
+                "lines-0-order_line": str(self.order_line.pk),
+                "lines-0-quantity_received": "100",
+                "lines-0-batch_number": "B-NOPHOTO",
+                "lines-0-actual_unit_cost": "2.00",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(GoodsReceipt.objects.exists())
+        self.assertFalse(StockBatch.objects.filter(batch_number="B-NOPHOTO").exists())
+
+    def test_invoice_photograph_is_served_only_to_authorised_roles(self):
+        self.client.login(username=self.procurement.username, password=self.password)
+        with override_settings(MEDIA_ROOT=self.media_root):
+            self.post_delivery()
+            receipt = GoodsReceipt.objects.get()
+            self.client.login(username=self.reception.username, password=self.password)
+            self.assertEqual(self.client.get(reverse("goods_receipt_invoice", args=[receipt.pk])).status_code, 403)
+            self.client.login(username=self.owner.username, password=self.password)
+            allowed = self.client.get(reverse("goods_receipt_invoice", args=[receipt.pk]))
+        self.assertEqual(allowed.status_code, 200)
+        self.assertTrue(AuditEvent.objects.filter(action="goods_receipt.invoice_viewed").exists())
+
+    def test_stock_count_sheet_can_be_counted_and_reviewed_through_the_screens(self):
+        self.client.login(username=self.pharmacist.username, password=self.password)
+        self.client.post(reverse("stock_count_open"), {"location": "Pharmacy", "blind_count": "on"})
+        count = StockCount.objects.get()
+        line = count.lines.get(batch=self.batch)
+        self.client.post(
+            reverse("stock_count_detail", args=[count.pk]),
+            {f"counted-{line.pk}": "197", f"reason-{line.pk}": "Breakage"},
+        )
+        count.refresh_from_db()
+        self.assertEqual(count.status, StockCount.Status.SUBMITTED)
+
+        self.client.login(username=self.reviewer.username, password=self.password)
+        self.client.post(reverse("stock_count_review", args=[count.pk]), {"decision": "approve", "review_notes": "Seen"})
+        count.refresh_from_db()
+        self.assertEqual(count.status, StockCount.Status.APPROVED)
+        self.assertEqual(self.batch.quantity_on_hand, Decimal("197"))
+
+    def test_owner_report_carries_the_stock_position(self):
+        self.client.login(username=self.owner.username, password=self.password)
+        response = self.client.get(reverse("reports"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["stock"]["stock_value_cost"], Decimal("400.00"))
+        self.assertContains(response, "Stock value at cost")
+        pdf = self.client.get(reverse("report_download_pdf"))
+        self.assertEqual(pdf.status_code, 200)
+        self.assertEqual(pdf["Content-Type"], "application/pdf")
+
+    def test_deliveries_screen_is_closed_to_clinical_roles(self):
+        self.client.login(username=self.clinician.username, password=self.password)
+        self.assertEqual(self.client.get(reverse("deliveries")).status_code, 403)
+        self.assertEqual(self.client.get(reverse("stock")).status_code, 403)
+
+
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
+class DemoSeedTests(TestCase):
+    """The documented quick start must actually run.
+
+    ``seed_demo`` assigned roles to a freshly fetched StaffProfile while the
+    User instance it kept still carried the default-role profile the post_save
+    signal had attached. Every later role check read the stale copy, so the
+    command aborted partway through and the demo environment could not be
+    created at all.
+    """
+
+    def test_demo_seed_completes_and_assigns_roles(self):
+        call_command("seed_demo")
+        pharmacist = User.objects.get(username="pharmacy.demo")
+        self.assertEqual(user_role(pharmacist), Role.PHARMACY)
+        self.assertEqual(user_role(User.objects.get(username="owner.demo")), Role.OWNER)
+        self.assertTrue(PharmacyOrder.objects.filter(customer_name="Demo Walk-In Customer").exists())
+
+    def test_demo_seed_is_idempotent(self):
+        call_command("seed_demo")
+        call_command("seed_demo")
+        self.assertEqual(User.objects.filter(username="pharmacy.demo").count(), 1)
+        self.assertEqual(PurchaseOrder.objects.count(), 1)
+        self.assertEqual(StockMovement.objects.filter(reference_id="DEMO-WITNESSED-001").count(), 3)
+
+    def test_demo_seed_leaves_an_approved_order_ready_to_receive(self):
+        call_command("seed_demo")
+        order = PurchaseOrder.objects.get()
+        self.assertEqual(order.status, "approved")
+        self.assertNotEqual(order.approved_by_id, order.requested_by_id)
+        self.assertEqual(order.lines.count(), 2)

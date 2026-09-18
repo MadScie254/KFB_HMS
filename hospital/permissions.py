@@ -45,14 +45,17 @@ def unlocked_required(view):
     return wrapped
 
 
+# "stock" shows the ledger; "stock_control" adds the deliveries and stock-count
+# screens that post movements, so a reviewer can read the position without
+# being offered the buttons that change it.
 ROLE_NAVIGATION = {
-    Role.OWNER: ["dashboard", "patients", "reports", "exceptions", "audit", "purchasing", "settings"],
+    Role.OWNER: ["dashboard", "patients", "reports", "stock", "stock_control", "exceptions", "audit", "purchasing", "settings"],
     Role.RECEPTION: ["dashboard", "patients", "queue", "payments", "pharmacy", "shifts"],
     Role.CLINICIAN: ["dashboard", "patients", "queue", "clinical", "wards", "departments"],
     Role.NURSE: ["dashboard", "patients", "wards", "departments"],
-    Role.PHARMACY: ["dashboard", "pharmacy", "stock"],
+    Role.PHARMACY: ["dashboard", "pharmacy", "stock", "stock_control"],
     Role.LAB: ["dashboard", "queue", "departments"],
     Role.EYE: ["dashboard", "patients", "eye"],
-    Role.PROCUREMENT: ["dashboard", "stock", "purchasing"],
-    Role.REVIEWER: ["dashboard", "exceptions", "audit", "purchasing", "reports"],
+    Role.PROCUREMENT: ["dashboard", "stock", "stock_control", "purchasing"],
+    Role.REVIEWER: ["dashboard", "exceptions", "audit", "purchasing", "reports", "stock", "stock_control"],
 }

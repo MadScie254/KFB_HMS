@@ -196,14 +196,49 @@ def build_financial_report_pdf(*, context, hospital_name, generated_by):
     )
     invoice_table.setStyle(_table_style(right_columns=(3, 4)))
 
+    stock = context["stock"]
+    stock_activity = context["stock_activity"]
+    receiving = context["receiving"]
+    stock_rows = [["Measure", "Value", "Basis"]]
+    stock_rows.extend([
+        [
+            Paragraph(_text(label), styles["KFBCell"]),
+            value,
+            Paragraph(_text(basis), styles["KFBCell"]),
+        ]
+        for label, value, basis in [
+            ("Stock value at cost", _money(stock["stock_value_cost"]), "Ledger balance at batch purchase cost"),
+            (
+                "Stock value at selling price",
+                _money(stock["stock_value_retail"]),
+                f"Excludes {stock['unpriced_item_count']} unpriced product(s)"
+                if stock["unpriced_item_count"] else "All held products carry an approved price",
+            ),
+            ("Cost of goods dispensed", _money(stock_activity["cost_of_goods_dispensed"]), "Outward movements in period, at batch cost"),
+            ("Product sales billed", _money(stock_activity["product_sales_value"]), "Posted product invoice lines in period"),
+            ("Product gross margin", _money(stock_activity["product_gross_margin"]), "Billed less cost of goods; not an operating result"),
+            ("Products below reorder level", str(stock["below_reorder_count"]), "Sellable stock only"),
+            ("Batches expiring soon", str(stock["expiring_soon_count"]), f"Within {stock['expiry_window_days']} days, still holding stock"),
+            ("Expired stock held", _money(stock["expired_value"]), f"{stock['expired_count']} batch(es), not sellable"),
+            ("Deliveries awaiting check", str(receiving["unchecked_count"]), f"Of {receiving['receipt_count']} received in period"),
+        ]
+    ])
+    stock_table = Table(stock_rows, colWidths=[62 * mm, 40 * mm, 78 * mm], repeatRows=1)
+    stock_table.setStyle(_table_style(right_columns=(1,)))
+
     story.extend([
         KeepTogether([Paragraph("Department activity", styles["KFBSection"]), department_table]),
         Paragraph("Posted invoices", styles["KFBSection"]),
         invoice_table,
         Spacer(1, 5 * mm),
+        Paragraph("Stock position", styles["KFBSection"]),
+        stock_table,
+        Spacer(1, 5 * mm),
         Paragraph(
             "Operating result is intentionally omitted because the cost basis is not fully configured. "
-            "Unverified M-PESA is shown separately and is not counted as verified collection.",
+            "Unverified M-PESA is shown separately and is not counted as verified collection. "
+            "Stock is valued at the recorded purchase cost of the batch each unit sits in; stock discrepancy "
+            "against a physical count comes only from an approved stock count.",
             styles["KFBMeta"],
         ),
     ])

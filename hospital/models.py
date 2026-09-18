@@ -238,6 +238,23 @@ class StockBatch(TimeStampedModel):
     def can_dispense(self):
         return self.status == self.Status.ACTIVE and (not self.expiry_date or self.expiry_date >= timezone.localdate())
 
+    @property
+    def is_expired(self):
+        return bool(self.expiry_date) and self.expiry_date < timezone.localdate()
+
+    def days_to_expiry(self):
+        if not self.expiry_date:
+            return None
+        return (self.expiry_date - timezone.localdate()).days
+
+    def balance_at(self, cutoff):
+        """Ledger balance as at a cutoff, by actual event time.
+
+        A count sheet frozen at 14:00 must be compared with the stock the
+        ledger says was there at 14:00, not with what it says now.
+        """
+        return self.movements.filter(event_at__lte=cutoff).aggregate(total=Sum("quantity_delta"))["total"] or Decimal("0.000")
+
     def __str__(self):
         return f"{self.item.name} · {self.batch_number}"
 
@@ -640,43 +657,125 @@ class PurchaseOrderLine(models.Model):
 
 
 class GoodsReceipt(TimeStampedModel):
+    """A delivery actually received against a purchase order.
+
+    The supplier's invoice or delivery note is photographed at the counter and
+    stored with the receipt. Stock balances against a document the hospital
+    holds, not against a typed reference only the receiver ever saw.
+    """
+
+    receipt_number = models.CharField(max_length=30, unique=True, blank=True)
     purchase_order = models.ForeignKey(PurchaseOrder, on_delete=models.PROTECT, related_name="receipts")
     supplier_invoice_reference = models.CharField(max_length=100)
+    invoice_photo = models.FileField(upload_to="supplier_invoices/%Y/%m/", blank=True)
+    invoice_photo_name = models.CharField(max_length=255, blank=True)
+    invoice_amount = models.DecimalField(**MONEY)
+    invoice_date = models.DateField(null=True, blank=True)
+    delivered_at = models.DateTimeField(default=timezone.now)
+    posted_at = models.DateTimeField(null=True, blank=True)
     received_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="goods_received")
     checked_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="goods_checked")
     checked_at = models.DateTimeField(null=True, blank=True)
     discrepancy_notes = models.TextField(blank=True)
 
     class Meta:
+        ordering = ["-delivered_at"]
         constraints = [models.UniqueConstraint(fields=["purchase_order", "supplier_invoice_reference"], name="unique_supplier_invoice_per_order")]
+
+    def save(self, *args, **kwargs):
+        if not self.receipt_number:
+            self.receipt_number = f"GRN-{timezone.localdate():%Y%m%d}-{uuid.uuid4().hex[:6].upper()}"
+        super().save(*args, **kwargs)
 
     def clean(self):
         if self.checked_by_id and self.checked_by_id == self.received_by_id:
             raise ValidationError("The delivery checker must differ from the receiver.")
 
+    @property
+    def received_value(self):
+        """What the delivered quantities cost at the unit costs entered."""
+        return sum(
+            (line.line_cost for line in self.lines.all()),
+            Decimal("0.00"),
+        ).quantize(Decimal("0.01"))
+
+    @property
+    def invoice_variance(self):
+        """Supplier invoice total minus the value of what was physically counted in."""
+        return (self.invoice_amount - self.received_value).quantize(Decimal("0.01"))
+
+    def __str__(self):
+        return f"{self.receipt_number} · {self.supplier_invoice_reference}"
+
 
 class GoodsReceiptLine(models.Model):
     receipt = models.ForeignKey(GoodsReceipt, on_delete=models.PROTECT, related_name="lines")
-    order_line = models.ForeignKey(PurchaseOrderLine, on_delete=models.PROTECT)
+    order_line = models.ForeignKey(PurchaseOrderLine, on_delete=models.PROTECT, related_name="receipt_lines")
+    batch = models.ForeignKey(StockBatch, null=True, blank=True, on_delete=models.PROTECT, related_name="receipt_lines")
     quantity_received = models.DecimalField(**QUANTITY, validators=[MinValueValidator(Decimal("0.001"))])
     batch_number = models.CharField(max_length=80)
     expiry_date = models.DateField(null=True, blank=True)
     actual_unit_cost = models.DecimalField(**MONEY, validators=[MinValueValidator(Decimal("0.00"))])
 
+    @property
+    def line_cost(self):
+        return (Decimal(str(self.quantity_received)) * Decimal(str(self.actual_unit_cost))).quantize(Decimal("0.01"))
+
+    @property
+    def cost_variance(self):
+        """Actual unit cost minus the quoted unit cost on the approved order."""
+        return (Decimal(str(self.actual_unit_cost)) - Decimal(str(self.order_line.quoted_unit_cost))).quantize(Decimal("0.01"))
+
 
 class StockCount(TimeStampedModel):
-    status = models.CharField(max_length=16, choices=[("frozen", "Snapshot frozen"), ("submitted", "Submitted"), ("approved", "Approved")], default="frozen")
+    """A physical count reconciled against the ledger at a frozen cutoff.
+
+    Approval is what posts the correcting movements; the count itself never
+    edits a balance, so a miscount is visible as a reviewed variance rather
+    than an untraceable overwrite.
+    """
+
+    class Status(models.TextChoices):
+        FROZEN = "frozen", "Snapshot frozen"
+        SUBMITTED = "submitted", "Submitted for review"
+        APPROVED = "approved", "Approved and posted"
+        REJECTED = "rejected", "Rejected"
+
+    reference = models.CharField(max_length=30, unique=True, blank=True)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.FROZEN)
     location = models.CharField(max_length=80, default="Pharmacy")
     cutoff_at = models.DateTimeField(default=timezone.now)
     blind_count = models.BooleanField(default=True)
+    notes = models.TextField(blank=True)
+    review_notes = models.TextField(blank=True)
     counted_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="stock_counts")
     witnessed_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="stock_counts_witnessed")
     reviewed_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="stock_counts_reviewed")
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-cutoff_at"]
+
+    def save(self, *args, **kwargs):
+        if not self.reference:
+            self.reference = f"SC-{timezone.localdate():%Y%m%d}-{uuid.uuid4().hex[:6].upper()}"
+        super().save(*args, **kwargs)
+
+    @property
+    def net_variance(self):
+        return sum((line.variance for line in self.lines.all()), Decimal("0.000"))
+
+    @property
+    def variance_line_count(self):
+        return sum(1 for line in self.lines.all() if line.variance)
+
+    def __str__(self):
+        return f"{self.reference} · {self.location}"
 
 
 class StockCountLine(models.Model):
     count = models.ForeignKey(StockCount, on_delete=models.PROTECT, related_name="lines")
-    batch = models.ForeignKey(StockBatch, on_delete=models.PROTECT)
+    batch = models.ForeignKey(StockBatch, on_delete=models.PROTECT, related_name="count_lines")
     expected_quantity = models.DecimalField(**QUANTITY)
     counted_quantity = models.DecimalField(**QUANTITY)
     reason = models.CharField(max_length=255, blank=True)
@@ -684,6 +783,11 @@ class StockCountLine(models.Model):
     @property
     def variance(self):
         return self.counted_quantity - self.expected_quantity
+
+    @property
+    def variance_value(self):
+        """Variance priced at the batch purchase cost, for a reviewable figure."""
+        return (self.variance * self.batch.purchase_cost_per_base_unit).quantize(Decimal("0.01"))
 
 
 class TheatreCase(TimeStampedModel):

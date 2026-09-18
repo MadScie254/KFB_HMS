@@ -1,0 +1,95 @@
+{% extends "base.html" %}{% block title %}{{ receipt.receipt_number }}{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <p class="breadcrumbs"><a href="{% url 'stock' %}">Stock</a> / <a href="{% url 'deliveries' %}">Deliveries</a> / {{ receipt.receipt_number }}</p>
+    <h1>{{ receipt.receipt_number }}</h1>
+    <p>{{ receipt.purchase_order.supplier.name }} · supplier invoice {{ receipt.supplier_invoice_reference }} · order {{ receipt.purchase_order.order_number }}</p>
+  </div>
+  <div class="heading-actions">
+    {% if receipt.invoice_photo %}<a class="button secondary" href="{% url 'goods_receipt_invoice' receipt.pk %}">{% include "hospital/_icon.html" with name="camera" %} View invoice photo</a>{% endif %}
+    <span class="large-status {% if receipt.checked_by %}confirmed{% else %}prepared{% endif %}">{% if receipt.checked_by %}Independently checked{% else %}Awaiting independent check{% endif %}</span>
+  </div>
+</div>
+
+<div class="content-grid">
+  <section class="panel span-2">
+    <div class="panel-head"><div><p class="eyebrow">Posted to the stock ledger</p><h2>Batches counted in</h2></div></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Item</th><th>Batch</th><th>Expiry</th><th class="numeric">Quantity</th><th class="numeric">Unit cost</th><th class="numeric">Line value</th><th>Against order</th></tr></thead>
+        <tbody>
+        {% for line in receipt.lines.all %}
+        <tr>
+          <td><strong>{{ line.order_line.item.name }}</strong><small>{{ line.order_line.item.code }}</small></td>
+          <td>{{ line.batch_number }}</td>
+          <td>{{ line.expiry_date|date:"j M Y"|default:"Not recorded" }}</td>
+          <td class="numeric">{{ line.quantity_received|floatformat:"-3" }} {{ line.order_line.item.base_unit }}</td>
+          <td class="numeric">KES {{ line.actual_unit_cost|floatformat:2 }}</td>
+          <td class="numeric">KES {{ line.line_cost|floatformat:2 }}</td>
+          <td>
+            {% if line.cost_variance %}<span class="status warning">KES {{ line.cost_variance|floatformat:2 }} vs quote</span>{% else %}<span class="status active">At quoted cost</span>{% endif %}
+            <small>Ordered {{ line.order_line.quantity_base_units|floatformat:"-3" }}</small>
+          </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="section-divider"><div><p class="eyebrow">Append-only</p><h2>Movements this delivery created</h2></div></div>
+    <ul class="record-list compact-list">
+      {% for movement in movements %}
+      <li>
+        <div><strong>{{ movement.batch.item.name }}</strong><p>{{ movement.get_movement_type_display }} into {{ movement.to_location }}</p><small>{{ movement.event_at|date:"j M Y, H:i" }} by {{ movement.entered_by.staff_profile }}</small></div>
+        <span class="quantity">+{{ movement.quantity_delta|floatformat:"-3" }}</span>
+      </li>
+      {% empty %}
+      <li class="empty compact">No movements are linked to this receipt.</li>
+      {% endfor %}
+    </ul>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><div><p class="eyebrow">Balancing</p><h2>Invoice against goods</h2></div></div>
+    <dl class="summary-list">
+      <div><dt>Goods counted in</dt><dd>KES {{ receipt.received_value|floatformat:2 }}</dd></div>
+      <div><dt>Supplier invoice</dt><dd>KES {{ receipt.invoice_amount|floatformat:2 }}</dd></div>
+      <div><dt>Difference</dt><dd>{% if receipt.invoice_variance %}<span class="status warning">KES {{ receipt.invoice_variance|floatformat:2 }}</span>{% else %}<span class="status confirmed">Balanced</span>{% endif %}</dd></div>
+      <div><dt>Invoice date</dt><dd>{{ receipt.invoice_date|date:"j M Y"|default:"Not recorded" }}</dd></div>
+      <div><dt>Delivered</dt><dd>{{ receipt.delivered_at|date:"j M Y, H:i" }}</dd></div>
+      <div><dt>Posted to ledger</dt><dd>{{ receipt.posted_at|date:"j M Y, H:i"|default:"Not posted" }}</dd></div>
+      <div><dt>Received by</dt><dd>{{ receipt.received_by.staff_profile }}</dd></div>
+      <div><dt>Checked by</dt><dd>{{ receipt.checked_by.staff_profile|default:"Not yet checked" }}</dd></div>
+    </dl>
+
+    {% if receipt.invoice_photo %}
+    <div class="section-divider"><div><p class="eyebrow">Evidence held</p><h2>Invoice photograph</h2></div></div>
+    <ul class="attachment-list">
+      <li>
+        <div><strong>{{ receipt.invoice_photo_name|default:"Supplier invoice" }}</strong><small>Uploaded with the delivery; access is recorded in the audit trail.</small></div>
+        <a class="button secondary small" href="{% url 'goods_receipt_invoice' receipt.pk %}">Open</a>
+      </li>
+    </ul>
+    {% else %}
+    <div class="callout warning-callout"><strong>No invoice photograph is held.</strong><p>This record cannot be balanced against a supplier document from the application.</p></div>
+    {% endif %}
+
+    {% if receipt.discrepancy_notes %}
+    <div class="section-divider"><div><p class="eyebrow">Recorded at the check</p><h2>What the checker found</h2></div></div>
+    <p>{{ receipt.discrepancy_notes }}</p>
+    <small class="help-text">Checked {{ receipt.checked_at|date:"j M Y, H:i" }}.</small>
+    {% endif %}
+
+    {% if can_check %}
+    <div class="section-divider"><div><p class="eyebrow">Second person</p><h2>Check this delivery</h2></div></div>
+    <form method="post" action="{% url 'goods_receipt_check' receipt.pk %}" class="form-stack">{% csrf_token %}
+      <div class="form-grid one-column">{% include "hospital/_form_fields.html" with form=check_form %}</div>
+      <button class="button primary full" type="submit">{% include "hospital/_icon.html" with name="check" %} Confirm I checked this delivery</button>
+    </form>
+    {% elif not receipt.checked_by %}
+    <div class="callout warning-callout"><strong>You cannot check this delivery.</strong><p>The person who received a delivery cannot also confirm it. A different member of staff must open this record.</p></div>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

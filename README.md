@@ -12,6 +12,9 @@ A local-first, server-rendered hospital operations application for Kingdom Faith
 - Cash and manually recorded M-PESA with unique references and a visibly unverified state.
 - Cashier shift opening/closing calculations and exception creation for variances.
 - Versioned catalogue prices, base-unit stock, FEFO batch allocation, quarantine/expiry rejection and idempotent dispensing.
+- Delivery receiving against an approved order, with a mandatory photograph of the supplier invoice, per-batch expiry and actual cost, partial deliveries, and an independent check the receiver cannot perform.
+- Stock counts frozen at a cutoff, with a blind-count option and an approved adjustment movement for each variance; no screen anywhere edits a quantity directly.
+- Stock statistics: valuation at cost and at selling price, products below reorder level, near-expiry and expired batches, cost of goods dispensed, product sales and gross margin, and most-dispensed products.
 - Configurable ward/bed register and admission records with separate clinical and financial status.
 - Eye session/case records with separate patients/eyes and one provisional case fee per completed patient.
 - Purchase requests with independent approval enforcement.
@@ -45,6 +48,17 @@ Do not reuse these accounts or this password in production. `seed_demo` refuses 
 3. Sign in again as `pharmacy.demo`. Open the now-cleared order and confirm actual dispense.
 4. Open Stock to see the batch movement and reduced balance. A repeated dispense submission will not deduct twice.
 
+## Demonstrate the stock replenishment and balancing workflow
+
+Stock leaving the shelf is only half the ledger. To see the other half:
+
+1. Sign in as `procurement.demo` and open Deliveries. The seeded, independently approved restock order is waiting to be received.
+2. Choose Receive. Enter the supplier invoice number and total, attach a photograph of the invoice (any JPG, PNG, HEIC or PDF under 10 MB — the form will not post without one), and record a batch number, expiry date, actual quantity and actual unit cost for each line.
+3. Post the delivery. Stock rises immediately as receipt movements. If the delivered cost differs from the approved quote, or the invoice total does not match the goods counted in, the delivery is still posted — the difference is raised in the exception centre rather than blocking the record of what arrived. An already-expired batch is refused.
+4. Sign in as `pharmacy.demo` and open the same delivery. A second member of staff confirms it; the person who received it cannot.
+5. Open Stock to see the valuation, reorder position and expiry standing update, then Stock counts to freeze a count sheet, enter what is physically on the shelf, and submit it.
+6. Sign in as `reviewer.demo` and approve the count. Only that approval posts an adjustment movement for each variance; rejecting it changes no balance at all.
+
 For the outpatient slice, reception registers/finds a patient and starts a visit; the clinician opens the queue, saves/signs a note, and can request departmental work. Pharmacy and reception then use the same settlement/dispense controls.
 
 ## Production-style local server
@@ -66,6 +80,8 @@ After the real internal HTTPS URL works, create the workstation shortcut with `s
 ```
 
 The suite covers outpatient prescription pricing/payment/dispense, walk-in reconciliation, base-unit stock arithmetic, duplicate M-PESA references, expiry/quarantine controls, partial allocations and deposits, cash-shift math, independent review, bilateral case fee, signed-note immutability, CSV idempotency and role denial.
+
+It also covers the stock control loop: a delivery posting receipt movements and balancing against its invoice, refusal without an invoice photograph, refusal of expired batches, per-order supplier-invoice uniqueness, partial deliveries, price and invoice-total differences raised as exceptions without blocking the post, the receiver being unable to check their own delivery, count snapshots frozen at their cutoff, approved counts posting adjustments, reviewer segregation, and the demo seed command completing with the correct roles.
 
 ## Backup
 

@@ -1,0 +1,99 @@
+{% extends "base.html" %}{% block title %}Deliveries{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <p class="breadcrumbs"><a href="{% url 'stock' %}">Stock</a> / Deliveries</p>
+    <h1>Deliveries received</h1>
+    <p>Stock enters the hospital here. Each delivery carries a photograph of the supplier document it is balanced against.</p>
+  </div>
+</div>
+
+<section class="kpi-grid compact-grid" aria-label="Receiving control, last 30 days">
+  <div class="kpi"><span>Deliveries received</span><strong>{{ summary.receipt_count }}</strong><small>Last 30 days</small></div>
+  <div class="kpi"><span>Invoiced value</span><strong>KES {{ summary.invoiced_value|floatformat:2 }}</strong><small>As billed by suppliers</small></div>
+  <div class="kpi {% if summary.unchecked_count %}warning{% endif %}"><span>Awaiting independent check</span><strong>{{ summary.unchecked_count }}</strong><small>A second person must confirm each delivery</small></div>
+</section>
+
+{% if summary.without_photo %}
+<div class="report-notice">{% include "hospital/_icon.html" with name="alert" %}<div><strong>{{ summary.without_photo }} delivery record without invoice evidence</strong><span>These predate the photograph requirement. Attach the paper document to the physical file and note it at the next check.</span></div></div>
+{% endif %}
+
+<div class="content-grid">
+  <section class="panel span-2">
+    <div class="panel-head"><div><p class="eyebrow">Approved and outstanding</p><h2>Orders ready to receive</h2></div><span>{{ open_orders|length }} order{{ open_orders|length|pluralize }}</span></div>
+    {% if open_orders %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Order</th><th>Supplier</th><th>Items</th><th>Status</th><th>Action</th></tr></thead>
+        <tbody>
+        {% for order in open_orders %}
+        <tr>
+          <td><strong>{{ order.order_number }}</strong><small>Approved by {{ order.approved_by.staff_profile|default:"pending" }}</small></td>
+          <td>{{ order.supplier.name }}</td>
+          <td>{% for line in order.lines.all %}{{ line.item.name }} · {{ line.quantity_base_units|floatformat:"-3" }} {{ line.item.base_unit }}<small>Quoted KES {{ line.quoted_unit_cost|floatformat:2 }} each</small>{% endfor %}</td>
+          <td><span class="status {{ order.status }}">{{ order.get_status_display }}</span></td>
+          <td>{% if can_receive %}<a class="button primary small" href="{% url 'goods_receipt_create' order.pk %}">{% include "hospital/_icon.html" with name="truck" %} Receive</a>{% else %}<small>Procurement or pharmacy receives</small>{% endif %}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="empty">
+      <strong>No approved order is waiting for stock.</strong>
+      <p>An order must be requested by procurement and approved by a different authorised reviewer before its stock can be received.</p>
+      {% if 'purchasing' in allowed_navigation %}<p><a class="button secondary" href="{% url 'purchasing' %}">Open purchasing</a></p>{% endif %}
+    </div>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><div><p class="eyebrow">Second person required</p><h2>Awaiting check</h2></div></div>
+    {% if awaiting_check %}
+    <ul class="review-list">
+      {% for receipt in awaiting_check %}
+      <li>
+        <div>
+          <strong><a href="{% url 'goods_receipt_detail' receipt.pk %}">{{ receipt.receipt_number }}</a></strong>
+          <p>{{ receipt.purchase_order.supplier.name }} · invoice {{ receipt.supplier_invoice_reference }}</p>
+          <small>Received by {{ receipt.received_by.staff_profile }} on {{ receipt.delivered_at|date:"j M Y" }}</small>
+        </div>
+        <a class="button secondary small" href="{% url 'goods_receipt_detail' receipt.pk %}">Open</a>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <div class="empty compact"><strong>Every delivery has been checked.</strong><p>A receiver can never check their own delivery.</p></div>
+    {% endif %}
+  </section>
+</div>
+
+<section class="panel">
+  <div class="panel-head"><div><p class="eyebrow">Posted to the stock ledger</p><h2>Delivery history</h2></div><span>Most recent 50</span></div>
+  {% if receipts %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Receipt</th><th>Supplier / invoice</th><th>Delivered</th><th class="numeric">Goods value</th><th class="numeric">Invoice total</th><th>Evidence</th><th>Independent check</th></tr></thead>
+      <tbody>
+      {% for receipt in receipts %}
+      <tr>
+        <td><a href="{% url 'goods_receipt_detail' receipt.pk %}"><strong>{{ receipt.receipt_number }}</strong><small>{{ receipt.purchase_order.order_number }}</small></a></td>
+        <td>{{ receipt.purchase_order.supplier.name }}<small>{{ receipt.supplier_invoice_reference }}</small></td>
+        <td>{{ receipt.delivered_at|date:"j M Y" }}<small>{{ receipt.lines.all|length }} line{{ receipt.lines.all|length|pluralize }}</small></td>
+        <td class="numeric">KES {{ receipt.received_value|floatformat:2 }}</td>
+        <td class="numeric">KES {{ receipt.invoice_amount|floatformat:2 }}{% if receipt.invoice_variance %}<small>Difference KES {{ receipt.invoice_variance|floatformat:2 }}</small>{% endif %}</td>
+        <td>{% if receipt.invoice_photo %}<a href="{% url 'goods_receipt_invoice' receipt.pk %}">{% include "hospital/_icon.html" with name="camera" %} View invoice</a>{% else %}<span class="status warning">No photo</span>{% endif %}</td>
+        <td>{% if receipt.checked_by %}<span class="status confirmed">Checked</span><small>{{ receipt.checked_by.staff_profile }}</small>{% else %}<span class="status pending">Awaiting</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty">
+    <strong>No delivery has been received yet.</strong>
+    <p>Until a delivery is recorded, the only stock in the ledger is the witnessed opening count.</p>
+  </div>
+  {% endif %}
+</section>
+{% endblock %}

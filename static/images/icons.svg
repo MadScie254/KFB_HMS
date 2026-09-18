@@ -25,5 +25,9 @@
     <symbol id="trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6"/></symbol>
     <symbol id="search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></symbol>
     <symbol id="activity" viewBox="0 0 24 24"><path d="M3 12h4l2-7 4 14 2-7h6"/></symbol>
+    <symbol id="truck" viewBox="0 0 24 24"><path d="M3 6h11v10H3zM14 9h4l3 3v4h-7z"/><circle cx="7" cy="18" r="1.8"/><circle cx="17" cy="18" r="1.8"/></symbol>
+    <symbol id="clipboard" viewBox="0 0 24 24"><path d="M9 4h6v3H9zM8 5H6v15h12V5h-2M9 11h6M9 15h4"/></symbol>
+    <symbol id="camera" viewBox="0 0 24 24"><path d="M4 8h3l1.5-2h7L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.4"/></symbol>
+    <symbol id="check" viewBox="0 0 24 24"><path d="m5 13 4 4L19 7"/></symbol>
   </defs>
 </svg>

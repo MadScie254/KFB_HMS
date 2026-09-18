@@ -1,3 +1,205 @@
 {% extends "base.html" %}{% block title %}Stock{% endblock %}
-{% block content %}<div class="page-heading"><div><p class="breadcrumbs"><a href="{% url 'dashboard' %}">Home</a> / Stock</p><h1>Stock ledger</h1><p>Quantities come from movements; there is no editable current-quantity field.</p></div></div><div class="content-grid"><section class="panel span-2"><div class="panel-head"><h2>Batch balances</h2><span>{{ batches|length }} batches</span></div>{% if batches %}<div class="table-wrap"><table><thead><tr><th>Product</th><th>Batch</th><th>Expiry</th><th>Status</th><th class="numeric">On hand</th><th>Reorder level</th></tr></thead><tbody>{% for batch in batches %}<tr><td><strong>{{ batch.item.name }}</strong><small>{{ batch.item.code }}</small></td><td>{{ batch.batch_number }}</td><td>{{ batch.expiry_date|date:"j M Y"|default:"Not recorded" }}</td><td><span class="status {{ batch.status }}">{% if batch.can_dispense %}Available{% else %}{{ batch.get_status_display }}{% endif %}</span></td><td class="numeric"><strong>{{ batch.on_hand }}</strong> {{ batch.item.base_unit }}</td><td>{{ batch.item.reorder_level }} {{ batch.item.base_unit }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<div class="empty"><strong>No stock batches configured.</strong><p>Opening stock requires a witnessed count and batch details.</p></div>{% endif %}</section><section class="panel"><div class="panel-head"><h2>Recent movements</h2></div><ul class="record-list compact-list">{% for movement in movements %}<li><div><strong>{{ movement.batch.item.name }}</strong><p>{{ movement.get_movement_type_display }} · {{ movement.reference_id }}</p><small>{{ movement.entered_at|date:"j M, H:i" }} by {{ movement.entered_by.staff_profile }}</small></div><span class="quantity {% if movement.quantity_delta < 0 %}negative{% endif %}">{{ movement.quantity_delta }}</span></li>{% empty %}<li class="empty compact">No movements recorded.</li>{% endfor %}</ul></section></div>{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <p class="breadcrumbs"><a href="{% url 'dashboard' %}">Home</a> / Stock</p>
+    <h1>Stock control</h1>
+    <p>Every quantity below is the sum of its movements. There is no editable current-quantity field.</p>
+  </div>
+  <div class="heading-actions">
+    {% if can_count %}<a class="button secondary" href="{% url 'stock_counts' %}">{% include "hospital/_icon.html" with name="clipboard" %} Stock counts</a>{% endif %}
+    {% if can_receive %}<a class="button primary" href="{% url 'deliveries' %}">{% include "hospital/_icon.html" with name="truck" %} Receive delivery</a>{% endif %}
+  </div>
+</div>
 
+<section class="kpi-grid" aria-label="Stock position">
+  <div class="kpi">
+    <span>Stock value at cost</span>
+    <strong>KES {{ position.stock_value_cost|floatformat:2 }}</strong>
+    <small>{{ position.product_count }} product{{ position.product_count|pluralize }} · {{ position.batch_count }} batch{{ position.batch_count|pluralize:"es" }}</small>
+  </div>
+  <div class="kpi">
+    <span>Value at selling price</span>
+    <strong>KES {{ position.stock_value_retail|floatformat:2 }}</strong>
+    <small>{% if position.unpriced_item_count %}Excludes {{ position.unpriced_item_count }} unpriced product{{ position.unpriced_item_count|pluralize }}{% else %}All held products carry an approved price{% endif %}</small>
+  </div>
+  <a class="kpi {% if position.below_reorder_count %}warning{% endif %}" href="?view=low">
+    <span>At or below reorder level</span>
+    <strong>{{ position.below_reorder_count }}</strong>
+    <small>Sellable stock only; expired and quarantined excluded</small>
+  </a>
+  <a class="kpi {% if position.expiring_soon_count %}warning{% endif %}" href="?view=expiring">
+    <span>Expiring within {{ position.expiry_window_days }} days</span>
+    <strong>{{ position.expiring_soon_count }}</strong>
+    <small>Batches still holding stock</small>
+  </a>
+  <a class="kpi {% if position.expired_count %}warning{% endif %}" href="?view=expired">
+    <span>Expired on the shelf</span>
+    <strong>{{ position.expired_count }}</strong>
+    <small>KES {{ position.expired_value|floatformat:2 }} at cost, not sellable</small>
+  </a>
+</section>
+
+<section class="kpi-grid" aria-label="Stock movement over the selected period">
+  <div class="kpi">
+    <span>Received</span>
+    <strong>{{ activity.received_units|floatformat:"-3" }}</strong>
+    <small>KES {{ activity.received_value|floatformat:2 }} at cost, last {{ days }} day{{ days|pluralize }}</small>
+  </div>
+  <div class="kpi">
+    <span>Sold and dispensed</span>
+    <strong>{{ activity.dispensed_units|floatformat:"-3" }}</strong>
+    <small>Base units removed from custody</small>
+  </div>
+  <div class="kpi">
+    <span>Cost of goods dispensed</span>
+    <strong>KES {{ activity.cost_of_goods_dispensed|floatformat:2 }}</strong>
+    <small>Priced at the batch each unit left</small>
+  </div>
+  <div class="kpi">
+    <span>Product sales billed</span>
+    <strong>KES {{ activity.product_sales_value|floatformat:2 }}</strong>
+    <small>Posted invoice lines for products</small>
+  </div>
+  <div class="kpi">
+    <span>Product gross margin</span>
+    <strong>KES {{ activity.product_gross_margin|floatformat:2 }}</strong>
+    <small>Billed minus cost of goods; not an operating result</small>
+  </div>
+</section>
+
+<section class="panel filter-panel">
+  <form method="get" class="filter-grid">
+    <div class="form-field">
+      <label for="stock-q">Search product or batch</label>
+      <input class="field-control" id="stock-q" type="search" name="q" value="{{ query }}" placeholder="Name, code or batch number">
+    </div>
+    <div class="form-field">
+      <label for="stock-view">Show</label>
+      <select class="field-control" id="stock-view" name="view">
+        {% for key, label in stock_views.items %}<option value="{{ key }}" {% if selected_view == key %}selected{% endif %}>{{ label }}</option>{% endfor %}
+      </select>
+    </div>
+    <div class="form-field">
+      <label for="stock-days">Movement period</label>
+      <select class="field-control" id="stock-days" name="days">
+        <option value="1" {% if days == 1 %}selected{% endif %}>Last 24 hours</option>
+        <option value="7" {% if days == 7 %}selected{% endif %}>Last 7 days</option>
+        <option value="30" {% if days == 30 %}selected{% endif %}>Last 30 days</option>
+        <option value="90" {% if days == 90 %}selected{% endif %}>Last 90 days</option>
+      </select>
+    </div>
+    <button class="button secondary" type="submit">{% include "hospital/_icon.html" with name="search" %} Apply</button>
+  </form>
+</section>
+
+<section class="panel">
+  <div class="panel-head">
+    <div><p class="eyebrow">Balances by product</p><h2>{{ selected_view_label }}</h2></div>
+    <span>{{ products|length }} product{{ products|length|pluralize }}</span>
+  </div>
+  {% if products %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Product</th><th class="numeric">On hand</th><th class="numeric">Sellable</th><th>Reorder level</th><th>Earliest expiry</th><th class="numeric">Cost value</th><th class="numeric">Sale value</th><th>Standing</th></tr></thead>
+      <tbody>
+      {% for row in products %}
+        <tr>
+          <td><strong>{{ row.item.name }}</strong><small>{{ row.item.code }} · {{ row.batch_count }} batch{{ row.batch_count|pluralize:"es" }}</small></td>
+          <td class="numeric"><strong>{{ row.on_hand|floatformat:"-3" }}</strong> {{ row.item.base_unit }}</td>
+          <td class="numeric">{{ row.sellable_on_hand|floatformat:"-3" }}</td>
+          <td>{{ row.reorder_level|floatformat:"-3" }} {{ row.item.base_unit }}</td>
+          <td>{% if row.earliest_expiry %}{{ row.earliest_expiry|date:"j M Y" }}{% else %}Not recorded{% endif %}</td>
+          <td class="numeric">KES {{ row.cost_value|floatformat:2 }}</td>
+          <td class="numeric">{% if row.priced %}KES {{ row.retail_value|floatformat:2 }}{% else %}<span class="status warning">No price</span>{% endif %}</td>
+          <td>
+            {% if row.below_reorder %}<span class="status warning">Reorder {{ row.shortfall|floatformat:"-3" }}</span>{% endif %}
+            {% if row.has_expired %}<span class="status emergency">Expired stock</span>{% endif %}
+            {% if row.has_near_expiry %}<span class="status prepared">Short dated</span>{% endif %}
+            {% if not row.below_reorder and not row.has_expired and not row.has_near_expiry %}<span class="status active">In stock</span>{% endif %}
+          </td>
+        </tr>
+        {% for batch in row.batches %}
+        <tr>
+          <td colspan="8">
+            <small>
+              Batch <strong>{{ batch.batch.batch_number }}</strong> ·
+              {% if batch.batch.expiry_date %}expires {{ batch.batch.expiry_date|date:"j M Y" }}{% if batch.days_to_expiry >= 0 %} ({{ batch.days_to_expiry }} day{{ batch.days_to_expiry|pluralize }}){% else %} (expired){% endif %}{% else %}no expiry recorded{% endif %} ·
+              {{ batch.on_hand|floatformat:"-3" }} {{ row.item.base_unit }} ·
+              cost KES {{ batch.batch.purchase_cost_per_base_unit|floatformat:2 }}/{{ row.item.base_unit }} ·
+              {% if batch.expired %}<span class="status emergency">Expired</span>{% elif batch.quarantined %}<span class="status quarantine">Quarantined</span>{% elif batch.near_expiry %}<span class="status prepared">Short dated</span>{% else %}<span class="status active">Available</span>{% endif %}
+            </small>
+          </td>
+        </tr>
+        {% endfor %}
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty">
+    <strong>Nothing matches this view.</strong>
+    <p>{% if query %}No product or batch matches “{{ query }}”.{% else %}Opening stock requires a witnessed count, and further stock arrives through a recorded delivery.{% endif %}</p>
+    {% if can_receive %}<p><a class="button secondary" href="{% url 'deliveries' %}">Record a delivery</a></p>{% endif %}
+  </div>
+  {% endif %}
+</section>
+
+<div class="content-grid">
+  <section class="panel span-2">
+    <div class="panel-head">
+      <div><p class="eyebrow">Append-only ledger</p><h2>Stock movements</h2></div>
+      <span>{{ page.paginator.count }} recorded</span>
+    </div>
+    {% if movements %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>When</th><th>Product / batch</th><th>Movement</th><th class="numeric">Change</th><th>Reference</th><th>Entered by</th></tr></thead>
+        <tbody>
+        {% for movement in movements %}
+        <tr>
+          <td>{{ movement.event_at|date:"j M Y, H:i" }}{% if movement.entered_at|date:"j M Y" != movement.event_at|date:"j M Y" %}<small>Entered {{ movement.entered_at|date:"j M, H:i" }}</small>{% endif %}</td>
+          <td><strong>{{ movement.batch.item.name }}</strong><small>{{ movement.batch.batch_number }}</small></td>
+          <td><span class="status {{ movement.movement_type }}">{{ movement.get_movement_type_display }}</span></td>
+          <td class="numeric"><span class="quantity {% if movement.quantity_delta < 0 %}negative{% endif %}">{{ movement.quantity_delta|floatformat:"-3" }}</span></td>
+          <td><small>{{ movement.reason|default:movement.reference_type }}</small></td>
+          <td>{{ movement.entered_by.staff_profile }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% include "hospital/_pagination.html" %}
+    {% else %}
+    <div class="empty"><strong>No movements recorded.</strong><p>Receipts, sales and approved adjustments will appear here.</p></div>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><div><p class="eyebrow">Last {{ days }} day{{ days|pluralize }}</p><h2>Most dispensed</h2></div></div>
+    {% if activity.top_movers %}
+    <ul class="bar-list">
+      {% for row in activity.top_movers %}
+      <li>
+        <span>{{ row.item.name|truncatechars:22 }}</span>
+        <div><i style="width:{% widthratio row.units activity.top_movers.0.units 100 %}%"></i></div>
+        <strong>{{ row.units|floatformat:"-3" }}</strong>
+      </li>
+      {% endfor %}
+    </ul>
+    <p class="help-text">Units left custody in this period, priced at KES {{ activity.cost_of_goods_dispensed|floatformat:2 }} of purchase cost in total.</p>
+    {% else %}
+    <div class="empty compact"><strong>Nothing dispensed in this period.</strong></div>
+    {% endif %}
+
+    {% if position.quarantined %}
+    <div class="section-divider"><div><p class="eyebrow">Held, not sellable</p><h2>Quarantined batches</h2></div></div>
+    <ul class="record-list compact-list">
+      {% for row in position.quarantined %}
+      <li><div><strong>{{ row.item.name }}</strong><p>Batch {{ row.batch.batch_number }}</p><small>Awaiting an authorised disposition</small></div><span class="quantity">{{ row.on_hand|floatformat:"-3" }}</span></li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}
