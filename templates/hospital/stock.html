@@ -160,7 +160,7 @@
         <tr>
           <td>{{ movement.event_at|date:"j M Y, H:i" }}{% if movement.entered_at|date:"j M Y" != movement.event_at|date:"j M Y" %}<small>Entered {{ movement.entered_at|date:"j M, H:i" }}</small>{% endif %}</td>
           <td><strong>{{ movement.batch.item.name }}</strong><small>{{ movement.batch.batch_number }}</small></td>
-          <td><span class="status {{ movement.movement_type }}">{{ movement.get_movement_type_display }}</span></td>
+          <td><span class="status movement-{{ movement.movement_type }}">{{ movement.get_movement_type_display }}</span></td>
           <td class="numeric"><span class="quantity {% if movement.quantity_delta < 0 %}negative{% endif %}">{{ movement.quantity_delta|floatformat:"-3" }}</span></td>
           <td><small>{{ movement.reason|default:movement.reference_type }}</small></td>
           <td>{{ movement.entered_by.staff_profile }}</td>

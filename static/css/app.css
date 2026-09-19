@@ -147,11 +147,18 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .attachment-upload { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--line); }
 .attachment-upload .form-grid { grid-template-columns: 1fr 2fr; margin-bottom: .75rem; }
 
-/* Stock control layer */
-.status.receipt, .status.approved, .status.received, .status.checked { color: var(--success); background: var(--success-bg); border-color: #acd7bf; }
-.status.dispense, .status.consumption, .status.rejected { color: var(--danger); background: var(--danger-bg); border-color: #e9afaf; }
-.status.adjustment, .status.submitted, .status.frozen, .status.part_received, .status.requested { color: var(--warning); background: var(--warning-bg); border-color: #e5c578; }
-.status.transfer, .status.return { color: #225c78; background: #e9f3f8; border-color: #b9d9e8; }
+/* Stock control layer.
+   Status badges take their modifier from a model field rendered straight into
+   the class attribute, so a value must never match an unrelated rule. Movement
+   types are namespaced because "receipt" is also the printable payment receipt
+   card, whose 2rem padding turned the badge into a large oval. */
+.status.movement-receipt { color: var(--success); background: var(--success-bg); border-color: #acd7bf; }
+.status.movement-dispense, .status.movement-consumption { color: var(--danger); background: var(--danger-bg); border-color: #e9afaf; }
+.status.movement-adjustment { color: var(--warning); background: var(--warning-bg); border-color: #e5c578; }
+.status.movement-transfer, .status.movement-return { color: #225c78; background: #e9f3f8; border-color: #b9d9e8; }
+.status.approved, .status.received, .status.checked { color: var(--success); background: var(--success-bg); border-color: #acd7bf; }
+.status.rejected { color: var(--danger); background: var(--danger-bg); border-color: #e9afaf; }
+.status.submitted, .status.frozen, .status.part_received, .status.requested { color: var(--warning); background: var(--warning-bg); border-color: #e5c578; }
 .large-status.approved, .large-status.checked, .large-status.confirmed { color: var(--success); background: var(--success-bg); border-color: #acd7bf; }
 .large-status.submitted, .large-status.frozen { color: var(--warning); background: var(--warning-bg); border-color: #e5c578; }
 .large-status.rejected { color: var(--danger); background: var(--danger-bg); border-color: #e9afaf; }
