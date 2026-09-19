@@ -22,7 +22,7 @@
           <small>Requested by {{ record.requested_by.staff_profile }} · {{ record.created_at|timesince }} ago</small>
         </div>
         {% if can_review %}
-        <form method="post" action="{% url 'write_off_review' record.pk %}" class="vertical-actions">{% csrf_token %}
+        <form method="post" action="{% url 'write_off_review' record.pk %}" class="vertical-actions" data-confirm="Record this decision? Approving removes the stock from the balance.">{% csrf_token %}
           <div class="form-grid one-column">{% include "hospital/_form_fields.html" with form=review_form %}</div>
           <div class="decision-actions">
             <button class="button secondary small" name="decision" value="reject" type="submit">Reject</button>

@@ -66,7 +66,32 @@ def validate_upload(uploaded, *, allowed, max_bytes, description):
     return uploaded
 
 
-class StyledFormMixin:
+class SeparatorTolerantMixin:
+    """Accept a number copied straight off the screen.
+
+    Figures are displayed grouped ("KES 1,540.00"), so sooner or later somebody
+    copies one and pastes it into a form. Rejecting their own number back at
+    them, with "Enter a number", is a needless dead end.
+    """
+
+    GROUPED_FIELDS = (forms.DecimalField, forms.IntegerField, forms.FloatField)
+
+    def clean(self):
+        return super().clean()
+
+    def _clean_fields(self):
+        for name, field in self.fields.items():
+            if not isinstance(field, self.GROUPED_FIELDS):
+                continue
+            raw = self.data.get(self.add_prefix(name))
+            if isinstance(raw, str) and "," in raw:
+                stripped = raw.replace(",", "").replace("\u00a0", "").strip()
+                self.data = self.data.copy()
+                self.data[self.add_prefix(name)] = stripped
+        super()._clean_fields()
+
+
+class StyledFormMixin(SeparatorTolerantMixin):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         for field in self.fields.values():

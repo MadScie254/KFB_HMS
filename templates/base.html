@@ -4,10 +4,19 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light">
+  <meta name="color-scheme" content="light dark">
   <meta name="description" content="Local-first hospital operations for Kingdom Faith Based Hospital">
   <title>{% block title %}Hospital operations{% endblock %} · KFB</title>
   <link rel="icon" href="{% static 'images/favicon.svg' %}" type="image/svg+xml">
+  <script>
+    // Applied before first paint: reading the preference after the stylesheet
+    // has painted gives a dark-theme user a white flash on every page.
+    try {
+      var saved = localStorage.getItem('kfb-theme');
+      if (saved === 'dark' || saved === 'light') document.documentElement.setAttribute('data-theme', saved);
+      if (localStorage.getItem('kfb-density') === 'compact') document.documentElement.setAttribute('data-density', 'compact');
+    } catch (e) { /* private mode: fall back to the system preference */ }
+  </script>
   <link rel="stylesheet" href="{% static 'css/app.css' %}">
   <script src="{% static 'js/app.js' %}" defer></script>
 </head>
@@ -51,21 +60,47 @@
     <div class="workspace">
       <header class="topbar">
         <button class="menu-button icon-button" type="button" aria-label="Open navigation" aria-expanded="false" data-menu-toggle>{% include "hospital/_icon.html" with name="menu" %}</button>
-        <div class="connection"><span class="status-dot"></span><span>Server connected</span><small>Updated {% now "H:i" %}</small></div>
+        <div class="connection"><span class="status-dot"></span><span data-connection-label>Server connected</span><small>Updated {% now "H:i" %}</small></div>
         <div class="topbar-actions">
+          <button type="button" class="icon-button" data-palette-open aria-label="Search everything" title="Search (press / or Ctrl+K)">{% include "hospital/_icon.html" with name="search" %}</button>
+          <button type="button" class="icon-button" data-theme-toggle aria-pressed="false" aria-label="Switch between the light and dark theme">{% include "hospital/_icon.html" with name="moon" %}</button>
           <span class="shift-chip">{{ user.staff_profile.active_shift_label|default:"No shift label" }}</span>
-          <span class="user-chip"><strong>{{ user.staff_profile }}</strong><small>{{ current_role|title }}</small></span>
+          <span class="identity"><strong>{{ user.staff_profile }}</strong><small>{{ current_role|title }}</small></span>
           <a href="{% url 'screen_lock' %}" class="icon-button" aria-label="Lock screen" title="Lock screen">{% include "hospital/_icon.html" with name="lock" %}</a>
           <form action="{% url 'logout' %}" method="post" class="inline-form">{% csrf_token %}<button type="submit" class="icon-button" aria-label="Sign out" title="Sign out">{% include "hospital/_icon.html" with name="logout" %}</button></form>
         </div>
       </header>
       {% if demo_mode %}<div class="demo-banner"><strong>Demonstration data</strong> · Not for real patient care or financial reporting</div>{% endif %}
       <main id="main-content" class="content">
-        {% if messages %}<div class="messages" aria-live="polite">{% for message in messages %}<div class="message {{ message.tags }}">{{ message }}</div>{% endfor %}</div>{% endif %}
+        {% if messages %}<div class="messages" role="status" aria-live="polite">{% for message in messages %}<div class="message {{ message.tags }}">{{ message }}</div>{% endfor %}</div>{% endif %}
         {% block content %}{% endblock %}
       </main>
     </div>
   </div>
+
+  <div class="palette-backdrop" data-palette="{% url 'quick_search' %}" role="dialog" aria-modal="true" aria-label="Search everything you can open">
+    <div class="palette">
+      <input type="search" autocomplete="off" spellcheck="false" placeholder="Search patients, visits, batches, orders, deliveries…" aria-label="Search">
+      <ul class="palette-results"></ul>
+      <p class="palette-foot">
+        <span><kbd>↑</kbd><kbd>↓</kbd> move</span>
+        <span><kbd>↵</kbd> open</span>
+        <span><kbd>esc</kbd> close</span>
+        <span><kbd>g</kbd> then <kbd>d</kbd> home · <kbd>p</kbd> patients · <kbd>q</kbd> queue · <kbd>s</kbd> stock</span>
+      </p>
+    </div>
+  </div>
+
+  <div class="notice-bar notice-offline" data-offline-notice role="alert">
+    {% include "hospital/_icon.html" with name="alert" %}
+    <span>No connection to the server. Anything you type now will not be saved until it returns.</span>
+  </div>
+  <div class="notice-bar notice-session" data-session-notice="{{ session_minutes_remaining|default:480 }}" role="alert">
+    {% include "hospital/_icon.html" with name="clock" %}
+    <span>Your session is about to end. Save your work.</span>
+    <button type="button" data-session-extend>Keep me signed in</button>
+  </div>
+  <button type="button" class="to-top" data-to-top aria-label="Back to top" title="Back to top">{% include "hospital/_icon.html" with name="arrow-up" %}</button>
   {% else %}
     {% block anonymous_content %}{% endblock %}
   {% endif %}

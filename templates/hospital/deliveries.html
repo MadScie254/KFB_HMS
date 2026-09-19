@@ -23,7 +23,7 @@
     <div class="panel-head"><div><p class="eyebrow">Approved and outstanding</p><h2>Orders ready to receive</h2></div><span>{{ open_orders|length }} order{{ open_orders|length|pluralize }}</span></div>
     {% if open_orders %}
     <div class="table-wrap">
-      <table>
+      <table data-sortable-table>
         <thead><tr><th>Order</th><th>Supplier</th><th>Items</th><th>Status</th><th>Action</th></tr></thead>
         <tbody>
         {% for order in open_orders %}
@@ -72,7 +72,7 @@
   <div class="panel-head"><div><p class="eyebrow">Posted to the stock ledger</p><h2>Delivery history</h2></div><span>Most recent 50</span></div>
   {% if receipts %}
   <div class="table-wrap">
-    <table>
+    <table data-sortable-table>
       <thead><tr><th>Receipt</th><th>Supplier / invoice</th><th>Delivered</th><th class="numeric">Goods value</th><th class="numeric">Invoice total</th><th>Evidence</th><th>Independent check</th></tr></thead>
       <tbody>
       {% for receipt in receipts %}

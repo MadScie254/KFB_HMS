@@ -100,7 +100,7 @@
   </div>
   {% if products %}
   <div class="table-wrap">
-    <table>
+    <table data-sortable-table>
       <thead><tr><th>Product</th><th class="numeric">On hand</th><th class="numeric">Sellable</th><th>Reorder level</th><th>Earliest expiry</th><th class="numeric">Cost value</th><th class="numeric">Sale value</th><th>Standing</th></tr></thead>
       <tbody>
       {% for row in products %}
@@ -153,7 +153,7 @@
     </div>
     {% if movements %}
     <div class="table-wrap">
-      <table>
+      <table data-sortable-table>
         <thead><tr><th>When</th><th>Product / batch</th><th>Movement</th><th class="numeric">Change</th><th>Reference</th><th>Entered by</th></tr></thead>
         <tbody>
         {% for movement in movements %}

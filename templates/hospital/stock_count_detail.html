@@ -89,7 +89,7 @@
 
     {% if can_review %}
     <div class="section-divider"><div><p class="eyebrow">Independent review</p><h2>Decide</h2></div></div>
-    <form method="post" action="{% url 'stock_count_review' count.pk %}" class="form-stack">{% csrf_token %}
+    <form method="post" action="{% url 'stock_count_review' count.pk %}" class="form-stack" data-confirm="Record this decision? Approving posts an adjustment movement for every variance on the sheet.">{% csrf_token %}
       <div class="form-grid one-column">{% include "hospital/_form_fields.html" with form=review_form %}</div>
       <div class="decision-actions">
         <button class="button secondary" name="decision" value="reject" type="submit">Reject</button>

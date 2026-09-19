@@ -35,7 +35,7 @@
     </div>
     {% if outstanding %}
     <div class="table-wrap">
-      <table>
+      <table data-sortable-table>
         <thead><tr><th>Issue</th><th>Department / person</th><th>Type</th><th>Items</th><th class="numeric">Outstanding</th><th>Action</th></tr></thead>
         <tbody>
         {% for issue in outstanding %}

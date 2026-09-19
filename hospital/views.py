@@ -164,6 +164,92 @@ def outstanding_receivables():
     return billed - credited - paid
 
 
+# What each role is allowed to find. Search must never become a way around the
+# page permissions: a receptionist searching a batch number finds nothing,
+# because they cannot open the stock ledger either.
+SEARCH_SCOPES = {
+    "patients": {Role.OWNER, Role.RECEPTION, Role.CLINICIAN, Role.NURSE, Role.EYE},
+    "encounters": {Role.OWNER, Role.RECEPTION, Role.CLINICIAN, Role.NURSE, Role.LAB},
+    "stock": {Role.OWNER, Role.PHARMACY, Role.PROCUREMENT, Role.REVIEWER},
+    "orders": {Role.OWNER, Role.PHARMACY, Role.RECEPTION},
+    "invoices": {Role.OWNER, Role.RECEPTION, Role.REVIEWER},
+    "deliveries": {Role.OWNER, Role.PROCUREMENT, Role.PHARMACY, Role.REVIEWER},
+}
+
+
+@login_required
+def quick_search(request):
+    """Everything the signed-in person may reach, from one box.
+
+    Finding a patient used to mean opening Patients and searching there;
+    finding a batch meant knowing which stock filter hid it. This answers the
+    question directly, and only ever returns records the caller's role could
+    already open.
+    """
+    term = (request.GET.get("q") or "").strip()
+    role = user_role(request.user)
+    results = []
+    if len(term) < 2:
+        return JsonResponse({"query": term, "results": results})
+
+    def allowed(scope):
+        return role in SEARCH_SCOPES.get(scope, set())
+
+    if allowed("patients"):
+        for patient in Patient.objects.filter(
+            Q(first_name__icontains=term) | Q(last_name__icontains=term)
+            | Q(patient_number__icontains=term) | Q(phone__icontains=term)
+            | Q(id_number__icontains=term)
+        ).order_by("last_name")[:5]:
+            results.append({
+                "kind": "Patient", "icon": "users", "label": patient.full_name,
+                "detail": f"{patient.patient_number}" + (f" · {patient.phone}" if patient.phone else ""),
+                "url": reverse("patient_detail", args=[patient.pk]),
+            })
+
+    if allowed("encounters"):
+        for encounter in Encounter.objects.filter(
+            encounter_number__icontains=term
+        ).select_related("patient").order_by("-created_at")[:4]:
+            results.append({
+                "kind": "Visit", "icon": "list", "label": encounter.encounter_number,
+                "detail": f"{encounter.patient.full_name} · {encounter.get_status_display()}",
+                "url": reverse("patient_detail", args=[encounter.patient_id]),
+            })
+
+    if allowed("stock"):
+        for batch in StockBatch.objects.filter(
+            Q(batch_number__icontains=term) | Q(item__name__icontains=term) | Q(item__code__icontains=term)
+        ).select_related("item").order_by("item__name")[:5]:
+            results.append({
+                "kind": "Batch", "icon": "box", "label": f"{batch.item.name}",
+                "detail": f"Batch {batch.batch_number}" + (f" · expires {batch.expiry_date:%b %Y}" if batch.expiry_date else ""),
+                "url": f"{reverse('stock')}?{urlencode({'q': batch.batch_number})}",
+            })
+
+    if allowed("orders"):
+        for order in PharmacyOrder.objects.filter(
+            order_number__icontains=term
+        ).select_related("patient").order_by("-created_at")[:4]:
+            results.append({
+                "kind": "Pharmacy order", "icon": "pill", "label": order.order_number,
+                "detail": order.customer_name or (order.patient.full_name if order.patient_id else ""),
+                "url": reverse("pharmacy_order_detail", args=[order.pk]),
+            })
+
+    if allowed("deliveries"):
+        for receipt in GoodsReceipt.objects.filter(
+            Q(receipt_number__icontains=term) | Q(supplier_invoice_reference__icontains=term)
+        ).select_related("purchase_order__supplier").order_by("-delivered_at")[:4]:
+            results.append({
+                "kind": "Delivery", "icon": "truck", "label": receipt.receipt_number,
+                "detail": f"{receipt.purchase_order.supplier.name} · invoice {receipt.supplier_invoice_reference}",
+                "url": reverse("goods_receipt_detail", args=[receipt.pk]),
+            })
+
+    return JsonResponse({"query": term, "results": results[:16]})
+
+
 def health(request):
     database_ok = True
     try:

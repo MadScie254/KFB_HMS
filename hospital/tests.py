@@ -1933,3 +1933,120 @@ class StaticAssetDeliveryTests(SimpleTestCase):
     def test_a_data_page_is_never_cached(self):
         response = self.client.get("/health/")
         self.assertIn("no-store", response.headers.get("Cache-Control", ""))
+
+
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
+class QuickSearchTests(HospitalFixtureMixin, TestCase):
+    """Search must not become a way around the page permissions.
+
+    One box that reaches everything is only safe if it reaches exactly what the
+    caller's role could already open. A receptionist who cannot open the stock
+    ledger must not be able to read batch numbers out of a search box.
+    """
+
+    def search(self, user, term):
+        self.client.login(username=user.username, password=self.password)
+        response = self.client.get(reverse("quick_search"), {"q": term})
+        self.assertEqual(response.status_code, 200)
+        return response.json()["results"]
+
+    def test_signing_in_is_required(self):
+        response = self.client.get(reverse("quick_search"), {"q": "test"})
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/login/", response["Location"])
+
+    def test_a_short_term_returns_nothing_rather_than_the_whole_table(self):
+        self.assertEqual(self.search(self.reception, "a"), [])
+
+    def test_reception_finds_a_patient(self):
+        kinds = {row["kind"] for row in self.search(self.reception, "Test")}
+        self.assertIn("Patient", kinds)
+
+    def test_reception_cannot_find_a_stock_batch(self):
+        results = self.search(self.reception, "B-001")
+        self.assertEqual(
+            [row for row in results if row["kind"] == "Batch"], [],
+            "Reception cannot open the stock ledger, so search must not hand them batches.",
+        )
+
+    def test_pharmacy_finds_a_stock_batch(self):
+        kinds = {row["kind"] for row in self.search(self.pharmacist, "B-001")}
+        self.assertIn("Batch", kinds)
+
+    def test_pharmacy_cannot_find_a_patient_by_name(self):
+        results = self.search(self.pharmacist, "Test")
+        self.assertEqual([row for row in results if row["kind"] == "Patient"], [])
+
+    def test_the_owner_reaches_both(self):
+        self.assertIn("Patient", {row["kind"] for row in self.search(self.owner, "Test")})
+        self.assertIn("Batch", {row["kind"] for row in self.search(self.owner, "B-001")})
+
+    def test_a_result_url_is_safe_to_put_in_an_attribute(self):
+        """A batch number with a quote in it must not escape the link."""
+        awkward = StockBatch.objects.create(
+            item=self.product, batch_number='B"><img src=x>',
+            purchase_cost_per_base_unit=Decimal("1.00"),
+        )
+        StockMovement.objects.create(
+            batch=awkward, movement_type=StockMovement.MovementType.RECEIPT,
+            quantity_delta=Decimal("5.000"), reference_type="Test", reference_id="x",
+            idempotency_key="awkward-batch", entered_by=self.pharmacist,
+        )
+        results = self.search(self.pharmacist, 'B"><img')
+        self.assertTrue(results)
+        for row in results:
+            self.assertNotIn('"', row["url"])
+            self.assertNotIn("<", row["url"])
+
+    def test_search_answers_in_a_bounded_number_of_queries(self):
+        """One query per scope, not one per row. Signing in is not measured."""
+        self.client.login(username=self.owner.username, password=self.password)
+        self.client.get(reverse("quick_search"), {"q": "warm the session"})
+        with self.assertNumQueries(FunctionalQueryBudget(12)):
+            self.client.get(reverse("quick_search"), {"q": "test"})
+
+
+class PresentationFilterTests(SimpleTestCase):
+    """How long a wait has run has to be visible without being read."""
+
+    def test_a_short_wait_is_not_flagged(self):
+        from .templatetags.hospital_extras import wait_class, wait_note, wait_row_class
+        recent = timezone.now() - timedelta(minutes=5)
+        self.assertEqual(wait_class(recent), "wait")
+        self.assertEqual(wait_row_class(recent), "")
+        self.assertEqual(wait_note(recent), "")
+
+    def test_an_hour_is_a_warning(self):
+        from .templatetags.hospital_extras import wait_class, wait_row_class
+        waited = timezone.now() - timedelta(minutes=75)
+        self.assertEqual(wait_class(waited), "wait wait-warn")
+        self.assertEqual(wait_row_class(waited), "row-warn")
+
+    def test_half_a_day_is_urgent_and_says_so_in_words(self):
+        from .templatetags.hospital_extras import wait_class, wait_note, wait_row_class
+        waited = timezone.now() - timedelta(hours=12)
+        self.assertEqual(wait_class(waited), "wait wait-urgent")
+        self.assertEqual(wait_row_class(waited), "row-urgent")
+        # Colour alone is not a message; the same fact is available as text.
+        self.assertTrue(wait_note(waited))
+
+    def test_a_missing_timestamp_does_not_raise(self):
+        from .templatetags.hospital_extras import wait_class, wait_note
+        self.assertEqual(wait_class(None), "wait")
+        self.assertEqual(wait_note(None), "")
+
+
+class MoneyPresentationTests(TestCase):
+    """A column of figures is read, not parsed."""
+
+    def test_large_amounts_are_grouped(self):
+        from django.template import Context, Template
+        rendered = Template("{{ v|floatformat:2 }}").render(Context({"v": Decimal("1234567.5")}))
+        self.assertEqual(rendered, "1,234,567.50")
+
+    def test_a_figure_copied_off_the_screen_is_accepted_back(self):
+        """Displaying 1,540.00 and then rejecting it as input is a dead end."""
+        from .forms import PaymentForm
+        form = PaymentForm({"amount": "1,540.00", "method": "cash", "reference": ""})
+        self.assertTrue(form.is_valid(), form.errors)
+        self.assertEqual(form.cleaned_data["amount"], Decimal("1540.00"))

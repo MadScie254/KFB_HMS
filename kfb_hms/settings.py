@@ -101,6 +101,10 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 LANGUAGE_CODE = "en"
+# An owner scanning a column of figures reads 1,540,200.00 and 1540200.00 very
+# differently. Django applies this to every rendered number; form inputs stay
+# unlocalised, so typing and parsing are unaffected.
+USE_THOUSAND_SEPARATOR = True
 TIME_ZONE = os.getenv("KFB_TIME_ZONE", "Africa/Nairobi")
 USE_I18N = True
 USE_TZ = True
