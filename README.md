@@ -33,7 +33,21 @@ See `docs/IMPLEMENTATION_STATUS.md` for exact scope and known gaps.
 
 ## Quick start — fictional demo only
 
-Prerequisites: Windows 10/11 or a supported Linux host, Python 3.14, and a modern browser.
+Prerequisites: Windows 10/11 or a supported Linux host, Python 3.11 or newer, and a modern browser.
+
+One command creates the virtual environment, installs the locked dependencies, migrates, seeds the fictional data and starts the server. It is safe to re-run.
+
+```powershell
+.\scripts\run-demo.ps1
+```
+
+```bash
+./scripts/run-demo.sh
+```
+
+Both print the sign-in accounts and a suggested order to walk the stock controls. They refuse to run when `KFB_ENV` is anything but `demo`, because they seed fictional patients and prices.
+
+The equivalent steps by hand:
 
 ```powershell
 py -m venv .venv
