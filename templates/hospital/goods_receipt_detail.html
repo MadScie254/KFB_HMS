@@ -81,15 +81,76 @@
     <small class="help-text">Checked {{ receipt.checked_at|date:"j M Y, H:i" }}.</small>
     {% endif %}
 
-    {% if can_check %}
-    <div class="section-divider"><div><p class="eyebrow">Second person</p><h2>Check this delivery</h2></div></div>
-    <form method="post" action="{% url 'goods_receipt_check' receipt.pk %}" class="form-stack">{% csrf_token %}
-      <div class="form-grid one-column">{% include "hospital/_form_fields.html" with form=check_form %}</div>
-      <button class="button primary full" type="submit">{% include "hospital/_icon.html" with name="check" %} Confirm I checked this delivery</button>
-    </form>
-    {% elif not receipt.checked_by %}
+    {% if not can_check and not receipt.checked_by %}
     <div class="callout warning-callout"><strong>You cannot check this delivery.</strong><p>The person who received a delivery cannot also confirm it. A different member of staff must open this record.</p></div>
     {% endif %}
   </section>
 </div>
+
+{% if can_check %}
+<section class="panel" id="check">
+  <div class="panel-head">
+    <div><p class="eyebrow">Second person</p><h2>Check the invoice against what was entered</h2></div>
+    <span>{{ receipt.lines.all|length }} line{{ receipt.lines.all|length|pluralize }}</span>
+  </div>
+  <p class="help-text">Read the figures off the supplier's document on the left and compare them with what was keyed in on the right. Anything that does not match belongs in the note below.</p>
+
+  <div class="check-compare">
+    <div class="check-evidence">
+      <p class="eyebrow">The supplier's document</p>
+      {% if receipt.invoice_photo %}
+        {% if is_pdf_evidence %}
+          <div class="evidence-fallback">
+            {% include "hospital/_icon.html" with name="file" %}
+            <strong>{{ receipt.invoice_photo_name|default:"Supplier invoice" }}</strong>
+            <p>A PDF scan cannot be shown inline here.</p>
+            <a class="button secondary small" href="{% url 'goods_receipt_invoice' receipt.pk %}" target="_blank" rel="noopener">Open the scan</a>
+          </div>
+        {% else %}
+          <a href="{% url 'goods_receipt_invoice' receipt.pk %}" target="_blank" rel="noopener" title="Open full size in a new tab">
+            <img class="evidence-image" src="{% url 'goods_receipt_invoice' receipt.pk %}" alt="Photograph of supplier invoice {{ receipt.supplier_invoice_reference }}">
+          </a>
+          <small class="help-text">Invoice {{ receipt.supplier_invoice_reference }} · tap to open full size.</small>
+        {% endif %}
+      {% else %}
+        <div class="evidence-fallback">
+          {% include "hospital/_icon.html" with name="alert" %}
+          <strong>No photograph was attached.</strong>
+          <p>There is nothing to compare these figures against. Record that in your note.</p>
+        </div>
+      {% endif %}
+    </div>
+
+    <div class="check-entered">
+      <p class="eyebrow">What was keyed in</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Item</th><th>Batch / expiry</th><th class="numeric">Quantity</th><th class="numeric">Unit cost</th><th class="numeric">Line value</th></tr></thead>
+          <tbody>
+          {% for line in receipt.lines.all %}
+          <tr>
+            <td><strong>{{ line.order_line.item.name }}</strong></td>
+            <td>{{ line.batch_number }}<small>{{ line.expiry_date|date:"j M Y"|default:"No expiry recorded" }}</small></td>
+            <td class="numeric">{{ line.quantity_received|floatformat:"-3" }} {{ line.order_line.item.base_unit }}</td>
+            <td class="numeric">KES {{ line.actual_unit_cost|floatformat:2 }}{% if line.cost_variance %}<small>{{ line.cost_variance|floatformat:2 }} vs quote</small>{% endif %}</td>
+            <td class="numeric">KES {{ line.line_cost|floatformat:2 }}</td>
+          </tr>
+          {% endfor %}
+          </tbody>
+          <tfoot>
+            <tr><th colspan="4">Goods counted in</th><th class="numeric">KES {{ receipt.received_value|floatformat:2 }}</th></tr>
+            <tr><th colspan="4">Supplier invoice total</th><th class="numeric">KES {{ receipt.invoice_amount|floatformat:2 }}</th></tr>
+            <tr><th colspan="4">Difference</th><th class="numeric">{% if receipt.invoice_variance %}<span class="status warning">KES {{ receipt.invoice_variance|floatformat:2 }}</span>{% else %}<span class="status confirmed">Balanced</span>{% endif %}</th></tr>
+          </tfoot>
+        </table>
+      </div>
+
+      <form method="post" action="{% url 'goods_receipt_check' receipt.pk %}" class="form-stack">{% csrf_token %}
+        <div class="form-grid one-column">{% include "hospital/_form_fields.html" with form=check_form %}</div>
+        <button class="button primary full" type="submit">{% include "hospital/_icon.html" with name="check" %} I compared these and confirm the delivery</button>
+      </form>
+    </div>
+  </div>
+</section>
+{% endif %}
 {% endblock %}

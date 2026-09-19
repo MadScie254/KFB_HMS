@@ -49,13 +49,13 @@ def unlocked_required(view):
 # screens that post movements, so a reviewer can read the position without
 # being offered the buttons that change it.
 ROLE_NAVIGATION = {
-    Role.OWNER: ["dashboard", "patients", "reports", "stock", "stock_control", "custody", "eye", "exceptions", "audit", "purchasing", "settings"],
+    Role.OWNER: ["dashboard", "brief", "intelligence", "patients", "reports", "stock", "stock_control", "custody", "eye", "exceptions", "audit", "purchasing", "settings"],
     Role.RECEPTION: ["dashboard", "patients", "queue", "payments", "pharmacy", "shifts"],
     Role.CLINICIAN: ["dashboard", "patients", "queue", "clinical", "wards", "departments", "custody"],
     Role.NURSE: ["dashboard", "patients", "wards", "departments", "custody"],
     Role.PHARMACY: ["dashboard", "pharmacy", "stock", "stock_control", "custody"],
     Role.LAB: ["dashboard", "queue", "departments"],
     Role.EYE: ["dashboard", "patients", "eye"],
-    Role.PROCUREMENT: ["dashboard", "stock", "stock_control", "custody", "purchasing"],
-    Role.REVIEWER: ["dashboard", "exceptions", "audit", "purchasing", "reports", "stock", "stock_control", "custody"],
+    Role.PROCUREMENT: ["dashboard", "intelligence", "stock", "stock_control", "custody", "purchasing"],
+    Role.REVIEWER: ["dashboard", "brief", "intelligence", "exceptions", "audit", "purchasing", "reports", "stock", "stock_control", "custody"],
 }

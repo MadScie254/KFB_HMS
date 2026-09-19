@@ -18,14 +18,18 @@ from django.db import connection, transaction
 from django.db.models import Case, Count, DecimalField, IntegerField, Max, Q, Sum, Value, When
 from django.http import FileResponse, Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 from django.utils import timezone
 from django.utils.http import content_disposition_header, urlencode
 
 from .analytics import (
+    control_adoption,
     departmental_custody,
     receiving_summary,
+    shrinkage,
     stock_activity,
     stock_position,
+    supplier_price_history,
 )
 from .forms import (
     AdmissionForm,
@@ -767,10 +771,13 @@ def goods_receipt_detail(request, pk):
     movements = StockMovement.objects.filter(
         reference_type="GoodsReceipt", reference_id=str(receipt.pk)
     ).select_related("batch__item")
+    evidence_name = receipt.invoice_photo_name or (receipt.invoice_photo.name if receipt.invoice_photo else "")
     return render(request, "hospital/goods_receipt_detail.html", {
         "receipt": receipt,
         "movements": movements,
         "check_form": DeliveryCheckForm(),
+        # A PDF scan cannot be shown inline, so the checker is offered the file.
+        "is_pdf_evidence": evidence_name.lower().endswith(".pdf"),
         "can_check": (
             receipt.checked_by_id is None
             and receipt.received_by_id != request.user.id
@@ -1474,3 +1481,118 @@ def batch_disposition(request, pk):
     except ValidationError as exc:
         messages.error(request, _validation_message(exc))
     return redirect("stock")
+
+
+@role_required(Role.OWNER, Role.REVIEWER, Role.PROCUREMENT)
+def stock_intelligence(request):
+    """Shrinkage, supplier price drift and whether the controls are being used.
+
+    Three questions the ledger can answer but no screen was asking: how much is
+    going missing, whether suppliers are walking their prices up, and whether
+    the controls are followed or quietly skipped.
+    """
+    days = _period_days(request.GET.get("days", "90"), default=90)
+    return render(request, "hospital/stock_intelligence.html", {
+        "days": days,
+        "shrinkage": shrinkage(days),
+        "prices": supplier_price_history(days),
+        "adoption": control_adoption(min(days, 90)),
+        "custody": departmental_custody(),
+    })
+
+
+def owner_brief_context(days=7):
+    """What needs the owner's attention, assembled in one place.
+
+    The specification forbids automatic external messaging, so this is a
+    standing in-app brief rather than a notification. Every line links to the
+    records behind it.
+    """
+    position = stock_position()
+    adoption = control_adoption(30)
+    custody = departmental_custody()
+    loss = shrinkage(90)
+
+    items = []
+    if position["expired_count"]:
+        items.append({
+            "severity": "urgent",
+            "headline": f"{position['expired_count']} expired batch{'es' if position['expired_count'] != 1 else ''} still on the shelf",
+            "detail": f"KES {position['expired_value']:,.2f} at cost. Expired stock cannot be sold and stays in the ledger until it is written off.",
+            "url": reverse("write_offs"),
+            "action": "Write it off",
+        })
+    if adoption["write_offs_pending"]:
+        items.append({
+            "severity": "warning",
+            "headline": f"{adoption['write_offs_pending']} write-off{'s' if adoption['write_offs_pending'] != 1 else ''} awaiting your approval",
+            "detail": "Stock stays on the balance until somebody with authority removes it.",
+            "url": reverse("write_offs"),
+            "action": "Review",
+        })
+    unchecked = receiving_summary(30)["unchecked_count"]
+    if unchecked:
+        items.append({
+            "severity": "warning",
+            "headline": f"{unchecked} deliver{'ies' if unchecked != 1 else 'y'} never independently checked",
+            "detail": "A delivery confirmed only by the person who received it has had no second pair of eyes.",
+            "url": reverse("deliveries"),
+            "action": "Open deliveries",
+        })
+    if custody["stale_count"]:
+        items.append({
+            "severity": "warning",
+            "headline": f"{custody['stale_count']} ward issue{'s' if custody['stale_count'] != 1 else ''} unaccounted for over a week",
+            "detail": f"KES {custody['stale_value']:,.2f} of stock left the pharmacy and nobody has said what happened to it.",
+            "url": reverse("custody"),
+            "action": "Chase it",
+        })
+    if position["below_reorder_count"]:
+        items.append({
+            "severity": "info",
+            "headline": f"{position['below_reorder_count']} product{'s' if position['below_reorder_count'] != 1 else ''} at or below reorder level",
+            "detail": "Running out stops sales as surely as losing stock does.",
+            "url": f"{reverse('stock')}?view=low",
+            "action": "See what to order",
+        })
+    if position["expiring_soon_count"]:
+        items.append({
+            "severity": "info",
+            "headline": f"{position['expiring_soon_count']} batch{'es' if position['expiring_soon_count'] != 1 else ''} expiring within {position['expiry_window_days']} days",
+            "detail": "Use or review these first.",
+            "url": f"{reverse('stock')}?view=expiring",
+            "action": "See them",
+        })
+    if loss["measured"] and loss["loss_value"] > 0:
+        percent = f" — {loss['as_percent_of_cogs']}% of cost of goods" if loss["as_percent_of_cogs"] is not None else ""
+        items.append({
+            "severity": "urgent",
+            "headline": f"KES {loss['loss_value']:,.2f} of unexplained stock loss in 90 days{percent}",
+            "detail": "Counted short against the ledger, with no write-off explaining it.",
+            "url": reverse("stock_intelligence"),
+            "action": "Investigate",
+        })
+    if not adoption["counts_approved"]:
+        items.append({
+            "severity": "warning",
+            "headline": "No stock count has been approved in the last 30 days",
+            "detail": "Without a count, stock loss cannot be measured at all — only guessed at.",
+            "url": reverse("stock_counts"),
+            "action": "Start a count",
+        })
+
+    order = {"urgent": 0, "warning": 1, "info": 2}
+    items.sort(key=lambda item: order[item["severity"]])
+    return {
+        "brief_items": items,
+        "brief_urgent": sum(1 for item in items if item["severity"] == "urgent"),
+        "brief_adoption": adoption,
+        "brief_generated_at": timezone.now(),
+    }
+
+
+@role_required(Role.OWNER, Role.REVIEWER)
+def owner_brief(request):
+    context = owner_brief_context()
+    context.update({"shrinkage": shrinkage(90), "custody": departmental_custody()})
+    return render(request, "hospital/owner_brief.html", context)
