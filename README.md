@@ -14,7 +14,11 @@ A local-first, server-rendered hospital operations application for Kingdom Faith
 - Versioned catalogue prices, base-unit stock, FEFO batch allocation, quarantine/expiry rejection and idempotent dispensing.
 - Delivery receiving against an approved order, with a mandatory photograph of the supplier invoice, per-batch expiry and actual cost, partial deliveries, and an independent check the receiver cannot perform.
 - Stock counts frozen at a cutoff, with a blind-count option and an approved adjustment movement for each variance; no screen anywhere edits a quantity directly.
-- Stock statistics: valuation at cost and at selling price, products below reorder level, near-expiry and expired batches, cost of goods dispensed, product sales and gross margin, and most-dispensed products.
+- Ward and departmental custody: stock issued to a named person stays visible as outstanding until it is administered, returned or wasted, and is never deducted twice.
+- Write-offs and disposition: expired or damaged stock is proposed with a reason and removed only on a second person's approval.
+- Stock statistics: sellable valuation at cost and at selling price, products below reorder level, near-expiry and expired batches, cost of goods dispensed, product sales and gross margin, and most-dispensed products.
+- Stock intelligence: unexplained loss valued and set against cost of goods, supplier unit-cost movement between deliveries, and whether the controls are actually being followed.
+- An owner's brief that ranks what needs attention today. It is a page in the application; nothing is messaged anywhere.
 - Configurable ward/bed register and admission records with separate clinical and financial status.
 - Eye session/case records with separate patients/eyes and one provisional case fee per completed patient.
 - Purchase requests with independent approval enforcement.
@@ -73,7 +77,19 @@ The LAN design is one application server and one PostgreSQL database. Workstatio
 
 After the real internal HTTPS URL works, create the workstation shortcut with `scripts\create-desktop-shortcut.ps1 -ApplicationUrl "https://hospital.internal"`. Complete `docs/HOST_READINESS.md` before the pilot.
 
-## Tests
+## Checks
+
+Run everything CI runs, on any machine:
+
+```bash
+./scripts/checks.sh
+```
+
+That is ruff, the test suite, a check that migrations match the models, and Django's deployment check. A test keeps the script and `.github/workflows/quality.yml` from drifting apart.
+
+The hosted workflow is currently red for a reason no commit can fix: every GitHub Actions run in this repository, including the ones predating this work, fails within seconds without a runner because the account is billing-locked. Clear the billing hold under GitHub → Settings → Billing and plans and the same checks will run there.
+
+Tests alone:
 
 ```powershell
 .\.venv\Scripts\python.exe manage.py test hospital
@@ -82,6 +98,8 @@ After the real internal HTTPS URL works, create the workstation shortcut with `s
 The suite covers outpatient prescription pricing/payment/dispense, walk-in reconciliation, base-unit stock arithmetic, duplicate M-PESA references, expiry/quarantine controls, partial allocations and deposits, cash-shift math, independent review, bilateral case fee, signed-note immutability, CSV idempotency and role denial.
 
 It also covers the stock control loop: a delivery posting receipt movements and balancing against its invoice, refusal without an invoice photograph, refusal of expired batches, per-order supplier-invoice uniqueness, partial deliveries, price and invoice-total differences raised as exceptions without blocking the post, the receiver being unable to check their own delivery, count snapshots frozen at their cutoff, approved counts posting adjustments, reviewer segregation, and the demo seed command completing with the correct roles.
+
+And the custody and measurement work: issuing to a ward moving custody without a sale, administration never deducting stock twice, returns coming back quarantined, write-offs needing a second approver, expired stock never being released back to sellable, hospital stock reconciling as pharmacy balance plus outstanding custody, unexplained loss being kept separate from authorised write-offs, and every figure reporting as unavailable rather than as zero when there is nothing to measure.
 
 ## Backup
 

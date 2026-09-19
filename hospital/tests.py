@@ -1,13 +1,16 @@
+import os
 import shutil
 import tempfile
 from datetime import timedelta
 from decimal import Decimal
+from pathlib import Path
 
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
@@ -1190,3 +1193,48 @@ class IntelligenceAndBriefTests(HospitalFixtureMixin, TestCase):
         self.client.login(username=self.reception.username, password=self.password)
         self.assertEqual(self.client.get(reverse("owner_brief")).status_code, 403)
         self.assertEqual(self.client.get(reverse("stock_intelligence")).status_code, 403)
+
+
+class ContinuousIntegrationTests(SimpleTestCase):
+    """The local check script has to stay honest about what CI runs.
+
+    Every GitHub Actions run in this repository has failed within seconds
+    without a runner, because the account is billing-locked; no commit can
+    clear that. While it holds, scripts/checks.sh is the only way anyone can
+    verify a change, so it must not drift away from the workflow it stands in
+    for.
+    """
+
+    workflow = Path(settings.BASE_DIR) / ".github" / "workflows" / "quality.yml"
+    script = Path(settings.BASE_DIR) / "scripts" / "checks.sh"
+
+    def workflow_commands(self):
+        commands = []
+        for line in self.workflow.read_text().splitlines():
+            stripped = line.strip()
+            if stripped.startswith("- run:"):
+                command = stripped[len("- run:"):].strip()
+                if command.startswith("python -m pip install"):
+                    continue  # Dependency installation, not a check.
+                commands.append(command)
+        return commands
+
+    def test_the_workflow_still_runs_the_checks_we_think_it_does(self):
+        commands = self.workflow_commands()
+        self.assertEqual(len(commands), 4, f"Unexpected CI step count: {commands}")
+
+    def test_every_ci_check_is_reproducible_locally(self):
+        script = self.script.read_text()
+        for command in self.workflow_commands():
+            # Compare the distinguishing part; the script sets env vars its own way.
+            core = command.split("python manage.py ")[-1] if "manage.py" in command else command
+            core = core.replace("ruff check", "ruff check")
+            needle = core.split(" ")[0] if core else command
+            self.assertIn(
+                needle, script,
+                f"CI runs {command!r} but scripts/checks.sh has no matching step; the two have drifted.",
+            )
+
+    def test_the_check_script_is_executable(self):
+        self.assertTrue(self.script.exists(), "scripts/checks.sh is missing.")
+        self.assertTrue(os.access(self.script, os.X_OK), "scripts/checks.sh must be executable.")
