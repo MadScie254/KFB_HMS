@@ -727,6 +727,82 @@ class GoodsReceiptLine(models.Model):
         return (Decimal(str(self.actual_unit_cost)) - Decimal(str(self.order_line.quoted_unit_cost))).quantize(Decimal("0.01"))
 
 
+class DepartmentIssue(TimeStampedModel):
+    """Stock handed from pharmacy into a named department's custody.
+
+    Issuing moves custody; it does not consume. The quantity stays visible as
+    unconsumed departmental stock until it is administered, consumed, returned
+    or written off, so medicine that left the pharmacy and never reached a
+    patient is a number somebody can see rather than an absence nobody notices.
+    """
+
+    class Kind(models.TextChoices):
+        PATIENT = "patient", "Patient-specific"
+        GENERAL = "general", "General consumable"
+
+    class Status(models.TextChoices):
+        OUTSTANDING = "outstanding", "In departmental custody"
+        SETTLED = "settled", "Fully accounted for"
+
+    reference = models.CharField(max_length=30, unique=True, blank=True)
+    department = models.CharField(max_length=80)
+    received_by_name = models.CharField(max_length=160)
+    kind = models.CharField(max_length=12, choices=Kind.choices, default=Kind.GENERAL)
+    patient = models.ForeignKey(Patient, null=True, blank=True, on_delete=models.PROTECT, related_name="stock_issues")
+    status = models.CharField(max_length=14, choices=Status.choices, default=Status.OUTSTANDING)
+    notes = models.TextField(blank=True)
+    issued_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="stock_issues")
+    issued_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["-issued_at"]
+
+    def save(self, *args, **kwargs):
+        if not self.reference:
+            self.reference = f"ISS-{timezone.localdate():%Y%m%d}-{uuid.uuid4().hex[:6].upper()}"
+        super().save(*args, **kwargs)
+
+    def clean(self):
+        if self.kind == self.Kind.PATIENT and not self.patient_id:
+            raise ValidationError("A patient-specific issue must name the patient it is for.")
+
+    @property
+    def outstanding_quantity(self):
+        return sum((line.outstanding for line in self.lines.all()), Decimal("0.000"))
+
+    def refresh_status(self):
+        self.status = self.Status.SETTLED if self.outstanding_quantity <= 0 else self.Status.OUTSTANDING
+        self.save(update_fields=["status", "updated_at"])
+
+    def __str__(self):
+        return f"{self.reference} · {self.department}"
+
+
+class DepartmentIssueLine(models.Model):
+    issue = models.ForeignKey(DepartmentIssue, on_delete=models.PROTECT, related_name="lines")
+    batch = models.ForeignKey(StockBatch, on_delete=models.PROTECT, related_name="issue_lines")
+    quantity_issued = models.DecimalField(**QUANTITY, validators=[MinValueValidator(Decimal("0.001"))])
+    quantity_consumed = models.DecimalField(**QUANTITY)
+    quantity_returned = models.DecimalField(**QUANTITY)
+    quantity_wasted = models.DecimalField(**QUANTITY)
+
+    @property
+    def accounted(self):
+        return self.quantity_consumed + self.quantity_returned + self.quantity_wasted
+
+    @property
+    def outstanding(self):
+        """Issued but not yet administered, returned or written off."""
+        return self.quantity_issued - self.accounted
+
+    @property
+    def issued_value(self):
+        return (self.quantity_issued * self.batch.purchase_cost_per_base_unit).quantize(Decimal("0.01"))
+
+    def __str__(self):
+        return f"{self.batch} × {self.quantity_issued}"
+
+
 class StockCount(TimeStampedModel):
     """A physical count reconciled against the ledger at a frozen cutoff.
 
@@ -788,6 +864,54 @@ class StockCountLine(models.Model):
     def variance_value(self):
         """Variance priced at the batch purchase cost, for a reviewable figure."""
         return (self.variance * self.batch.purchase_cost_per_base_unit).quantize(Decimal("0.01"))
+
+
+class StockWriteOff(TimeStampedModel):
+    """A proposal to remove stock that can no longer be sold or used.
+
+    Expired medicine sits in the balance and in the valuation until somebody
+    authorises its removal. Requesting is separate from approving so that no
+    one person can quietly make stock disappear, and approval is what posts the
+    movement.
+    """
+
+    class Reason(models.TextChoices):
+        EXPIRED = "expired", "Expired"
+        DAMAGED = "damaged", "Damaged or broken"
+        CONTAMINATED = "contaminated", "Contaminated or unsafe"
+        RECALLED = "recalled", "Recalled by supplier or authority"
+        OTHER = "other", "Other, described below"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Awaiting independent approval"
+        APPROVED = "approved", "Approved and posted"
+        REJECTED = "rejected", "Rejected"
+
+    reference = models.CharField(max_length=30, unique=True, blank=True)
+    batch = models.ForeignKey(StockBatch, on_delete=models.PROTECT, related_name="write_offs")
+    quantity = models.DecimalField(**QUANTITY, validators=[MinValueValidator(Decimal("0.001"))])
+    reason = models.CharField(max_length=16, choices=Reason.choices)
+    narrative = models.TextField()
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.PENDING)
+    requested_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="write_offs_requested")
+    reviewed_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="write_offs_reviewed")
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_notes = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def save(self, *args, **kwargs):
+        if not self.reference:
+            self.reference = f"WO-{timezone.localdate():%Y%m%d}-{uuid.uuid4().hex[:6].upper()}"
+        super().save(*args, **kwargs)
+
+    @property
+    def value_at_cost(self):
+        return (self.quantity * self.batch.purchase_cost_per_base_unit).quantize(Decimal("0.01"))
+
+    def __str__(self):
+        return f"{self.reference} · {self.batch}"
 
 
 class TheatreCase(TimeStampedModel):

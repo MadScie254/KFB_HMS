@@ -13,12 +13,15 @@ from .models import (
     ClinicalAttachment,
     ClinicalNote,
     CreditNote,
+    DepartmentIssue,
     Encounter,
     Patient,
     Payment,
     PurchaseOrder,
     PurchaseOrderLine,
     ServiceOrder,
+    StockBatch,
+    StockWriteOff,
     Supplier,
 )
 
@@ -368,3 +371,85 @@ class StockCountReviewForm(StyledFormMixin, forms.Form):
         required=False, widget=forms.Textarea(attrs={"rows": 3}), label="Review notes",
         help_text="Approving posts an adjustment movement for every variance. Nothing is edited in place.",
     )
+
+
+class DepartmentIssueForm(StyledFormMixin, forms.Form):
+    """Who is taking custody of stock leaving the pharmacy."""
+
+    department = forms.CharField(max_length=80, label="Department or ward")
+    received_by_name = forms.CharField(
+        max_length=160, label="Received by",
+        help_text="The named person taking custody. Not a role; a person.",
+    )
+    kind = forms.ChoiceField(choices=DepartmentIssue.Kind.choices, label="Issue type", initial=DepartmentIssue.Kind.GENERAL)
+    patient_number = forms.CharField(
+        max_length=20, required=False, label="Patient number",
+        help_text="Required for a patient-specific issue.",
+    )
+    notes = forms.CharField(required=False, widget=forms.Textarea(attrs={"rows": 2}), label="Notes")
+
+    def clean(self):
+        data = super().clean()
+        if data.get("kind") == DepartmentIssue.Kind.PATIENT and not data.get("patient_number"):
+            self.add_error("patient_number", "A patient-specific issue must name the patient it is for.")
+        return data
+
+
+class DepartmentIssueLineForm(StyledFormMixin, forms.Form):
+    batch = forms.ModelChoiceField(queryset=StockBatch.objects.none(), label="Batch")
+    quantity = forms.DecimalField(min_value=Decimal("0.001"), max_digits=14, decimal_places=3, label="Quantity")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["batch"].queryset = (
+            StockBatch.objects.filter(status=StockBatch.Status.ACTIVE)
+            .select_related("item").order_by("item__name", "expiry_date")
+        )
+        self.fields["batch"].label_from_instance = lambda batch: (
+            f"{batch.item.name} — batch {batch.batch_number}"
+            + (f", expires {batch.expiry_date:%b %Y}" if batch.expiry_date else "")
+        )
+
+
+DepartmentIssueLineFormSet = formset_factory(
+    DepartmentIssueLineForm, extra=2, min_num=1, validate_min=True, can_delete=True
+)
+
+
+class WriteOffRequestForm(StyledFormMixin, forms.Form):
+    """Proposing that stock leave the balance, with a reason someone can review."""
+
+    batch = forms.ModelChoiceField(queryset=StockBatch.objects.none(), label="Batch")
+    quantity = forms.DecimalField(min_value=Decimal("0.001"), max_digits=14, decimal_places=3, label="Quantity")
+    reason = forms.ChoiceField(choices=StockWriteOff.Reason.choices, label="Reason")
+    narrative = forms.CharField(
+        widget=forms.Textarea(attrs={"rows": 3}), label="What happened",
+        help_text="A reviewer who was not there has to be able to judge this.",
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["batch"].queryset = StockBatch.objects.select_related("item").order_by("item__name", "expiry_date")
+        self.fields["batch"].label_from_instance = lambda batch: (
+            f"{batch.item.name} — batch {batch.batch_number}"
+            + (f", expires {batch.expiry_date:%b %Y}" if batch.expiry_date else "")
+            + (" (expired)" if batch.is_expired else "")
+        )
+
+
+class WriteOffReviewForm(StyledFormMixin, forms.Form):
+    review_notes = forms.CharField(
+        required=False, widget=forms.Textarea(attrs={"rows": 3}), label="Review notes",
+        help_text="Approving posts an adjustment movement that removes the stock. Rejecting changes no balance.",
+    )
+
+
+class BatchDispositionForm(StyledFormMixin, forms.Form):
+    status = forms.ChoiceField(
+        choices=[
+            (StockBatch.Status.ACTIVE, "Release back to sellable stock"),
+            (StockBatch.Status.QUARANTINE, "Hold in quarantine"),
+        ],
+        label="Disposition",
+    )
+    reason = forms.CharField(widget=forms.Textarea(attrs={"rows": 2}), label="Why this was authorised")

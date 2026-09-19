@@ -11,13 +11,14 @@ from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
-from .analytics import stock_activity, stock_position
+from .analytics import departmental_custody, shrinkage, stock_activity, stock_position
 from .models import (
     AuditEvent,
     CashShift,
     CatalogueItem,
     ClinicalNote,
     CreditNote,
+    DepartmentIssue,
     Encounter,
     ExceptionRecord,
     EyeCase,
@@ -37,20 +38,26 @@ from .models import (
     StockBatch,
     StockCount,
     StockMovement,
+    StockWriteOff,
     Supplier,
 )
 from .permissions import user_role
 from .services import (
+    account_for_issue,
     approve_credit_note,
     approve_purchase_order,
     check_delivery,
     complete_eye_case,
     dispense_order,
+    issue_to_department,
     open_stock_count,
     prepare_pharmacy_order,
     receive_delivery,
     record_payment,
+    request_write_off,
     review_stock_count,
+    review_write_off,
+    set_batch_disposition,
     submit_stock_count,
 )
 
@@ -72,6 +79,7 @@ class HospitalFixtureMixin:
         self.pharmacist = self.make_user("pharmacist", Role.PHARMACY)
         self.clinician = self.make_user("clinician", Role.CLINICIAN)
         self.reviewer = self.make_user("reviewer", Role.REVIEWER)
+        self.nurse = self.make_user("nurse", Role.NURSE)
         self.procurement = self.make_user("procurement", Role.PROCUREMENT)
         self.patient = Patient.objects.create(first_name="Test", last_name="Patient", estimated_age_years=30, registered_by=self.reception)
         self.product = CatalogueItem.objects.create(
@@ -873,3 +881,190 @@ class ValuationCorrectnessTests(HospitalFixtureMixin, TestCase):
         self.client.login(username=self.owner.username, password=self.password)
         self.assertEqual(self.client.get(reverse("eye_clinic")).status_code, 200)
         self.assertContains(self.client.get(reverse("dashboard")), reverse("eye_clinic"))
+
+
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
+class CustodyTests(HospitalFixtureMixin, TestCase):
+    """Stock leaving the pharmacy for a ward.
+
+    Before this workflow the transfer, consumption and return movement types
+    were declared and never written by any code path, so medicine issued to a
+    ward simply left no trace at all.
+    """
+
+    def issue(self, quantity=Decimal("20"), actor=None, **kwargs):
+        return issue_to_department(
+            actor=actor or self.pharmacist,
+            department=kwargs.pop("department", "Maternity"),
+            received_by_name=kwargs.pop("received_by_name", "Sister Achieng"),
+            lines=[{"batch": self.batch, "quantity": quantity}],
+            **kwargs,
+        )
+
+    def test_issuing_moves_custody_out_of_the_pharmacy(self):
+        issue = self.issue(Decimal("20"))
+        self.assertEqual(self.batch.quantity_on_hand, Decimal("180"), "Issued stock leaves the pharmacy balance.")
+        movement = StockMovement.objects.get(movement_type=StockMovement.MovementType.TRANSFER)
+        self.assertEqual(movement.quantity_delta, Decimal("-20.000"))
+        self.assertEqual(movement.to_location, "Maternity")
+        self.assertEqual(issue.outstanding_quantity, Decimal("20.000"))
+        self.assertEqual(issue.status, DepartmentIssue.Status.OUTSTANDING)
+
+    def test_administering_does_not_deduct_the_stock_a_second_time(self):
+        issue = self.issue(Decimal("20"))
+        line = issue.lines.get()
+        account_for_issue(actor=self.nurse, issue_id=issue.pk, outcomes={line.pk: {"consumed": Decimal("20")}})
+        issue.refresh_from_db()
+        self.assertEqual(
+            self.batch.quantity_on_hand, Decimal("180"),
+            "Administration must not deduct stock that already left the pharmacy.",
+        )
+        self.assertEqual(issue.status, DepartmentIssue.Status.SETTLED)
+        self.assertEqual(issue.outstanding_quantity, Decimal("0.000"))
+
+    def test_returned_stock_comes_back_quarantined_not_sellable(self):
+        issue = self.issue(Decimal("20"))
+        line = issue.lines.get()
+        account_for_issue(actor=self.nurse, issue_id=issue.pk, outcomes={line.pk: {"returned": Decimal("20")}})
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.quantity_on_hand, Decimal("200"), "Returned units re-enter the ledger.")
+        self.assertEqual(self.batch.status, StockBatch.Status.QUARANTINE)
+        self.assertFalse(self.batch.can_dispense, "Medicine that has been off the shelf is not silently sellable again.")
+        self.assertTrue(StockMovement.objects.filter(movement_type=StockMovement.MovementType.RETURN).exists())
+
+    def test_waste_is_raised_for_review(self):
+        issue = self.issue(Decimal("20"))
+        line = issue.lines.get()
+        account_for_issue(actor=self.nurse, issue_id=issue.pk, outcomes={line.pk: {"wasted": Decimal("5")}})
+        self.assertTrue(ExceptionRecord.objects.filter(category="departmental_waste").exists())
+        issue.refresh_from_db()
+        self.assertEqual(issue.outstanding_quantity, Decimal("15.000"))
+
+    def test_partial_accounting_leaves_the_remainder_outstanding(self):
+        issue = self.issue(Decimal("20"))
+        line = issue.lines.get()
+        account_for_issue(actor=self.nurse, issue_id=issue.pk, outcomes={line.pk: {"consumed": Decimal("8")}})
+        issue.refresh_from_db()
+        self.assertEqual(issue.outstanding_quantity, Decimal("12.000"))
+        self.assertEqual(issue.status, DepartmentIssue.Status.OUTSTANDING)
+        account_for_issue(actor=self.nurse, issue_id=issue.pk, outcomes={line.pk: {"consumed": Decimal("12")}})
+        issue.refresh_from_db()
+        self.assertEqual(issue.status, DepartmentIssue.Status.SETTLED)
+
+    def test_cannot_account_for_more_than_is_outstanding(self):
+        issue = self.issue(Decimal("20"))
+        line = issue.lines.get()
+        with self.assertRaisesMessage(ValidationError, "remain outstanding"):
+            account_for_issue(actor=self.nurse, issue_id=issue.pk, outcomes={line.pk: {"consumed": Decimal("25")}})
+
+    def test_cannot_issue_more_than_is_on_hand(self):
+        with self.assertRaisesMessage(ValidationError, "are on hand"):
+            self.issue(Decimal("500"))
+
+    def test_cannot_issue_quarantined_stock(self):
+        self.batch.status = StockBatch.Status.QUARANTINE
+        self.batch.save(update_fields=["status"])
+        with self.assertRaisesMessage(ValidationError, "cannot be issued"):
+            self.issue(Decimal("5"))
+
+    def test_only_pharmacy_may_issue(self):
+        with self.assertRaisesMessage(ValidationError, "Only pharmacy staff"):
+            self.issue(Decimal("5"), actor=self.nurse)
+
+    def test_patient_specific_issue_must_name_the_patient(self):
+        with self.assertRaisesMessage(ValidationError, "must name the patient"):
+            self.issue(Decimal("5"), kind=DepartmentIssue.Kind.PATIENT)
+
+    def test_hospital_stock_reconciles_across_custody_locations(self):
+        self.issue(Decimal("20"))
+        custody = departmental_custody()
+        on_shelf = stock_position()["stock_value_cost"]
+        # 180 on the shelf at 2.00 plus 20 in the ward at 2.00 is the original 200.
+        self.assertEqual(custody["outstanding_value"], Decimal("40.00"))
+        self.assertEqual(on_shelf + custody["outstanding_value"], Decimal("400.00"))
+
+
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
+class WriteOffTests(HospitalFixtureMixin, TestCase):
+    """Taking unusable stock off the balance, with somebody accountable for it."""
+
+    def request(self, quantity=Decimal("10"), actor=None):
+        return request_write_off(
+            actor=actor or self.pharmacist, batch_id=self.batch.pk, quantity=quantity,
+            reason=StockWriteOff.Reason.DAMAGED, narrative="Carton crushed in the store room.",
+        )
+
+    def test_requesting_alone_changes_no_balance(self):
+        self.request(Decimal("10"))
+        self.assertEqual(self.batch.quantity_on_hand, Decimal("200"))
+
+    def test_approval_removes_the_stock_and_records_who_authorised_it(self):
+        write_off = self.request(Decimal("10"))
+        review_write_off(actor=self.reviewer, write_off_id=write_off.pk, approve=True, review_notes="Damage seen.")
+        write_off.refresh_from_db()
+        self.assertEqual(write_off.status, StockWriteOff.Status.APPROVED)
+        self.assertEqual(self.batch.quantity_on_hand, Decimal("190"))
+        movement = StockMovement.objects.get(reference_type="StockWriteOff")
+        self.assertEqual(movement.quantity_delta, Decimal("-10.000"))
+        self.assertEqual(movement.entered_by, self.reviewer)
+        self.assertTrue(ExceptionRecord.objects.filter(category="stock_write_off").exists())
+
+    def test_rejection_changes_no_balance(self):
+        write_off = self.request(Decimal("10"))
+        review_write_off(actor=self.reviewer, write_off_id=write_off.pk, approve=False)
+        self.assertEqual(self.batch.quantity_on_hand, Decimal("200"))
+        self.assertFalse(StockMovement.objects.filter(reference_type="StockWriteOff").exists())
+
+    def test_requester_cannot_approve_their_own_write_off(self):
+        self.reviewer.staff_profile.role = Role.REVIEWER
+        self.reviewer.staff_profile.save(update_fields=["role"])
+        write_off = self.request(Decimal("10"), actor=self.pharmacist)
+        self.pharmacist.staff_profile.role = Role.REVIEWER
+        self.pharmacist.staff_profile.save(update_fields=["role"])
+        with self.assertRaisesMessage(ValidationError, "cannot approve your own"):
+            review_write_off(actor=self.pharmacist, write_off_id=write_off.pk, approve=True)
+
+    def test_pending_requests_cannot_overdraw_the_batch(self):
+        self.request(Decimal("150"))
+        with self.assertRaisesMessage(ValidationError, "can still be written off"):
+            self.request(Decimal("100"))
+
+    def test_write_off_needs_an_explanation(self):
+        with self.assertRaisesMessage(ValidationError, "Describe what happened"):
+            request_write_off(
+                actor=self.pharmacist, batch_id=self.batch.pk, quantity=Decimal("1"),
+                reason=StockWriteOff.Reason.OTHER, narrative="   ",
+            )
+
+    def test_expired_stock_cannot_be_released_back_to_sellable(self):
+        self.batch.expiry_date = timezone.localdate() - timedelta(days=1)
+        self.batch.status = StockBatch.Status.QUARANTINE
+        self.batch.save(update_fields=["expiry_date", "status"])
+        with self.assertRaisesMessage(ValidationError, "Expired stock cannot be released"):
+            set_batch_disposition(
+                actor=self.reviewer, batch_id=self.batch.pk,
+                status=StockBatch.Status.ACTIVE, reason="Looks fine",
+            )
+
+    def test_reviewer_can_release_a_quarantined_batch_with_a_reason(self):
+        self.batch.status = StockBatch.Status.QUARANTINE
+        self.batch.save(update_fields=["status"])
+        set_batch_disposition(
+            actor=self.reviewer, batch_id=self.batch.pk,
+            status=StockBatch.Status.ACTIVE, reason="Seal intact, pharmacist inspected.",
+        )
+        self.batch.refresh_from_db()
+        self.assertTrue(self.batch.can_dispense)
+        self.assertTrue(AuditEvent.objects.filter(action="stock_batch.disposition").exists())
+
+    def test_shrinkage_separates_unexplained_loss_from_authorised_write_offs(self):
+        write_off = self.request(Decimal("10"))
+        review_write_off(actor=self.reviewer, write_off_id=write_off.pk, approve=True)
+        count = open_stock_count(actor=self.pharmacist)
+        line = count.lines.get(batch=self.batch)
+        submit_stock_count(actor=self.pharmacist, count_id=count.pk, counted={line.pk: line.expected_quantity - Decimal("6")})
+        review_stock_count(actor=self.reviewer, count_id=count.pk, approve=True)
+        result = shrinkage(90)
+        self.assertEqual(result["loss_value"], Decimal("12.00"), "Six units at 2.00 is the unexplained loss.")
+        self.assertEqual(result["written_off_value"], Decimal("20.00"), "The authorised write-off is not shrinkage.")
+        self.assertTrue(result["measured"])

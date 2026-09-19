@@ -17,12 +17,17 @@ from django.utils import timezone
 
 from .models import (
     CatalogueItem,
+    DepartmentIssue,
+    DepartmentIssueLine,
     GoodsReceipt,
+    GoodsReceiptLine,
     Invoice,
     InvoiceLine,
     PriceVersion,
     StockBatch,
+    StockCount,
     StockMovement,
+    StockWriteOff,
 )
 
 ZERO_MONEY = Value(Decimal("0.00"), output_field=DecimalField(max_digits=14, decimal_places=2))
@@ -252,4 +257,205 @@ def receiving_summary(days=30):
         "unchecked_count": receipts.filter(checked_by__isnull=True).count(),
         "invoiced_value": receipts.aggregate(value=Coalesce(Sum("invoice_amount"), ZERO_MONEY))["value"],
         "without_photo": receipts.filter(invoice_photo="").count(),
+    }
+
+
+def departmental_custody():
+    """Stock issued to departments and not yet accounted for.
+
+    These units already left the pharmacy balance when custody moved, so the
+    hospital still holds them; they are simply not on the pharmacy shelf. The
+    total is reported separately rather than folded into stock value, because
+    "on the shelf" and "somewhere in the hospital" are different questions.
+    """
+    lines = (
+        DepartmentIssueLine.objects
+        .filter(issue__status=DepartmentIssue.Status.OUTSTANDING)
+        .select_related("batch__item", "issue")
+    )
+    rows = []
+    total_units = Decimal("0.000")
+    total_value = Decimal("0.00")
+    by_department = {}
+    for line in lines:
+        outstanding = line.outstanding
+        if outstanding <= 0:
+            continue
+        value = (outstanding * line.batch.purchase_cost_per_base_unit).quantize(Decimal("0.01"))
+        age_days = (timezone.now() - line.issue.issued_at).days
+        rows.append({
+            "line": line, "issue": line.issue, "item": line.batch.item,
+            "outstanding": outstanding, "value": value, "age_days": age_days,
+        })
+        total_units += outstanding
+        total_value += value
+        bucket = by_department.setdefault(line.issue.department, {"department": line.issue.department, "units": Decimal("0.000"), "value": Decimal("0.00")})
+        bucket["units"] += outstanding
+        bucket["value"] += value
+
+    rows.sort(key=lambda row: row["age_days"], reverse=True)
+    stale = [row for row in rows if row["age_days"] >= 7]
+    return {
+        "rows": rows,
+        "by_department": sorted(by_department.values(), key=lambda row: row["value"], reverse=True),
+        "outstanding_units": total_units,
+        "outstanding_value": total_value,
+        "issue_count": len({row["issue"].pk for row in rows}),
+        "stale_rows": stale,
+        "stale_count": len(stale),
+        "stale_value": sum((row["value"] for row in stale), Decimal("0.00")),
+    }
+
+
+def shrinkage(days=90):
+    """Unexplained stock loss, valued, over a period.
+
+    Only approved count adjustments count as shrinkage. A write-off has a named
+    reason and an approver, so it is a loss the hospital decided to take, not an
+    unexplained one — the two are reported separately and never summed.
+    """
+    start = timezone.now() - timedelta(days=days)
+    movements = (
+        StockMovement.objects
+        .filter(event_at__gte=start, movement_type=StockMovement.MovementType.ADJUSTMENT)
+        .select_related("batch__item")
+    )
+    loss_units = Decimal("0.000")
+    loss_value = Decimal("0.00")
+    gain_units = Decimal("0.000")
+    gain_value = Decimal("0.00")
+    written_off_value = Decimal("0.00")
+    by_item = {}
+
+    for movement in movements:
+        cost = movement.batch.purchase_cost_per_base_unit
+        value = (abs(movement.quantity_delta) * cost).quantize(Decimal("0.01"))
+        if movement.reference_type == "StockWriteOff":
+            written_off_value += value
+            continue
+        if movement.quantity_delta < 0:
+            loss_units += -movement.quantity_delta
+            loss_value += value
+            bucket = by_item.setdefault(movement.batch.item_id, {"item": movement.batch.item, "units": Decimal("0.000"), "value": Decimal("0.00")})
+            bucket["units"] += -movement.quantity_delta
+            bucket["value"] += value
+        else:
+            gain_units += movement.quantity_delta
+            gain_value += value
+
+    cost_of_goods = stock_activity(days)["cost_of_goods_dispensed"]
+    as_percent_of_cogs = (
+        (loss_value / cost_of_goods * 100).quantize(Decimal("0.01")) if cost_of_goods > 0 else None
+    )
+    counts = StockCount.objects.filter(cutoff_at__gte=start)
+    return {
+        "days": days,
+        "loss_units": loss_units,
+        "loss_value": loss_value,
+        "gain_units": gain_units,
+        "gain_value": gain_value,
+        "net_value": gain_value - loss_value,
+        "written_off_value": written_off_value,
+        "cost_of_goods_dispensed": cost_of_goods,
+        "as_percent_of_cogs": as_percent_of_cogs,
+        "worst_items": sorted(by_item.values(), key=lambda row: row["value"], reverse=True)[:8],
+        "counts_taken": counts.count(),
+        "counts_approved": counts.filter(status=StockCount.Status.APPROVED).count(),
+        "measured": counts.filter(status=StockCount.Status.APPROVED).exists(),
+    }
+
+
+def supplier_price_history(days=365, limit=12):
+    """What the hospital has paid per unit, and how that has moved.
+
+    A supplier drifting a price upward is leakage that no single delivery looks
+    odd enough to catch. Comparing each delivered cost with the one before it
+    makes the drift visible.
+    """
+    start = timezone.now() - timedelta(days=days)
+    lines = (
+        GoodsReceiptLine.objects
+        .filter(receipt__delivered_at__gte=start)
+        .select_related("receipt__purchase_order__supplier", "order_line__item")
+        .order_by("order_line__item__name", "receipt__delivered_at")
+    )
+    history = {}
+    for line in lines:
+        item = line.order_line.item
+        bucket = history.setdefault(item.pk, {"item": item, "entries": []})
+        bucket["entries"].append({
+            "delivered_at": line.receipt.delivered_at,
+            "supplier": line.receipt.purchase_order.supplier.name,
+            "unit_cost": line.actual_unit_cost,
+            "quantity": line.quantity_received,
+            "receipt": line.receipt,
+        })
+
+    rows = []
+    for bucket in history.values():
+        entries = bucket["entries"]
+        latest = entries[-1]
+        previous = entries[-2] if len(entries) > 1 else None
+        change = None
+        percent = None
+        if previous and previous["unit_cost"] > 0:
+            change = (latest["unit_cost"] - previous["unit_cost"]).quantize(Decimal("0.01"))
+            percent = (change / previous["unit_cost"] * 100).quantize(Decimal("0.01"))
+        costs = [entry["unit_cost"] for entry in entries]
+        rows.append({
+            "item": bucket["item"],
+            "entries": entries,
+            "delivery_count": len(entries),
+            "latest": latest,
+            "previous": previous,
+            "change": change,
+            "percent_change": percent,
+            "lowest": min(costs),
+            "highest": max(costs),
+        })
+    rows.sort(key=lambda row: abs(row["percent_change"] or Decimal("0")), reverse=True)
+    return {
+        "days": days,
+        "rows": rows[:limit],
+        "rising": [row for row in rows if row["percent_change"] and row["percent_change"] > 0],
+    }
+
+
+def control_adoption(days=30):
+    """Whether the controls are actually being used, or quietly bypassed.
+
+    A control nobody follows looks identical to a control nobody needed. These
+    are the numbers that tell the two apart.
+    """
+    start = timezone.now() - timedelta(days=days)
+    receipts = GoodsReceipt.objects.filter(delivered_at__gte=start)
+    total = receipts.count()
+    with_photo = receipts.exclude(invoice_photo="").count()
+    checked = receipts.filter(checked_by__isnull=False).count()
+
+    prompt_cutoff = timedelta(hours=24)
+    checked_promptly = sum(
+        1 for receipt in receipts.filter(checked_by__isnull=False).only("checked_at", "delivered_at")
+        if receipt.checked_at and (receipt.checked_at - receipt.delivered_at) <= prompt_cutoff
+    )
+    counts = StockCount.objects.filter(cutoff_at__gte=start)
+    issues = DepartmentIssue.objects.filter(issued_at__gte=start)
+
+    def percent(part, whole):
+        return (Decimal(part) / Decimal(whole) * 100).quantize(Decimal("0.1")) if whole else None
+
+    return {
+        "days": days,
+        "deliveries": total,
+        "deliveries_with_evidence": with_photo,
+        "evidence_percent": percent(with_photo, total),
+        "deliveries_checked": checked,
+        "checked_percent": percent(checked, total),
+        "checked_within_24h": checked_promptly,
+        "checked_promptly_percent": percent(checked_promptly, total),
+        "counts_taken": counts.count(),
+        "counts_approved": counts.filter(status=StockCount.Status.APPROVED).count(),
+        "issues_made": issues.count(),
+        "issues_outstanding": issues.filter(status=DepartmentIssue.Status.OUTSTANDING).count(),
+        "write_offs_pending": StockWriteOff.objects.filter(status=StockWriteOff.Status.PENDING).count(),
     }
