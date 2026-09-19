@@ -1,0 +1,104 @@
+{% extends "base.html" %}{% block title %}Ward custody{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <p class="breadcrumbs"><a href="{% url 'stock' %}">Stock</a> / Ward custody</p>
+    <h1>Ward and departmental custody</h1>
+    <p>Stock that left the pharmacy and has not yet been administered, returned or written off. It is still the hospital's; it is just no longer on the shelf.</p>
+  </div>
+  {% if can_issue %}<a class="button primary" href="{% url 'custody_issue' %}">{% include "hospital/_icon.html" with name="plus" %} Issue to a department</a>{% endif %}
+</div>
+
+<section class="kpi-grid compact-grid" aria-label="Outstanding custody">
+  <div class="kpi">
+    <span>Held outside the pharmacy</span>
+    <strong>KES {{ position.outstanding_value|floatformat:2 }}</strong>
+    <small>{{ position.outstanding_units|floatformat:"-3" }} units across {{ position.issue_count }} issue{{ position.issue_count|pluralize }}</small>
+  </div>
+  <div class="kpi {% if position.stale_count %}warning{% endif %}">
+    <span>Outstanding over 7 days</span>
+    <strong>{{ position.stale_count }}</strong>
+    <small>KES {{ position.stale_value|floatformat:2 }} unaccounted for a week or more</small>
+  </div>
+  <div class="kpi">
+    <span>Departments holding stock</span>
+    <strong>{{ position.by_department|length }}</strong>
+    <small>Each with a named person accountable</small>
+  </div>
+</section>
+
+<div class="content-grid">
+  <section class="panel span-2">
+    <div class="panel-head">
+      <div><p class="eyebrow">Awaiting an account</p><h2>Outstanding issues</h2></div>
+      <span>{{ outstanding|length }} open</span>
+    </div>
+    {% if outstanding %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Issue</th><th>Department / person</th><th>Type</th><th>Items</th><th class="numeric">Outstanding</th><th>Action</th></tr></thead>
+        <tbody>
+        {% for issue in outstanding %}
+        <tr>
+          <td><strong>{{ issue.reference }}</strong><small>{{ issue.issued_at|date:"j M Y, H:i" }} by {{ issue.issued_by.staff_profile }}</small></td>
+          <td>{{ issue.department }}<small>{{ issue.received_by_name }}</small></td>
+          <td>
+            <span class="status {% if issue.kind == 'patient' %}prepared{% else %}active{% endif %}">{{ issue.get_kind_display }}</span>
+            {% if issue.patient %}<small>{{ issue.patient.full_name }}</small>{% endif %}
+          </td>
+          <td>{% for line in issue.lines.all %}<small>{{ line.batch.item.name }} · {{ line.quantity_issued|floatformat:"-3" }} issued, {{ line.outstanding|floatformat:"-3" }} outstanding</small>{% endfor %}</td>
+          <td class="numeric"><strong>{{ issue.outstanding_quantity|floatformat:"-3" }}</strong></td>
+          <td>{% if can_account %}<a class="button small secondary" href="{% url 'custody_account' issue.pk %}">Account for it</a>{% else %}<small>Ward staff account</small>{% endif %}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="empty">
+      <strong>Nothing is outstanding.</strong>
+      <p>Every issue made to a ward or department has been administered, returned or written off.</p>
+    </div>
+    {% endif %}
+
+    {% if settled %}
+    <div class="section-divider"><div><p class="eyebrow">Closed</p><h2>Fully accounted for</h2></div></div>
+    <ul class="record-list compact-list">
+      {% for issue in settled %}
+      <li><div><strong>{{ issue.reference }}</strong><p>{{ issue.department }} · {{ issue.received_by_name }}</p><small>{{ issue.issued_at|date:"j M Y" }}</small></div><span class="status confirmed">Settled</span></li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><div><p class="eyebrow">Where it is</p><h2>By department</h2></div></div>
+    {% if position.by_department %}
+    <ul class="bar-list">
+      {% for row in position.by_department %}
+      <li>
+        <span>{{ row.department|truncatechars:20 }}</span>
+        <div><i style="width:{% widthratio row.value position.by_department.0.value 100 %}%"></i></div>
+        <strong>{{ row.units|floatformat:"-3" }}</strong>
+      </li>
+      {% endfor %}
+    </ul>
+    <p class="help-text">Valued at purchase cost. These units already left the pharmacy balance, so they are not counted again in stock value.</p>
+    {% else %}
+    <div class="empty compact"><strong>No department is holding stock.</strong></div>
+    {% endif %}
+
+    {% if position.stale_rows %}
+    <div class="section-divider"><div><p class="eyebrow">Chase these</p><h2>Outstanding longest</h2></div></div>
+    <ul class="record-list compact-list">
+      {% for row in position.stale_rows|slice:":6" %}
+      <li>
+        <div><strong>{{ row.item.name }}</strong><p>{{ row.issue.department }} · {{ row.issue.received_by_name }}</p><small>{{ row.issue.reference }} · {{ row.age_days }} day{{ row.age_days|pluralize }} ago</small></div>
+        <span class="quantity negative">{{ row.outstanding|floatformat:"-3" }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

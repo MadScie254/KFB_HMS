@@ -147,6 +147,37 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .attachment-upload { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--line); }
 .attachment-upload .form-grid { grid-template-columns: 1fr 2fr; margin-bottom: .75rem; }
 
+/* Stock control layer.
+   Status badges take their modifier from a model field rendered straight into
+   the class attribute, so a value must never match an unrelated rule. Movement
+   types are namespaced because "receipt" is also the printable payment receipt
+   card, whose 2rem padding turned the badge into a large oval. */
+.status.movement-receipt { color: var(--success); background: var(--success-bg); border-color: #acd7bf; }
+.status.movement-dispense, .status.movement-consumption { color: var(--danger); background: var(--danger-bg); border-color: #e9afaf; }
+.status.movement-adjustment { color: var(--warning); background: var(--warning-bg); border-color: #e5c578; }
+.status.movement-transfer, .status.movement-return { color: #225c78; background: #e9f3f8; border-color: #b9d9e8; }
+.status.approved, .status.received, .status.checked { color: var(--success); background: var(--success-bg); border-color: #acd7bf; }
+.status.rejected { color: var(--danger); background: var(--danger-bg); border-color: #e9afaf; }
+.status.submitted, .status.frozen, .status.part_received, .status.requested { color: var(--warning); background: var(--warning-bg); border-color: #e5c578; }
+.large-status.approved, .large-status.checked, .large-status.confirmed { color: var(--success); background: var(--success-bg); border-color: #acd7bf; }
+.large-status.submitted, .large-status.frozen { color: var(--warning); background: var(--warning-bg); border-color: #e5c578; }
+.large-status.rejected { color: var(--danger); background: var(--danger-bg); border-color: #e9afaf; }
+.callout .icon { float: left; margin: .1rem .55rem .2rem 0; color: var(--teal-dark); }
+.callout strong { color: var(--navy); }
+.kpi-grid + .kpi-grid { margin-top: -.45rem; }
+a.kpi:hover { border-color: #9eb7c1; box-shadow: 0 10px 28px rgba(20, 45, 78, .14); }
+.table-wrap td input.field-control { min-width: 7rem; min-height: 40px; }
+.table-wrap tfoot th { padding: .7rem; text-align: left; color: var(--navy); background: #f7f9fb; border-top: 1px solid var(--line); font-size: .82rem; }
+.table-wrap tfoot th.numeric { text-align: right; font-variant-numeric: tabular-nums; }
+.check-compare { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 1.25rem; align-items: start; }
+.check-evidence { position: sticky; top: 1rem; padding: .85rem; background: #f7f9fb; border: 1px solid var(--line); border-radius: 9px; }
+.evidence-image { display: block; width: 100%; height: auto; max-height: 70vh; object-fit: contain; background: #fff; border: 1px solid var(--line); border-radius: 6px; }
+.evidence-fallback { display: grid; justify-items: center; gap: .4rem; padding: 2rem 1rem; text-align: center; color: var(--muted); }
+.evidence-fallback .icon { width: 2rem; height: 2rem; color: var(--navy); }
+.evidence-fallback strong { color: var(--navy); }
+.check-entered { min-width: 0; }
+.table-wrap td input[type="number"] { text-align: right; font-variant-numeric: tabular-nums; }
+
 @media (max-width: 780px) {
   .sidebar-scrim { position: fixed; inset: 0; z-index: 15; border: 0; background: rgba(11,31,56,.48); }
   .sidebar.open + .sidebar-scrim { display: block; }
@@ -156,5 +187,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .filter-grid, .repeatable-fields { grid-template-columns: 1fr; }
   .repeatable-fields .form-field:last-of-type { grid-column: auto; }
   .attachment-upload .form-grid { grid-template-columns: 1fr; }
+  .check-compare { grid-template-columns: 1fr; }
+  .check-evidence { position: static; }
   .review-list li, .attachment-list li { align-items: flex-start; flex-wrap: wrap; }
 }

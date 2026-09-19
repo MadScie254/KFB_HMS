@@ -1,0 +1,60 @@
+{% extends "base.html" %}{% block title %}Stock counts{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <p class="breadcrumbs"><a href="{% url 'stock' %}">Stock</a> / Stock counts</p>
+    <h1>Stock counts</h1>
+    <p>A count never edits a balance. An approved variance posts an adjustment movement with a named reviewer.</p>
+  </div>
+</div>
+
+<div class="content-grid">
+  <section class="panel span-2">
+    <div class="panel-head"><div><p class="eyebrow">Frozen at a cutoff</p><h2>Count sheets</h2></div><span>Most recent 40</span></div>
+    {% if counts %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Reference</th><th>Location</th><th>Cutoff</th><th>Counted by</th><th class="numeric">Lines with variance</th><th>Status</th><th>Reviewed by</th></tr></thead>
+        <tbody>
+        {% for count in counts %}
+        <tr>
+          <td><a href="{% url 'stock_count_detail' count.pk %}"><strong>{{ count.reference }}</strong><small>{% if count.blind_count %}Blind count{% else %}Expected quantities shown{% endif %}</small></a></td>
+          <td>{{ count.location }}</td>
+          <td>{{ count.cutoff_at|date:"j M Y, H:i" }}</td>
+          <td>{{ count.counted_by.staff_profile }}</td>
+          <td class="numeric">{% if count.status == 'frozen' %}Not yet counted{% else %}{{ count.variance_line_count }}{% endif %}</td>
+          <td><span class="status {{ count.status }}">{{ count.get_status_display }}</span></td>
+          <td>{{ count.reviewed_by.staff_profile|default:"—" }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="empty">
+      <strong>No stock count has been taken.</strong>
+      <p>A count freezes the ledger balance of every batch at a cutoff, so what is counted on the shelf is compared with what the ledger said at that moment.</p>
+    </div>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><div><p class="eyebrow">Start here</p><h2>Open a count sheet</h2></div></div>
+    {% if can_open %}
+    <form method="post" action="{% url 'stock_count_open' %}" class="form-stack">{% csrf_token %}
+      <div class="form-grid one-column">{% include "hospital/_form_fields.html" with form=open_form %}</div>
+      <button class="button primary full" type="submit">{% include "hospital/_icon.html" with name="clipboard" %} Freeze the sheet now</button>
+    </form>
+    <div class="callout">
+      <strong>What freezing does.</strong>
+      <p>Every batch is written onto the sheet with the balance the ledger holds at this exact moment. Sales that happen while you count do not change what your count is judged against.</p>
+    </div>
+    {% else %}
+    <div class="empty compact">
+      <strong>Pharmacy or procurement opens a count.</strong>
+      <p>A reviewer approves it afterwards; the same person cannot do both.</p>
+    </div>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

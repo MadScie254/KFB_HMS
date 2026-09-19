@@ -14,7 +14,7 @@
   <a href="{% url 'reports' %}" class="kpi warning"><span>Unverified M-PESA</span><strong>KES {{ unverified_mpesa|floatformat:2 }}</strong><small>Requires reconciliation</small></a>
   <a href="{% url 'reports' %}" class="kpi"><span>Receivables</span><strong>KES {{ receivables|floatformat:2 }}</strong><small>Outstanding posted bills</small></a>
   <a href="{% url 'wards' %}" class="kpi"><span>Bed occupancy</span><strong>{{ occupied_beds }} / {{ active_beds }}</strong><small>Configured usable beds</small></a>
-  <a href="{% url 'eye_clinic' %}" class="kpi"><span>Eye waiting list</span><strong>{{ eye_waiting }}</strong><small>Unique patients</small></a>
+  <a href="{% url 'stock' %}" class="kpi"><span>Sellable stock at cost</span><strong>KES {{ stock.stock_value_cost|floatformat:2 }}</strong><small>{{ stock.below_reorder_count }} product{{ stock.below_reorder_count|pluralize }} below reorder level</small></a>
 </section>
 {% else %}
 <section class="task-grid">
@@ -26,11 +26,17 @@
   {% elif role == 'pharmacy' %}
     <a class="task-card primary-task" href="{% url 'pharmacy_order_create' %}"><span>01</span><strong>Walk-in order</strong><small>Price basket, then send to reception.</small></a>
     <a class="task-card" href="{% url 'pharmacy_orders' %}"><span>02</span><strong>Ready to dispense</strong><small>Open server-cleared orders.</small></a>
-    <a class="task-card" href="{% url 'stock' %}"><span>03</span><strong>Stock lookup</strong><small>Check batches, expiry and custody.</small></a>
+    <a class="task-card {% if stock.below_reorder_count %}attention{% endif %}" href="{% url 'stock' %}"><span>03</span><strong>Stock position</strong><small>{% if stock.below_reorder_count %}{{ stock.below_reorder_count }} product{{ stock.below_reorder_count|pluralize }} at or below reorder level.{% else %}Batches, expiry and valuation.{% endif %}</small></a>
+    <a class="task-card {% if unchecked_deliveries %}attention{% endif %}" href="{% url 'deliveries' %}"><span>04</span><strong>Receive delivery</strong><small>{% if unchecked_deliveries %}{{ unchecked_deliveries }} awaiting an independent check.{% else %}Photograph the invoice and post stock in.{% endif %}</small></a>
   {% elif role == 'clinician' %}
     <a class="task-card primary-task" href="{% url 'queue' %}"><span>01</span><strong>My queue</strong><small>Open the next patient encounter.</small></a>
     <a class="task-card" href="{% url 'patients' %}"><span>02</span><strong>Patient chart</strong><small>Review longitudinal records.</small></a>
     <a class="task-card" href="{% url 'wards' %}"><span>03</span><strong>Admissions</strong><small>Clinical and financial discharge stay separate.</small></a>
+  {% elif role == 'procurement' %}
+    <a class="task-card primary-task" href="{% url 'purchase_order_create' %}"><span>01</span><strong>New purchase request</strong><small>A different reviewer must approve it.</small></a>
+    <a class="task-card {% if unchecked_deliveries %}attention{% endif %}" href="{% url 'deliveries' %}"><span>02</span><strong>Deliveries</strong><small>{% if unchecked_deliveries %}{{ unchecked_deliveries }} awaiting an independent check.{% else %}Receive stock against a photographed invoice.{% endif %}</small></a>
+    <a class="task-card {% if stock.below_reorder_count %}attention{% endif %}" href="{% url 'stock' %}?view=low"><span>03</span><strong>What to reorder</strong><small>{% if stock.below_reorder_count %}{{ stock.below_reorder_count }} product{{ stock.below_reorder_count|pluralize }} at or below reorder level.{% else %}Nothing is below its reorder level.{% endif %}</small></a>
+    <a class="task-card" href="{% url 'stock_counts' %}"><span>04</span><strong>Stock count</strong><small>Freeze a sheet and reconcile the shelf.</small></a>
   {% else %}
     <a class="task-card primary-task" href="{% url 'queue' %}"><span>01</span><strong>Assigned work</strong><small>Open the current departmental worklist.</small></a>
     <a class="task-card" href="{% url 'wards' %}"><span>02</span><strong>Ward board</strong><small>Review active admissions.</small></a>
@@ -43,6 +49,27 @@
     <div class="panel-head"><div><p class="eyebrow">Live operational record</p><h2>Active patient queue</h2></div><a href="{% url 'queue' %}">View all</a></div>
     {% if queue %}<div class="table-wrap"><table><thead><tr><th>Patient</th><th>Visit</th><th>Department</th><th>Status</th><th>Waiting</th></tr></thead><tbody>{% for encounter in queue %}<tr><td><a href="{% url 'patient_detail' encounter.patient_id %}"><strong>{{ encounter.patient.full_name }}</strong><small>{{ encounter.patient.patient_number }}</small></a></td><td>{{ encounter.encounter_number }}</td><td>{{ encounter.department }}</td><td><span class="status {{ encounter.status }}">{{ encounter.get_status_display }}</span></td><td>{{ encounter.created_at|timesince }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<div class="empty"><strong>No patients are waiting.</strong><p>New visits will appear here after reception starts them.</p></div>{% endif %}
   </section>
+  {% if low_stock or expiring_stock %}
+  <section class="panel">
+    <div class="panel-head"><div><p class="eyebrow">Act before it runs out</p><h2>Stock needing attention</h2></div><a href="{% url 'stock' %}">Open stock</a></div>
+    {% if low_stock %}
+    <ul class="record-list compact-list">
+      {% for row in low_stock %}
+      <li><div><strong>{{ row.item.name }}</strong><p>Reorder level {{ row.reorder_level|floatformat:"-3" }} {{ row.item.base_unit }}</p><small>Short by {{ row.shortfall|floatformat:"-3" }}</small></div><span class="quantity {% if not row.sellable_on_hand %}negative{% endif %}">{{ row.sellable_on_hand|floatformat:"-3" }}</span></li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+    {% if expiring_stock %}
+    <div class="section-divider"><div><p class="eyebrow">Use or review first</p><h2>Expiring soon</h2></div></div>
+    <ul class="record-list compact-list">
+      {% for row in expiring_stock %}
+      <li><div><strong>{{ row.item.name }}</strong><p>Batch {{ row.batch.batch_number }}</p><small>Expires {{ row.batch.expiry_date|date:"j M Y" }} · {{ row.days_to_expiry }} day{{ row.days_to_expiry|pluralize }}</small></div><span class="quantity">{{ row.on_hand|floatformat:"-3" }}</span></li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+  </section>
+  {% endif %}
+
   <section class="panel">
     <div class="panel-head"><div><p class="eyebrow">Review, not accusation</p><h2>Exceptions</h2></div>{% if 'exceptions' in allowed_navigation %}<a href="{% url 'exceptions' %}">Open centre</a>{% endif %}</div>
     {% if exceptions %}<ul class="exception-list">{% for item in exceptions %}<li><span class="severity {{ item.severity }}">{{ item.get_severity_display }}</span><div><strong>{{ item.summary }}</strong><small>{{ item.created_at|timesince }} ago</small></div></li>{% endfor %}</ul>{% else %}<div class="empty compact"><strong>No unresolved exceptions.</strong><p>Discrepancies will appear here for review.</p></div>{% endif %}
