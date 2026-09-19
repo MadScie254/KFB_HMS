@@ -207,7 +207,12 @@ def build_financial_report_pdf(*, context, hospital_name, generated_by):
             Paragraph(_text(basis), styles["KFBCell"]),
         ]
         for label, value, basis in [
-            ("Stock value at cost", _money(stock["stock_value_cost"]), "Ledger balance at batch purchase cost"),
+            ("Sellable stock at cost", _money(stock["stock_value_cost"]), "Excludes expired and quarantined batches"),
+            (
+                "Expired or quarantined at cost",
+                _money(stock["stock_value_unsellable_cost"]),
+                "Held but not sellable; excluded from the figure above",
+            ),
             (
                 "Stock value at selling price",
                 _money(stock["stock_value_retail"]),
@@ -216,7 +221,13 @@ def build_financial_report_pdf(*, context, hospital_name, generated_by):
             ),
             ("Cost of goods dispensed", _money(stock_activity["cost_of_goods_dispensed"]), "Outward movements in period, at batch cost"),
             ("Product sales billed", _money(stock_activity["product_sales_value"]), "Posted product invoice lines in period"),
-            ("Product gross margin", _money(stock_activity["product_gross_margin"]), "Billed less cost of goods; not an operating result"),
+            (
+                "Product gross margin",
+                _money(stock_activity["product_gross_margin"]) if stock_activity["margin_available"] else "Unavailable",
+                "Billed less cost of goods; not an operating result"
+                if stock_activity["margin_available"]
+                else "Needs both a billed sale and a dispense in the period",
+            ),
             ("Products below reorder level", str(stock["below_reorder_count"]), "Sellable stock only"),
             ("Batches expiring soon", str(stock["expiring_soon_count"]), f"Within {stock['expiry_window_days']} days, still holding stock"),
             ("Expired stock held", _money(stock["expired_value"]), f"{stock['expired_count']} batch(es), not sellable"),

@@ -14,8 +14,7 @@
   <a href="{% url 'reports' %}" class="kpi warning"><span>Unverified M-PESA</span><strong>KES {{ unverified_mpesa|floatformat:2 }}</strong><small>Requires reconciliation</small></a>
   <a href="{% url 'reports' %}" class="kpi"><span>Receivables</span><strong>KES {{ receivables|floatformat:2 }}</strong><small>Outstanding posted bills</small></a>
   <a href="{% url 'wards' %}" class="kpi"><span>Bed occupancy</span><strong>{{ occupied_beds }} / {{ active_beds }}</strong><small>Configured usable beds</small></a>
-  <a href="{% url 'eye_clinic' %}" class="kpi"><span>Eye waiting list</span><strong>{{ eye_waiting }}</strong><small>Unique patients</small></a>
-  <a href="{% url 'stock' %}" class="kpi"><span>Stock value at cost</span><strong>KES {{ stock.stock_value_cost|floatformat:2 }}</strong><small>{{ stock.below_reorder_count }} product{{ stock.below_reorder_count|pluralize }} below reorder level</small></a>
+  <a href="{% url 'stock' %}" class="kpi"><span>Sellable stock at cost</span><strong>KES {{ stock.stock_value_cost|floatformat:2 }}</strong><small>{{ stock.below_reorder_count }} product{{ stock.below_reorder_count|pluralize }} below reorder level</small></a>
 </section>
 {% else %}
 <section class="task-grid">

@@ -91,6 +91,7 @@ def stock_position(expiry_window_days=DEFAULT_EXPIRY_WINDOW_DAYS):
     rows = batch_rows(expiry_window_days)
     products = {}
     cost_value = Decimal("0.00")
+    sellable_cost_value = Decimal("0.00")
     retail_value = Decimal("0.00")
     unpriced_items = set()
 
@@ -125,9 +126,14 @@ def stock_position(expiry_window_days=DEFAULT_EXPIRY_WINDOW_DAYS):
             bucket["earliest_expiry"] = expiry
 
         cost_value += row["cost_value"]
-        if row["retail_value"] is not None:
+        if row["sellable"]:
+            sellable_cost_value += row["cost_value"]
+        # Expired and quarantined batches cannot be sold, so they are excluded
+        # from the value the hospital could realise. Counting them would report
+        # medicine that legally cannot leave the shelf as though it were an asset.
+        if row["retail_value"] is not None and row["sellable"]:
             retail_value += row["retail_value"]
-        elif row["on_hand"] > 0:
+        elif row["retail_value"] is None and row["on_hand"] > 0:
             unpriced_items.add(item.pk)
 
     product_rows = []
@@ -150,9 +156,11 @@ def stock_position(expiry_window_days=DEFAULT_EXPIRY_WINDOW_DAYS):
     return {
         "rows": rows,
         "products": product_rows,
-        "stock_value_cost": cost_value,
+        "stock_value_cost": sellable_cost_value,
+        "stock_value_all_cost": cost_value,
+        "stock_value_unsellable_cost": cost_value - sellable_cost_value,
         "stock_value_retail": retail_value,
-        "potential_margin": retail_value - cost_value,
+        "potential_margin": retail_value - sellable_cost_value,
         "unpriced_item_count": len(unpriced_items),
         "below_reorder": below_reorder,
         "below_reorder_count": len(below_reorder),
@@ -215,6 +223,10 @@ def stock_activity(days=7):
 
     top_movers = sorted(movers.values(), key=lambda row: row["units"], reverse=True)[:8]
 
+    # A margin needs both halves. Billing a sale that was never dispensed leaves
+    # cost at zero, which reads as a 100% margin — worse than no figure at all.
+    margin_available = dispensed_units > 0 and sales_value > 0
+
     return {
         "days": days,
         "received_units": received_units,
@@ -224,7 +236,8 @@ def stock_activity(days=7):
         "adjustment_units": adjustment_units,
         "adjustment_value": adjustment_value,
         "product_sales_value": sales_value,
-        "product_gross_margin": sales_value - cost_of_goods,
+        "margin_available": margin_available,
+        "product_gross_margin": (sales_value - cost_of_goods) if margin_available else None,
         "top_movers": top_movers,
         "movement_count": len(movements),
     }

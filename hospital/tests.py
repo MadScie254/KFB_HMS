@@ -11,6 +11,7 @@ from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
+from .analytics import stock_activity, stock_position
 from .models import (
     AuditEvent,
     CashShift,
@@ -674,7 +675,7 @@ class StockScreenTests(HospitalFixtureMixin, TestCase):
         # 200 tablets at a 2.00 purchase cost, priced for sale at 5.00.
         self.assertEqual(position["stock_value_cost"], Decimal("400.00"))
         self.assertEqual(position["stock_value_retail"], Decimal("1000.00"))
-        self.assertContains(response, "Stock value at cost")
+        self.assertContains(response, "Sellable stock at cost")
 
     def test_stock_page_filters_to_products_below_reorder_level(self):
         self.client.login(username=self.pharmacist.username, password=self.password)
@@ -753,7 +754,7 @@ class StockScreenTests(HospitalFixtureMixin, TestCase):
         response = self.client.get(reverse("reports"))
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.context["stock"]["stock_value_cost"], Decimal("400.00"))
-        self.assertContains(response, "Stock value at cost")
+        self.assertContains(response, "Sellable stock at cost")
         pdf = self.client.get(reverse("report_download_pdf"))
         self.assertEqual(pdf.status_code, 200)
         self.assertEqual(pdf["Content-Type"], "application/pdf")
@@ -795,3 +796,80 @@ class DemoSeedTests(TestCase):
         self.assertEqual(order.status, "approved")
         self.assertNotEqual(order.approved_by_id, order.requested_by_id)
         self.assertEqual(order.lines.count(), 2)
+
+
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
+class ValuationCorrectnessTests(HospitalFixtureMixin, TestCase):
+    """Numbers the owner would act on have to be right, or absent.
+
+    Stock value counted expired and quarantined batches, reporting medicine
+    that cannot legally leave the shelf as though it were a realisable asset.
+    Product gross margin divided a billed sale by a zero cost whenever nothing
+    had been dispensed, which reads on screen as a 100% margin.
+    """
+
+    def expired_batch(self, quantity=Decimal("50")):
+        batch = StockBatch.objects.create(
+            item=self.product, batch_number="B-EXPIRED",
+            expiry_date=timezone.localdate() - timedelta(days=1),
+            purchase_cost_per_base_unit=Decimal("2.00"),
+        )
+        StockMovement.objects.create(
+            batch=batch, movement_type=StockMovement.MovementType.RECEIPT, quantity_delta=quantity,
+            reference_type="Opening", reference_id="exp", idempotency_key="expired-open", entered_by=self.pharmacist,
+        )
+        return batch
+
+    def test_expired_stock_is_excluded_from_the_value_on_the_shelf(self):
+        before = stock_position()["stock_value_cost"]
+        self.expired_batch(Decimal("50"))
+        after = stock_position()
+        self.assertEqual(after["stock_value_cost"], before, "Expired stock must not inflate sellable value.")
+        self.assertEqual(after["stock_value_unsellable_cost"], Decimal("100.00"))
+        self.assertEqual(after["stock_value_all_cost"], before + Decimal("100.00"))
+
+    def test_quarantined_stock_is_excluded_from_the_value_on_the_shelf(self):
+        before = stock_position()["stock_value_cost"]
+        self.batch.status = StockBatch.Status.QUARANTINE
+        self.batch.save(update_fields=["status"])
+        after = stock_position()
+        self.assertEqual(after["stock_value_cost"], Decimal("0.00"))
+        self.assertEqual(after["stock_value_unsellable_cost"], before)
+
+    def test_retail_value_also_excludes_stock_that_cannot_be_sold(self):
+        self.batch.status = StockBatch.Status.QUARANTINE
+        self.batch.save(update_fields=["status"])
+        self.assertEqual(stock_position()["stock_value_retail"], Decimal("0.00"))
+
+    def test_margin_is_unavailable_when_nothing_was_dispensed(self):
+        order = self.prepare(10)
+        record_payment(actor=self.reception, invoice_id=order.invoice_id, amount=50,
+                       method=Payment.Method.CASH, reference="", idempotency_key="margin-pay")
+        activity = stock_activity(7)
+        self.assertGreater(activity["product_sales_value"], Decimal("0.00"))
+        self.assertEqual(activity["dispensed_units"], Decimal("0.000"))
+        self.assertFalse(activity["margin_available"])
+        self.assertIsNone(activity["product_gross_margin"], "A billed-but-undispensed sale is not a 100% margin.")
+
+    def test_margin_is_reported_once_both_halves_exist(self):
+        order = self.prepare(10)
+        record_payment(actor=self.reception, invoice_id=order.invoice_id, amount=50,
+                       method=Payment.Method.CASH, reference="", idempotency_key="margin-pay-2")
+        dispense_order(actor=self.pharmacist, order_id=order.pk, idempotency_key="margin-dispense")
+        activity = stock_activity(7)
+        self.assertTrue(activity["margin_available"])
+        # 10 tablets billed at 5.00 and costing 2.00 each.
+        self.assertEqual(activity["product_sales_value"], Decimal("50.00"))
+        self.assertEqual(activity["cost_of_goods_dispensed"], Decimal("20.00"))
+        self.assertEqual(activity["product_gross_margin"], Decimal("30.00"))
+
+    def test_owner_dashboard_keeps_to_six_kpi_cards(self):
+        self.client.login(username=self.owner.username, password=self.password)
+        html = self.client.get(reverse("dashboard")).content.decode()
+        cards = html.count('class="kpi"') + html.count('class="kpi warning"')
+        self.assertLessEqual(cards, 6, "The brief allows a maximum of six owner KPI cards.")
+
+    def test_owner_can_still_reach_the_eye_clinic_without_its_kpi_card(self):
+        self.client.login(username=self.owner.username, password=self.password)
+        self.assertEqual(self.client.get(reverse("eye_clinic")).status_code, 200)
+        self.assertContains(self.client.get(reverse("dashboard")), reverse("eye_clinic"))

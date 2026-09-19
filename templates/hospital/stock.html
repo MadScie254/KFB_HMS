@@ -14,9 +14,9 @@
 
 <section class="kpi-grid" aria-label="Stock position">
   <div class="kpi">
-    <span>Stock value at cost</span>
+    <span>Sellable stock at cost</span>
     <strong>KES {{ position.stock_value_cost|floatformat:2 }}</strong>
-    <small>{{ position.product_count }} product{{ position.product_count|pluralize }} · {{ position.batch_count }} batch{{ position.batch_count|pluralize:"es" }}</small>
+    <small>{% if position.stock_value_unsellable_cost %}Excludes KES {{ position.stock_value_unsellable_cost|floatformat:2 }} expired or quarantined{% else %}{{ position.product_count }} product{{ position.product_count|pluralize }} · {{ position.batch_count }} batch{{ position.batch_count|pluralize:"es" }}{% endif %}</small>
   </div>
   <div class="kpi">
     <span>Value at selling price</span>
@@ -61,10 +61,10 @@
     <strong>KES {{ activity.product_sales_value|floatformat:2 }}</strong>
     <small>Posted invoice lines for products</small>
   </div>
-  <div class="kpi">
+  <div class="kpi {% if not activity.margin_available %}unavailable{% endif %}">
     <span>Product gross margin</span>
-    <strong>KES {{ activity.product_gross_margin|floatformat:2 }}</strong>
-    <small>Billed minus cost of goods; not an operating result</small>
+    {% if activity.margin_available %}<strong>KES {{ activity.product_gross_margin|floatformat:2 }}</strong><small>Billed minus cost of goods; not an operating result</small>
+    {% else %}<strong>Unavailable</strong><small>Needs both a billed sale and a dispense in this period</small>{% endif %}
   </div>
 </section>
 
