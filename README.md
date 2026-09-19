@@ -41,9 +41,15 @@ One command creates the virtual environment, installs the locked dependencies, m
 .\scripts\run-demo.ps1
 ```
 
+```
+scripts\run-demo.cmd
+```
+
 ```bash
 ./scripts/run-demo.sh
 ```
+
+The first is PowerShell, the second a Command Prompt, the third a Unix shell. Command Prompt cannot execute a `.ps1` file, which is why there is a `.cmd` beside it.
 
 Both print the sign-in accounts and a suggested order to walk the stock controls. They refuse to run when `KFB_ENV` is anything but `demo`, because they seed fictional patients and prices.
 
