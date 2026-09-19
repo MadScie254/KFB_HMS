@@ -6,10 +6,10 @@ A local-first, server-rendered hospital operations application for Kingdom Faith
 
 - Named role accounts with server-side route enforcement, screen lock and no-store browser headers.
 - Patient registration, duplicate warning, patient search, longitudinal visits and a role-scoped patient banner.
-- Reception queue, emergency override record, server-held clinical drafts and immutable signed-note versions.
-- Service orders and authorised result release workflow for laboratory/imaging work.
+- Reception queue, explicit triage priority, emergency override record, concurrency-safe clinical drafts and immutable signed-note versions.
+- Service orders and independently released laboratory/imaging results; requesters cannot release their own work.
 - Walk-in pharmacy basket → reception payment → receipt → server-cleared dispense → batch stock ledger.
-- Cash and manually recorded M-PESA with unique references and a visibly unverified state.
+- Cash and manually recorded M-PESA with unique references, independent reviewer verification and a visibly unverified state.
 - Cashier shift opening/closing calculations and exception creation for variances.
 - Versioned catalogue prices, base-unit stock, FEFO batch allocation, quarantine/expiry rejection and idempotent dispensing.
 - Delivery receiving against an approved order, with a mandatory photograph of the supplier invoice, per-batch expiry and actual cost, partial deliveries, and an independent check the receiver cannot perform.
@@ -21,9 +21,11 @@ A local-first, server-rendered hospital operations application for Kingdom Faith
 - An owner's brief that ranks what needs attention today. It is a page in the application; nothing is messaged anywhere.
 - Configurable ward/bed register and admission records with separate clinical and financial status.
 - Eye session/case records with separate patients/eyes and one provisional case fee per completed patient.
-- Purchase requests with independent approval enforcement.
-- Owner reports tied to posted invoices/payments and a prioritised exception centre.
-- Product CSV dry run with row-level errors and idempotent commit.
+- Multi-line prescriptions and purchase requests with independent approval enforcement.
+- Owner reports tied to posted invoices/payments, a prioritised exception centre and watermarked KFBH PDF downloads.
+- Protected clinical attachment upload/download and patient access-record PDF export.
+- Read-only audit review with searchable attribution and PostgreSQL database-level append-only enforcement.
+- Product, patient, witnessed opening-stock and reviewed opening-receivable CSV dry runs with row-level errors and idempotent commit.
 - Printable receipts and four numbered downtime forms.
 - Checksummed database/attachment backups; production backups refuse to run without an encryption recipient.
 
@@ -71,9 +73,9 @@ For the outpatient slice, reception registers/finds a patient and starts a visit
 2. Set `KFB_ENV=production`, a long random `KFB_SECRET_KEY`, host names, secure-cookie settings, and a PostgreSQL URL.
 3. Run migrations and create named users with the admin command. Never run `seed_demo`.
 4. Run `.\.venv\Scripts\python.exe manage.py check --deploy` and `.\.venv\Scripts\python.exe manage.py check_readiness`.
-5. Start Waitress with `scripts\start-server.ps1`, or install it as a restricted Windows service using the hospital's approved service manager.
+5. Configure Caddy from `deploy\Caddyfile`, install its internal CA certificate on authorised workstations, and start Waitress with `scripts\start-server.ps1` as a restricted Windows service. Production Waitress binds only to loopback and refuses startup unless HTTPS redirect is enabled.
 
-The LAN design is one application server and one PostgreSQL database. Workstations connect in supported browsers; the database file/port is never shared directly. HTTPS for LAN access, firewall scope, automatic service start and private remote owner access must be configured by the local implementer.
+The LAN design is one application server and one PostgreSQL database. Caddy terminates internal HTTPS, while Waitress and the database stay off the workstation-facing interface. Firewall scope, automatic service start and private remote owner access must still be configured by the local implementer.
 
 After the real internal HTTPS URL works, create the workstation shortcut with `scripts\create-desktop-shortcut.ps1 -ApplicationUrl "https://hospital.internal"`. Complete `docs/HOST_READINESS.md` before the pilot.
 
@@ -95,7 +97,7 @@ Tests alone:
 .\.venv\Scripts\python.exe manage.py test hospital
 ```
 
-The suite covers outpatient prescription pricing/payment/dispense, walk-in reconciliation, base-unit stock arithmetic, duplicate M-PESA references, expiry/quarantine controls, partial allocations and deposits, cash-shift math, independent review, bilateral case fee, signed-note immutability, CSV idempotency and role denial.
+The suite covers PDF exports, protected attachments, multi-line prescriptions and purchasing, M-PESA and credit-note review, requester segregation, CSV migrations, outpatient prescription pricing/payment/dispense, stock arithmetic, duplicate references, expiry/quarantine controls, partial allocations, cash-shift math, bilateral case fees, signed-note immutability and role denial.
 
 It also covers the stock control loop: a delivery posting receipt movements and balancing against its invoice, refusal without an invoice photograph, refusal of expired batches, per-order supplier-invoice uniqueness, partial deliveries, price and invoice-total differences raised as exceptions without blocking the post, the receiver being unable to check their own delivery, count snapshots frozen at their cutoff, approved counts posting adjustments, reviewer segregation, and the demo seed command completing with the correct roles.
 
