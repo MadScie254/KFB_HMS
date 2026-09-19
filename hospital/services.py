@@ -3,7 +3,7 @@ from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
-from django.db.models import Sum
+from django.db.models import F, Sum
 from django.utils import timezone
 
 from .models import (
@@ -41,6 +41,52 @@ from .permissions import user_role
 NEAR_EXPIRY_DAYS = 90
 COST_VARIANCE_FRACTION = Decimal("0.10")
 INVOICE_TOLERANCE = Decimal("1.00")
+
+
+# Nulls sort first on SQLite and last on PostgreSQL. Left to the database, a
+# batch with no recorded expiry would be dispensed first in the demo and last
+# in production — the same order, the same stock, a different batch off the
+# shelf. FEFO has to mean one thing, so the ordering is stated explicitly.
+FEFO_ORDER = (F("expiry_date").asc(nulls_last=True), "created_at", "pk")
+
+
+def raise_exception(category, summary, evidence, severity="warning", dedupe_on=None):
+    """Raise an operational exception once, no matter how often it recurs.
+
+    Matching on summary text is not safe: nothing stops two rows sharing a
+    summary, and once two exist every later attempt to raise the same exception
+    dies with MultipleObjectsReturned. A hashed dedupe key with a unique
+    constraint makes the raise idempotent under concurrency, and a recurrence
+    of something already marked resolved reopens it rather than vanishing.
+    """
+    summary = str(summary)[:255]
+    key = hashlib.sha256(":".join(str(part) for part in (dedupe_on or (category, summary))).encode()).hexdigest()[:64]
+    now = timezone.now()
+    try:
+        with transaction.atomic():
+            record, created = ExceptionRecord.objects.get_or_create(
+                dedupe_key=key,
+                defaults={
+                    "category": category, "summary": summary,
+                    "evidence": evidence, "severity": severity, "last_seen_at": now,
+                },
+            )
+    except IntegrityError:
+        created = False
+        record = ExceptionRecord.objects.get(dedupe_key=key)
+    if created:
+        return record
+    record.occurrence_count = (record.occurrence_count or 0) + 1
+    record.last_seen_at = now
+    record.evidence = evidence
+    fields = ["occurrence_count", "last_seen_at", "evidence", "updated_at"]
+    if record.status == ExceptionRecord.Status.RESOLVED:
+        # A problem that has come back is not a resolved problem.
+        record.status = ExceptionRecord.Status.OPEN
+        record.resolved_at = None
+        fields += ["status", "resolved_at"]
+    record.save(update_fields=fields)
+    return record
 
 
 def setting_decimal(key, default):
@@ -165,10 +211,11 @@ def record_payment(*, actor, invoice_id, amount, method, reference, idempotency_
         order.save(update_fields=["status", "updated_at"])
     audit(actor, "payment.recorded", payment, after={"amount": str(amount), "method": method, "invoice": invoice.invoice_number}, request=request)
     if method == Payment.Method.MPESA:
-        ExceptionRecord.objects.get_or_create(
-            category="unverified_mpesa",
-            summary=f"Verify M-PESA {payment.reference} for {payment.receipt_number}",
-            defaults={"evidence": f"Recorded amount KES {amount:,.2f}; not yet verified against hospital-controlled records."},
+        raise_exception(
+            "unverified_mpesa",
+            f"Verify M-PESA {payment.reference} for {payment.receipt_number}",
+            f"Recorded amount KES {amount:,.2f}; not yet verified against hospital-controlled records.",
+            dedupe_on=("unverified_mpesa", payment.pk),
         )
     return payment
 
@@ -215,7 +262,7 @@ def dispense_order(*, actor, order_id, idempotency_key, request=None):
         batches = list(
             StockBatch.objects.select_for_update()
             .filter(item=line.product, status=StockBatch.Status.ACTIVE)
-            .order_by("expiry_date", "created_at")
+            .order_by(*FEFO_ORDER)
         )
         for batch in batches:
             if not batch.can_dispense:
@@ -478,11 +525,10 @@ def receive_delivery(
             f"{receipt.receipt_number}: invoice KES {invoice_amount:,.2f}, delivered value KES {receipt.received_value:,.2f}, difference KES {variance:,.2f}.",
         ))
 
-    for severity, summary, evidence in flags:
-        ExceptionRecord.objects.get_or_create(
-            category="purchase_discrepancy",
-            summary=summary[:255],
-            defaults={"severity": severity, "evidence": evidence},
+    for index, (severity, summary, evidence) in enumerate(flags):
+        raise_exception(
+            "purchase_discrepancy", summary, evidence, severity=severity,
+            dedupe_on=("purchase_discrepancy", receipt.pk, index, summary),
         )
 
     audit(
@@ -539,15 +585,37 @@ def open_stock_count(*, actor, location="Pharmacy", blind_count=True, notes="", 
         notes=notes.strip(),
         counted_by=actor,
     )
-    batches = StockBatch.objects.select_related("item").order_by("item__name", "expiry_date")
-    for batch in batches:
-        StockCountLine.objects.create(
-            count=count,
-            batch=batch,
-            expected_quantity=batch.balance_at(cutoff),
-            counted_quantity=Decimal("0.000"),
-        )
-    audit(actor, "stock_count.opened", count, after={"lines": count.lines.count(), "blind": blind_count}, request=request)
+
+    # One aggregate for every balance, not one query per batch. A pharmacy that
+    # has been trading for a few years holds thousands of batches; reading each
+    # balance separately turns opening a count into thousands of round trips.
+    balances = dict(
+        StockMovement.objects.filter(event_at__lte=cutoff)
+        .values_list("batch_id")
+        .annotate(total=Sum("quantity_delta"))
+        .values_list("batch_id", "total")
+    )
+
+    # A sheet nobody can finish is a control nobody uses. Count what is on the
+    # shelf (any non-zero balance) plus the live products that should be there,
+    # so "the ledger says zero but here are twenty" is still recordable. Batches
+    # that are both empty and retired are left off.
+    today = timezone.localdate()
+    lines = []
+    for batch in StockBatch.objects.select_related("item").order_by("item__name", "batch_number"):
+        balance = balances.get(batch.pk) or Decimal("0.000")
+        live = batch.status == StockBatch.Status.ACTIVE and (not batch.expiry_date or batch.expiry_date >= today)
+        if balance == 0 and not live:
+            continue
+        lines.append(StockCountLine(
+            count=count, batch=batch,
+            expected_quantity=balance, counted_quantity=Decimal("0.000"),
+        ))
+    if not lines:
+        raise ValidationError("There is no stock to count: no batch holds a balance and no product is active.")
+    StockCountLine.objects.bulk_create(lines, batch_size=500)
+
+    audit(actor, "stock_count.opened", count, after={"lines": len(lines), "blind": blind_count}, request=request)
     return count
 
 
@@ -611,13 +679,12 @@ def review_stock_count(*, actor, count_id, approve, review_notes="", request=Non
             )
             posted += 1
             if abs(line.variance_value) > setting_decimal("stock_variance_review_value", Decimal("500.00")):
-                ExceptionRecord.objects.get_or_create(
-                    category="stock_discrepancy",
-                    summary=f"Approved stock adjustment for {line.batch.item.name} batch {line.batch.batch_number}"[:255],
-                    defaults={
-                        "severity": "warning",
-                        "evidence": f"{count.reference}: counted {line.counted_quantity}, expected {line.expected_quantity}, value KES {line.variance_value:,.2f}. Reason recorded: {line.reason or 'none given'}.",
-                    },
+                raise_exception(
+                    "stock_discrepancy",
+                    f"Approved stock adjustment for {line.batch.item.name} batch {line.batch.batch_number}",
+                    f"{count.reference}: counted {line.counted_quantity}, expected {line.expected_quantity}, "
+                    f"value KES {line.variance_value:,.2f}. Reason recorded: {line.reason or 'none given'}.",
+                    dedupe_on=("stock_discrepancy", count.pk, line.pk),
                 )
 
     count.status = StockCount.Status.APPROVED if approve else StockCount.Status.REJECTED
@@ -658,6 +725,10 @@ def issue_to_department(*, actor, department, received_by_name, lines, kind=None
         raise ValidationError("A patient-specific issue must name the patient it is for.")
 
     prepared = []
+    # Quantity already claimed by an earlier line of THIS issue, keyed by batch.
+    # Without it two lines naming the same batch each read the untouched balance,
+    # both pass, and the ledger goes negative — stock issued that never existed.
+    reserved = {}
     for row in lines:
         batch = StockBatch.objects.select_for_update().get(pk=row["batch"].pk)
         quantity = Decimal(str(row["quantity"]))
@@ -668,10 +739,15 @@ def issue_to_department(*, actor, department, received_by_name, lines, kind=None
                 f"{batch.item.name} batch {batch.batch_number} is {batch.get_status_display().lower()} and cannot be issued."
             )
         on_hand = batch.movements.aggregate(total=Sum("quantity_delta"))["total"] or Decimal("0.000")
-        if quantity > on_hand:
+        claimed = reserved.get(batch.pk, Decimal("0.000"))
+        available = on_hand - claimed
+        if quantity > available:
+            already = f" ({claimed} already claimed by another line of this issue)" if claimed else ""
             raise ValidationError(
-                f"Only {on_hand} {batch.item.base_unit or 'units'} of {batch.item.name} batch {batch.batch_number} are on hand."
+                f"Only {available} {batch.item.base_unit or 'units'} of {batch.item.name} "
+                f"batch {batch.batch_number} are available{already}."
             )
+        reserved[batch.pk] = claimed + quantity
         prepared.append((batch, quantity))
 
     issue = DepartmentIssue.objects.create(
@@ -765,13 +841,12 @@ def account_for_issue(*, actor, issue_id, outcomes, request=None):
             # custody moved, and the specification is explicit that stock is
             # never deducted a second time at the point of use. The waste is
             # recorded against the custody line and raised for review.
-            ExceptionRecord.objects.get_or_create(
-                category="departmental_waste",
-                summary=f"Waste recorded in {issue.department}: {line.batch.item.name}"[:255],
-                defaults={
-                    "severity": "warning",
-                    "evidence": f"{issue.reference}: {wasted} {line.batch.item.base_unit or 'units'} of batch {line.batch.batch_number} recorded as wasted by {actor.username}.",
-                },
+            raise_exception(
+                "departmental_waste",
+                f"Waste recorded in {issue.department}: {line.batch.item.name}",
+                f"{issue.reference}: {wasted} {line.batch.item.base_unit or 'units'} of batch "
+                f"{line.batch.batch_number} recorded as wasted by {actor.username}.",
+                dedupe_on=("departmental_waste", issue.pk, line.pk, line.quantity_wasted, wasted),
             )
 
         line.quantity_consumed += consumed
@@ -836,6 +911,16 @@ def review_write_off(*, actor, write_off_id, approve, review_notes="", request=N
         raise ValidationError("This write-off has already been reviewed.")
 
     if approve:
+        # Time passes between proposal and approval, and stock keeps moving.
+        # Posting an unchecked write-off drives the balance negative and
+        # removes stock the hospital no longer has.
+        on_hand = write_off.batch.movements.aggregate(total=Sum("quantity_delta"))["total"] or Decimal("0.000")
+        if write_off.quantity > on_hand:
+            raise ValidationError(
+                f"Only {on_hand} {write_off.batch.item.base_unit or 'units'} of batch "
+                f"{write_off.batch.batch_number} remain, but {write_off.quantity} were proposed for write-off. "
+                "The stock has moved since this was raised; reject it and raise a new request for what is there."
+            )
         StockMovement.objects.create(
             batch=write_off.batch,
             movement_type=StockMovement.MovementType.ADJUSTMENT,
@@ -848,15 +933,13 @@ def review_write_off(*, actor, write_off_id, approve, review_notes="", request=N
             idempotency_key=deterministic_key("write_off", write_off.pk),
             entered_by=actor,
         )
-        ExceptionRecord.objects.get_or_create(
-            category="stock_write_off",
-            summary=f"Stock written off: {write_off.batch.item.name} batch {write_off.batch.batch_number}"[:255],
-            defaults={
-                "severity": "warning",
-                "evidence": f"{write_off.reference}: {write_off.quantity} {write_off.batch.item.base_unit or 'units'} "
-                            f"worth KES {write_off.value_at_cost:,.2f}, reason {write_off.get_reason_display().lower()}, "
-                            f"approved by {actor.username}.",
-            },
+        raise_exception(
+            "stock_write_off",
+            f"Stock written off: {write_off.batch.item.name} batch {write_off.batch.batch_number}",
+            f"{write_off.reference}: {write_off.quantity} {write_off.batch.item.base_unit or 'units'} "
+            f"worth KES {write_off.value_at_cost:,.2f}, reason {write_off.get_reason_display().lower()}, "
+            f"approved by {actor.username}.",
+            dedupe_on=("stock_write_off", write_off.pk),
         )
 
     write_off.status = StockWriteOff.Status.APPROVED if approve else StockWriteOff.Status.REJECTED

@@ -3,6 +3,10 @@
 hospital.kfb.internal {
     tls internal
     encode zstd gzip
+
+    # Everything, including /static/, goes to the application: WhiteNoise serves
+    # the collected static files from STATIC_ROOT with long-lived caching.
+    # Run `python manage.py collectstatic --noinput` as part of every deploy.
     reverse_proxy 127.0.0.1:8000
 
     header {

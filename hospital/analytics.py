@@ -55,8 +55,15 @@ def active_price_map():
     return latest
 
 
-def batch_rows(expiry_window_days=DEFAULT_EXPIRY_WINDOW_DAYS):
-    """Every batch with its ledger balance, cost value and expiry standing."""
+def batch_rows(expiry_window_days=DEFAULT_EXPIRY_WINDOW_DAYS, include_depleted=False):
+    """Every batch that still matters, with balance, value and expiry standing.
+
+    A batch that has been fully dispensed is history, not position. Keeping
+    depleted batches in the result means every stock screen does more work each
+    year the hospital stays open, for rows that are all zero. They are excluded
+    unless a caller explicitly asks, and the per-item totals that depend on a
+    complete product list are built from the catalogue instead.
+    """
     today = timezone.localdate()
     horizon = today + timedelta(days=expiry_window_days)
     prices = active_price_map()
@@ -65,6 +72,8 @@ def batch_rows(expiry_window_days=DEFAULT_EXPIRY_WINDOW_DAYS):
         .annotate(on_hand=Coalesce(Sum("movements__quantity_delta"), ZERO_QUANTITY))
         .order_by("item__name", "expiry_date", "batch_number")
     )
+    if not include_depleted:
+        batches = batches.exclude(on_hand=Decimal("0.000"))
     rows = []
     for batch in batches:
         on_hand = batch.on_hand or Decimal("0.000")
@@ -94,27 +103,40 @@ def stock_position(expiry_window_days=DEFAULT_EXPIRY_WINDOW_DAYS):
     caveat instead of pretending the catalogue is fully priced.
     """
     rows = batch_rows(expiry_window_days)
-    products = {}
+    prices = active_price_map()
     cost_value = Decimal("0.00")
     sellable_cost_value = Decimal("0.00")
     retail_value = Decimal("0.00")
     unpriced_items = set()
 
-    for row in rows:
-        item = row["item"]
-        bucket = products.setdefault(item.pk, {
+    def new_bucket(item):
+        return {
             "item": item,
             "on_hand": Decimal("0.000"),
             "cost_value": Decimal("0.00"),
             "retail_value": Decimal("0.00"),
-            "unit_price": row["unit_price"],
+            "unit_price": prices.get(item.pk),
             "batch_count": 0,
             "sellable_on_hand": Decimal("0.000"),
             "earliest_expiry": None,
             "has_expired": False,
             "has_near_expiry": False,
-            "priced": row["unit_price"] is not None,
-        })
+            "priced": prices.get(item.pk) is not None,
+        }
+
+    # Seed from the catalogue, not from the batches. Building the product list
+    # out of stock rows makes a product that has never been received invisible —
+    # and a product with nothing on the shelf is the one most urgently needing
+    # reorder, so the reorder list was silently missing exactly what it existed
+    # to surface.
+    products = {
+        item.pk: new_bucket(item)
+        for item in CatalogueItem.objects.filter(kind=CatalogueItem.Kind.PRODUCT, active=True)
+    }
+
+    for row in rows:
+        item = row["item"]
+        bucket = products.setdefault(item.pk, new_bucket(item))
         bucket["on_hand"] += row["on_hand"]
         bucket["cost_value"] += row["cost_value"]
         bucket["batch_count"] += 1
@@ -145,12 +167,17 @@ def stock_position(expiry_window_days=DEFAULT_EXPIRY_WINDOW_DAYS):
     for bucket in products.values():
         item = bucket["item"]
         bucket["reorder_level"] = item.reorder_level
-        bucket["below_reorder"] = bucket["sellable_on_hand"] <= item.reorder_level
+        # A reorder level of zero means nobody set one, not "reorder at zero".
+        # Flagging those as short by nothing buries the products that really
+        # are short. Running out is still reported, as a stock-out.
+        bucket["below_reorder"] = item.reorder_level > 0 and bucket["sellable_on_hand"] <= item.reorder_level
+        bucket["out_of_stock"] = bucket["sellable_on_hand"] <= 0
         bucket["shortfall"] = max(Decimal("0.000"), item.reorder_level - bucket["sellable_on_hand"])
         product_rows.append(bucket)
     product_rows.sort(key=lambda row: row["item"].name)
 
     below_reorder = [row for row in product_rows if row["below_reorder"]]
+    out_of_stock = [row for row in product_rows if row["out_of_stock"]]
     expiring = sorted(
         (row for row in rows if row["near_expiry"] and row["on_hand"] > 0),
         key=lambda row: row["batch"].expiry_date,
@@ -169,6 +196,8 @@ def stock_position(expiry_window_days=DEFAULT_EXPIRY_WINDOW_DAYS):
         "unpriced_item_count": len(unpriced_items),
         "below_reorder": below_reorder,
         "below_reorder_count": len(below_reorder),
+        "out_of_stock": out_of_stock,
+        "out_of_stock_count": len(out_of_stock),
         "expiring_soon": expiring,
         "expiring_soon_count": len(expiring),
         "expired": expired,

@@ -2,7 +2,7 @@ from functools import wraps
 
 from django.contrib import messages
 from django.contrib.auth.decorators import login_required
-from django.core.exceptions import PermissionDenied
+from django.core.exceptions import ObjectDoesNotExist, PermissionDenied
 from django.shortcuts import redirect
 
 from .models import Role
@@ -15,7 +15,9 @@ def user_role(user):
         return Role.OWNER
     try:
         return user.staff_profile.role
-    except Exception:
+    except ObjectDoesNotExist:
+        # A user with no staff profile has no role. Any other failure here is a
+        # real fault and must not be silently downgraded to "no permissions".
         return ""
 
 

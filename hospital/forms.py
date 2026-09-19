@@ -25,6 +25,46 @@ from .models import (
     Supplier,
 )
 
+# Leading bytes of the formats this hospital accepts. The browser-supplied
+# content type is attacker-controlled and the extension is just a name, so
+# neither says what a file actually is. Reading the signature does.
+FILE_SIGNATURES = {
+    "pdf": [b"%PDF-"],
+    "jpg": [b"\xff\xd8\xff"],
+    "jpeg": [b"\xff\xd8\xff"],
+    "png": [b"\x89PNG\r\n\x1a\n"],
+    "heic": [b"ftypheic", b"ftypheix", b"ftyphevc", b"ftypmif1", b"ftypmsf1", b"ftypheim"],
+    "heif": [b"ftypheic", b"ftypheix", b"ftyphevc", b"ftypmif1", b"ftypmsf1", b"ftypheim"],
+}
+
+
+def validate_upload(uploaded, *, allowed, max_bytes, description):
+    """Check size, extension and the file's own leading bytes.
+
+    A stored file is served back to staff later. Accepting one because the
+    browser said it was a PNG means trusting the uploader about the contents of
+    their own upload.
+    """
+    if uploaded.size > max_bytes:
+        raise forms.ValidationError(f"File exceeds the {max_bytes // (1024 * 1024)} MB limit.")
+    if uploaded.size == 0:
+        raise forms.ValidationError("That file is empty.")
+    extension = uploaded.name.rsplit(".", 1)[-1].lower() if "." in uploaded.name else ""
+    if extension not in allowed:
+        raise forms.ValidationError(description)
+
+    position = uploaded.tell()
+    uploaded.seek(0)
+    head = uploaded.read(32)
+    uploaded.seek(position)
+    signatures = FILE_SIGNATURES.get(extension, [])
+    # ISO-BMFF (HEIC) carries its brand at offset 4, not at the start.
+    if signatures and not any(head.startswith(sig) or sig in head[:24] for sig in signatures):
+        raise forms.ValidationError(
+            f"That file is named .{extension} but its contents are not a {extension.upper()} file."
+        )
+    return uploaded
+
 
 class StyledFormMixin:
     def __init__(self, *args, **kwargs):
@@ -235,13 +275,12 @@ class ClinicalAttachmentForm(StyledFormMixin, forms.ModelForm):
         fields = ["file", "description"]
 
     def clean_file(self):
-        uploaded = self.cleaned_data["file"]
-        if uploaded.size > 10 * 1024 * 1024:
-            raise forms.ValidationError("File exceeds the 10 MB limit.")
-        allowed_types = {"application/pdf", "image/jpeg", "image/png"}
-        if uploaded.content_type not in allowed_types:
-            raise forms.ValidationError("Upload a PDF, JPG or PNG file.")
-        return uploaded
+        return validate_upload(
+            self.cleaned_data["file"],
+            allowed={"pdf", "jpg", "jpeg", "png"},
+            max_bytes=10 * 1024 * 1024,
+            description="Upload a PDF, JPG or PNG file.",
+        )
 
 
 class GoodsReceiptForm(StyledFormMixin, forms.Form):
@@ -275,13 +314,12 @@ class GoodsReceiptForm(StyledFormMixin, forms.Form):
         self.fields["delivered_on"].initial = timezone.localdate()
 
     def clean_invoice_photo(self):
-        uploaded = self.cleaned_data["invoice_photo"]
-        if uploaded.size > 10 * 1024 * 1024:
-            raise forms.ValidationError("File exceeds the 10 MB limit. Photograph the invoice at a lower resolution.")
-        allowed_types = {"image/jpeg", "image/png", "image/heic", "image/heif", "application/pdf"}
-        if uploaded.content_type not in allowed_types:
-            raise forms.ValidationError("Upload a photograph (JPG, PNG or HEIC) or a PDF scan.")
-        return uploaded
+        return validate_upload(
+            self.cleaned_data["invoice_photo"],
+            allowed={"jpg", "jpeg", "png", "heic", "heif", "pdf"},
+            max_bytes=10 * 1024 * 1024,
+            description="Upload a photograph (JPG, PNG or HEIC) or a PDF scan.",
+        )
 
     def clean_delivered_on(self):
         delivered = self.cleaned_data["delivered_on"]

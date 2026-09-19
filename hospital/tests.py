@@ -76,6 +76,14 @@ from .services import (
 )
 from .views import owner_brief_context
 
+# Real minimal files. Upload validation reads the leading bytes, so a fixture
+# that only claims to be a JPEG is now correctly refused — as it should be.
+JPEG_BYTES = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00\xff\xd9"
+PNG_BYTES = bytes.fromhex(
+    "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+    "1f15c4890000000a49444154789c6360000002000100ffff03000006000557bfabd40000000049454e44ae426082"
+)
+
 
 class HospitalFixtureMixin:
     """Shared demo fixture: one of each role, a priced product and a stocked batch."""
@@ -461,7 +469,7 @@ class StockControlTests(HospitalFixtureMixin, TestCase):
         self.supplier = Supplier.objects.create(name="Demo Medical Supplies")
 
     def photo(self, name="invoice.jpg"):
-        return SimpleUploadedFile(name, b"fake-jpeg-bytes", content_type="image/jpeg")
+        return SimpleUploadedFile(name, JPEG_BYTES, content_type="image/jpeg")
 
     def approved_order(self, quantity=Decimal("100"), unit_cost=Decimal("2.00")):
         order = PurchaseOrder.objects.create(supplier=self.supplier, requested_by=self.procurement)
@@ -676,7 +684,7 @@ class StockScreenTests(HospitalFixtureMixin, TestCase):
                 "invoice_amount": "200.00",
                 "invoice_date": timezone.localdate().isoformat(),
                 "delivered_on": timezone.localdate().isoformat(),
-                "invoice_photo": SimpleUploadedFile("invoice.jpg", b"fake-jpeg-bytes", content_type="image/jpeg"),
+                "invoice_photo": SimpleUploadedFile("invoice.jpg", JPEG_BYTES, content_type="image/jpeg"),
                 "lines-TOTAL_FORMS": "1",
                 "lines-INITIAL_FORMS": "0",
                 "lines-MIN_NUM_FORMS": "1",
@@ -973,7 +981,7 @@ class CustodyTests(HospitalFixtureMixin, TestCase):
             account_for_issue(actor=self.nurse, issue_id=issue.pk, outcomes={line.pk: {"consumed": Decimal("25")}})
 
     def test_cannot_issue_more_than_is_on_hand(self):
-        with self.assertRaisesMessage(ValidationError, "are on hand"):
+        with self.assertRaisesMessage(ValidationError, "are available"):
             self.issue(Decimal("500"))
 
     def test_cannot_issue_quarantined_stock(self):
@@ -1106,7 +1114,7 @@ class IntelligenceAndBriefTests(HospitalFixtureMixin, TestCase):
                 actor=self.procurement, purchase_order_id=order.pk,
                 supplier_invoice_reference=reference,
                 invoice_amount=(unit_cost * Decimal("10")), invoice_date=timezone.localdate(),
-                invoice_photo=SimpleUploadedFile("i.jpg", b"x", content_type="image/jpeg"),
+                invoice_photo=SimpleUploadedFile("i.jpg", JPEG_BYTES, content_type="image/jpeg"),
                 lines=[{"order_line": line, "quantity_received": Decimal("10"), "batch_number": batch,
                         "expiry_date": timezone.localdate() + timedelta(days=400), "actual_unit_cost": unit_cost}],
             )
@@ -1213,14 +1221,38 @@ class ContinuousIntegrationTests(SimpleTestCase):
     script = Path(settings.BASE_DIR) / "scripts" / "checks.sh"
 
     def workflow_commands(self):
+        """Every `run:` step, including the folded (`>-`) multi-line ones.
+
+        Reading only the first line treats the YAML fold marker itself as the
+        command, so a step written across several lines silently stops being
+        compared at all — the drift this test exists to catch would go
+        unnoticed precisely when a step grew complicated enough to matter.
+        """
         commands = []
-        for line in self.workflow.read_text().splitlines():
-            stripped = line.strip()
-            if stripped.startswith("- run:"):
-                command = stripped[len("- run:"):].strip()
-                if command.startswith("python -m pip install"):
-                    continue  # Dependency installation, not a check.
-                commands.append(command)
+        lines = self.workflow.read_text().splitlines()
+        index = 0
+        while index < len(lines):
+            stripped = lines[index].strip()
+            if not stripped.startswith("- run:"):
+                index += 1
+                continue
+            command = stripped[len("- run:"):].strip()
+            if command in {">-", ">", "|", "|-"}:
+                indent = len(lines[index]) - len(lines[index].lstrip())
+                parts = []
+                index += 1
+                while index < len(lines):
+                    nxt = lines[index]
+                    if nxt.strip() and (len(nxt) - len(nxt.lstrip())) <= indent:
+                        break
+                    parts.append(nxt.strip())
+                    index += 1
+                command = " ".join(part for part in parts if part)
+            else:
+                index += 1
+            if command.startswith("python -m pip install"):
+                continue  # Dependency installation, not a check.
+            commands.append(command)
         return commands
 
     def test_the_workflow_still_runs_the_checks_we_think_it_does(self):
@@ -1232,12 +1264,23 @@ class ContinuousIntegrationTests(SimpleTestCase):
         for command in self.workflow_commands():
             # Compare the distinguishing part; the script sets env vars its own way.
             core = command.split("python manage.py ")[-1] if "manage.py" in command else command
-            core = core.replace("ruff check", "ruff check")
             needle = core.split(" ")[0] if core else command
+            self.assertNotIn(
+                needle, {">-", ">", "|", "|-"},
+                f"Parsed a YAML fold marker instead of a command from {command!r}.",
+            )
             self.assertIn(
                 needle, script,
                 f"CI runs {command!r} but scripts/checks.sh has no matching step; the two have drifted.",
             )
+
+    def test_the_deployment_check_runs_against_a_production_configuration(self):
+        """Checked in demo mode it validates settings no hospital will ever use."""
+        for source in (self.workflow.read_text(), self.script.read_text()):
+            deploy = [line for line in source.splitlines() if "check --deploy" in line]
+            self.assertTrue(deploy, "No deployment check step found.")
+            self.assertIn("KFB_ENV=production", source)
+            self.assertIn("--fail-level WARNING", source)
 
     def test_the_check_script_is_executable(self):
         self.assertTrue(self.script.exists(), "scripts/checks.sh is missing.")
@@ -1574,7 +1617,7 @@ class OwnerVisibilityTests(HospitalFixtureMixin, TestCase):
                 actor=self.procurement, purchase_order_id=order.pk,
                 supplier_invoice_reference="OWN-1", invoice_amount=Decimal("20.00"),
                 invoice_date=timezone.localdate(),
-                invoice_photo=SimpleUploadedFile("i.jpg", b"x", content_type="image/jpeg"),
+                invoice_photo=SimpleUploadedFile("i.jpg", JPEG_BYTES, content_type="image/jpeg"),
                 lines=[{"order_line": line, "quantity_received": Decimal("10"), "batch_number": "OWN-B",
                         "expiry_date": timezone.localdate() + timedelta(days=300),
                         "actual_unit_cost": Decimal("2.00")}],
@@ -1583,3 +1626,310 @@ class OwnerVisibilityTests(HospitalFixtureMixin, TestCase):
         check_delivery(actor=self.owner, receipt_id=receipt.pk, discrepancy_notes="Counted.")
         receipt.refresh_from_db()
         self.assertEqual(receipt.checked_by, self.owner)
+
+
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
+class ProductionHardeningTests(HospitalFixtureMixin, TestCase):
+    """One test per defect found in the production audit.
+
+    Each of these reproduced a real failure before the fix: stock going
+    negative, a page 500-ing, a figure the owner acts on being silently absent,
+    or a production deployment quietly serving sessions in the clear.
+    """
+
+    # ---- stock can never go negative ---------------------------------------
+
+    def test_one_issue_cannot_claim_the_same_batch_twice(self):
+        """Two lines naming one batch each used to read the untouched balance."""
+        on_hand = self.batch.quantity_on_hand
+        with self.assertRaisesMessage(ValidationError, "already claimed by another line"):
+            issue_to_department(
+                actor=self.pharmacist,
+                department="Maternity ward",
+                received_by_name="Sister Faith",
+                lines=[
+                    {"batch": self.batch, "quantity": on_hand},
+                    {"batch": self.batch, "quantity": Decimal("1.000")},
+                ],
+            )
+        self.assertEqual(self.batch.quantity_on_hand, on_hand)
+        self.assertFalse(DepartmentIssue.objects.exists())
+
+    def test_two_lines_on_one_batch_are_allowed_while_the_total_fits(self):
+        on_hand = self.batch.quantity_on_hand
+        issue = issue_to_department(
+            actor=self.pharmacist,
+            department="Maternity ward",
+            received_by_name="Sister Faith",
+            lines=[
+                {"batch": self.batch, "quantity": Decimal("10.000")},
+                {"batch": self.batch, "quantity": Decimal("15.000")},
+            ],
+        )
+        self.assertEqual(issue.lines.count(), 2)
+        self.assertEqual(self.batch.quantity_on_hand, on_hand - Decimal("25.000"))
+
+    def test_write_off_is_rechecked_against_stock_at_approval(self):
+        """Stock keeps moving between proposing a write-off and approving it."""
+        write_off = request_write_off(
+            actor=self.pharmacist, batch_id=self.batch.pk,
+            quantity=self.batch.quantity_on_hand,
+            reason=StockWriteOff.Reason.DAMAGED, narrative="Shelf collapsed.",
+        )
+        issue_to_department(
+            actor=self.pharmacist, department="Theatre", received_by_name="Nurse B",
+            lines=[{"batch": self.batch, "quantity": self.batch.quantity_on_hand}],
+        )
+        with self.assertRaisesMessage(ValidationError, "The stock has moved since this was raised"):
+            review_write_off(actor=self.reviewer, write_off_id=write_off.pk, approve=True)
+        self.assertGreaterEqual(self.batch.quantity_on_hand, Decimal("0.000"))
+        write_off.refresh_from_db()
+        self.assertEqual(write_off.status, StockWriteOff.Status.PENDING)
+
+    # ---- FEFO means one thing on every database ----------------------------
+
+    def test_fefo_dispenses_the_dated_batch_before_the_undated_one(self):
+        """NULLs sort first on SQLite and last on PostgreSQL; FEFO must not.
+
+        Left to the database this picks a different batch off the shelf in the
+        demo than it does in production.
+        """
+        undated = StockBatch.objects.create(
+            item=self.product, batch_number="NO-EXPIRY", expiry_date=None,
+            purchase_cost_per_base_unit=Decimal("2.00"),
+        )
+        StockMovement.objects.create(
+            batch=undated, movement_type=StockMovement.MovementType.RECEIPT,
+            quantity_delta=Decimal("100.000"), to_location="Pharmacy",
+            reference_type="Test", reference_id="undated",
+            idempotency_key="fefo-undated", entered_by=self.pharmacist,
+        )
+        order = prepare_pharmacy_order(
+            actor=self.pharmacist, customer_name="Walk-in", patient=None,
+            items=[(self.product, Decimal("5.000"))],
+        )
+        record_payment(
+            actor=self.reception, invoice_id=order.invoice_id, amount=order.invoice.total,
+            method=Payment.Method.CASH, reference="", idempotency_key="fefo-pay",
+        )
+        dispense_order(actor=self.pharmacist, order_id=order.pk, idempotency_key="fefo-dispense")
+
+        dispensed = StockMovement.objects.filter(
+            movement_type=StockMovement.MovementType.DISPENSE, reference_id=str(order.pk)
+        )
+        self.assertEqual(
+            {m.batch_id for m in dispensed}, {self.batch.pk},
+            "FEFO must take the batch with the earliest expiry, not the one with none recorded.",
+        )
+
+    # ---- raising an exception is idempotent, and recurrence is visible -----
+
+    def test_raising_the_same_exception_twice_updates_one_record(self):
+        from .services import raise_exception
+        first = raise_exception("test_category", "The same thing happened", "first time")
+        second = raise_exception("test_category", "The same thing happened", "second time")
+        self.assertEqual(first.pk, second.pk)
+        second.refresh_from_db()
+        self.assertEqual(second.occurrence_count, 2)
+        self.assertEqual(ExceptionRecord.objects.filter(category="test_category").count(), 1)
+
+    def test_a_resolved_exception_reopens_when_the_problem_recurs(self):
+        from .services import raise_exception
+        record = raise_exception("test_category", "Recurring problem", "first")
+        record.status = ExceptionRecord.Status.RESOLVED
+        record.resolved_at = timezone.now()
+        record.save(update_fields=["status", "resolved_at"])
+        raise_exception("test_category", "Recurring problem", "it came back")
+        record.refresh_from_db()
+        self.assertEqual(record.status, ExceptionRecord.Status.OPEN)
+        self.assertIsNone(record.resolved_at)
+
+    def test_duplicate_legacy_summaries_no_longer_break_raising(self):
+        """Two rows sharing a summary used to make every later raise a 500."""
+        from .services import raise_exception
+        ExceptionRecord.objects.create(category="legacy", summary="Same summary", evidence="a")
+        ExceptionRecord.objects.create(category="legacy", summary="Same summary", evidence="b")
+        record = raise_exception("legacy", "Same summary", "raised again")
+        self.assertIsNotNone(record.pk)
+
+    # ---- opening a count is a bounded amount of work -----------------------
+
+    def test_opening_a_count_does_not_query_once_per_batch(self):
+        for index in range(30):
+            item = CatalogueItem.objects.create(
+                code=f"BULK-{index}", name=f"Bulk product {index}",
+                kind=CatalogueItem.Kind.PRODUCT, department="Pharmacy",
+                base_unit="tablet", sale_unit="tablet",
+                units_per_sale_unit=Decimal("1.000"), reorder_level=Decimal("5.000"),
+            )
+            StockBatch.objects.create(
+                item=item, batch_number=f"BULK-B{index}",
+                purchase_cost_per_base_unit=Decimal("1.00"),
+            )
+        with self.assertNumQueries(FunctionalQueryBudget(16)):
+            count = open_stock_count(actor=self.pharmacist, location="Pharmacy")
+        self.assertGreater(count.lines.count(), 0)
+
+    def test_a_count_sheet_skips_batches_that_are_empty_and_retired(self):
+        retired = StockBatch.objects.create(
+            item=self.product, batch_number="RETIRED",
+            status=StockBatch.Status.EXPIRED,
+            expiry_date=timezone.localdate() - timedelta(days=5),
+            purchase_cost_per_base_unit=Decimal("2.00"),
+        )
+        count = open_stock_count(actor=self.pharmacist, location="Pharmacy")
+        counted = set(count.lines.values_list("batch_id", flat=True))
+        self.assertIn(self.batch.pk, counted)
+        self.assertNotIn(retired.pk, counted, "An empty, expired batch is not on the shelf to be counted.")
+
+    # ---- the reorder list surfaces what it exists to surface ---------------
+
+    def test_a_product_never_stocked_still_appears_on_the_reorder_list(self):
+        """The item most urgently needing reorder was the one it could not show."""
+        never_stocked = CatalogueItem.objects.create(
+            code="NEVER-1", name="Never stocked product",
+            kind=CatalogueItem.Kind.PRODUCT, department="Pharmacy",
+            base_unit="vial", sale_unit="vial",
+            units_per_sale_unit=Decimal("1.000"), reorder_level=Decimal("50.000"),
+        )
+        position = stock_position()
+        self.assertIn(never_stocked.pk, {row["item"].pk for row in position["below_reorder"]})
+        self.assertIn(never_stocked.pk, {row["item"].pk for row in position["out_of_stock"]})
+
+    def test_a_product_with_no_reorder_level_is_not_reported_as_short(self):
+        CatalogueItem.objects.create(
+            code="UNMANAGED-1", name="Unmanaged product",
+            kind=CatalogueItem.Kind.PRODUCT, department="Pharmacy",
+            base_unit="unit", sale_unit="unit",
+            units_per_sale_unit=Decimal("1.000"), reorder_level=Decimal("0.000"),
+        )
+        position = stock_position()
+        codes = {row["item"].code for row in position["below_reorder"]}
+        self.assertNotIn("UNMANAGED-1", codes, "Short by nothing is not short.")
+
+    def test_stock_position_ignores_fully_depleted_batches(self):
+        depleted = StockBatch.objects.create(
+            item=self.product, batch_number="DEPLETED",
+            expiry_date=timezone.localdate() + timedelta(days=200),
+            purchase_cost_per_base_unit=Decimal("2.00"),
+        )
+        for index, delta in enumerate([Decimal("10.000"), Decimal("-10.000")]):
+            StockMovement.objects.create(
+                batch=depleted, movement_type=StockMovement.MovementType.RECEIPT,
+                quantity_delta=delta, reference_type="Test", reference_id=f"dep{index}",
+                idempotency_key=f"depleted-{index}", entered_by=self.pharmacist,
+            )
+        self.assertNotIn(depleted.pk, {row["batch"].pk for row in stock_position()["rows"]})
+
+    # ---- generated references survive a collision --------------------------
+
+    def test_a_colliding_reference_is_retried_rather_than_lost(self):
+        from unittest import mock
+        clash = Patient.objects.create(first_name="First", last_name="Patient", registered_by=self.reception)
+        real_uuid = __import__("uuid").uuid4
+
+        calls = {"n": 0}
+
+        def collide_once():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return mock.Mock(hex=clash.patient_number.rsplit("-", 1)[-1].lower() + "0" * 26)
+            return real_uuid()
+
+        with mock.patch("hospital.models.uuid.uuid4", side_effect=collide_once):
+            second = Patient.objects.create(first_name="Second", last_name="Patient", registered_by=self.reception)
+        self.assertNotEqual(second.patient_number, clash.patient_number)
+        self.assertTrue(second.patient_number)
+
+    # ---- money rules are enforced where they can be reported ---------------
+
+    def test_mpesa_without_a_reference_is_a_field_error_not_a_crash(self):
+        payment = Payment(
+            amount=Decimal("100.00"), method=Payment.Method.MPESA, reference="",
+            received_by=self.reception, idempotency_key="mpesa-no-ref",
+        )
+        with self.assertRaises(ValidationError) as caught:
+            payment.full_clean(exclude=["receipt_number"])
+        self.assertIn("reference", caught.exception.message_dict)
+
+    def test_the_database_refuses_a_referenceless_mpesa_payment(self):
+        from django.db import IntegrityError, transaction
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Payment.objects.create(
+                amount=Decimal("100.00"), method=Payment.Method.MPESA, reference="",
+                received_by=self.reception, idempotency_key="mpesa-no-ref-db",
+            )
+
+    # ---- uploads are what they claim to be ---------------------------------
+
+    def test_a_file_named_jpg_that_is_not_a_jpeg_is_refused(self):
+        from .forms import GoodsReceiptForm
+        form = GoodsReceiptForm(
+            {"supplier_invoice_reference": "INV-1", "invoice_amount": "10.00",
+             "delivered_on": timezone.localdate().isoformat()},
+            {"invoice_photo": SimpleUploadedFile("payload.jpg", b"<svg onload=alert(1)>", content_type="image/jpeg")},
+        )
+        self.assertFalse(form.is_valid())
+        self.assertIn("invoice_photo", form.errors)
+
+    def test_a_real_jpeg_is_accepted(self):
+        from .forms import GoodsReceiptForm
+        form = GoodsReceiptForm(
+            {"supplier_invoice_reference": "INV-1", "invoice_amount": "10.00",
+             "delivered_on": timezone.localdate().isoformat()},
+            {"invoice_photo": SimpleUploadedFile("scan.jpg", JPEG_BYTES, content_type="image/jpeg")},
+        )
+        self.assertTrue(form.is_valid(), form.errors)
+
+
+class FunctionalQueryBudget(int):
+    """An upper bound for assertNumQueries: fail only if the budget is exceeded.
+
+    Pinning an exact query count makes every unrelated optimisation a test
+    failure. What matters here is that the number does not scale with the
+    number of batches.
+    """
+
+    def __eq__(self, actual):
+        return actual <= int(self)
+
+    def __ne__(self, actual):
+        return not self.__eq__(actual)
+
+    def __hash__(self):
+        return int.__hash__(self)
+
+    def __str__(self):
+        return f"at most {int(self)}"
+
+
+class StaticAssetDeliveryTests(SimpleTestCase):
+    """The production deployment must be able to serve its own stylesheet.
+
+    Django serves no static files once DEBUG is off, and the supplied Caddy
+    configuration reverse-proxies every path to the application. Before
+    WhiteNoise was added, a production deployment answered 404 for its CSS,
+    its JavaScript and its icon: a hospital system rendered as unstyled HTML.
+    """
+
+    def test_whitenoise_is_in_the_middleware_chain(self):
+        self.assertTrue(
+            any("whitenoise" in entry.lower() for entry in settings.MIDDLEWARE),
+            "Nothing in the middleware chain can serve static files with DEBUG off.",
+        )
+
+    def test_whitenoise_runs_before_the_session_and_auth_middleware(self):
+        chain = [entry.lower() for entry in settings.MIDDLEWARE]
+        white = next(i for i, entry in enumerate(chain) if "whitenoise" in entry)
+        session = next(i for i, entry in enumerate(chain) if "sessionmiddleware" in entry)
+        self.assertLess(white, session, "Static files should not cost a session lookup.")
+
+    def test_favicon_at_the_site_root_is_routed(self):
+        """Browsers request /favicon.ico whatever the link tag says."""
+        response = self.client.get("/favicon.ico")
+        self.assertIn(response.status_code, {301, 302})
+        self.assertIn("favicon", response["Location"])
+
+    def test_a_data_page_is_never_cached(self):
+        response = self.client.get("/health/")
+        self.assertIn("no-store", response.headers.get("Cache-Control", ""))

@@ -1502,7 +1502,7 @@ class ThrottledLoginView(LoginView):
 
     def post(self, request, *args, **kwargs):
         username = (request.POST.get("username") or "").strip()
-        if LoginAttempt.is_locked(username):
+        if LoginAttempt.is_locked(username, request.META.get("REMOTE_ADDR")):
             context = self.get_context_data(form=self.get_form())
             context["lockout_minutes"] = LoginAttempt.LOCKOUT_WINDOW_MINUTES
             return self.render_to_response(context, status=429)
