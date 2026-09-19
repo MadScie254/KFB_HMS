@@ -1,5 +1,6 @@
 from datetime import timedelta
 from decimal import Decimal
+from tempfile import TemporaryDirectory
 
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
@@ -11,6 +12,7 @@ from django.utils import timezone
 from .models import (
     CashShift,
     CatalogueItem,
+    ClinicalAttachment,
     ClinicalNote,
     CreditNote,
     Encounter,
@@ -22,8 +24,10 @@ from .models import (
     Payment,
     PaymentAllocation,
     PharmacyOrder,
+    PrescriptionItem,
     PriceVersion,
     PurchaseOrder,
+    PurchaseOrderLine,
     Role,
     ServiceOrder,
     StockBatch,
@@ -373,3 +377,252 @@ class RegressionTests(HospitalFixtureMixin, TestCase):
         large = self._count_queries(reverse("stock"))
         self.assertEqual(small, large, "Stock ledger query count must not scale with batches")
         self.assertLess(large, 15)
+
+
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
+class EnhancedWorkflowTests(HospitalFixtureMixin, TestCase):
+    def test_role_scoped_pages_render_without_template_errors(self):
+        encounter = Encounter.objects.create(patient=self.patient, started_by=self.reception)
+        order = self.prepare(1)
+        payment = record_payment(
+            actor=self.reception, invoice_id=order.invoice_id, amount=5,
+            method="cash", reference="", idempotency_key="smoke-payment",
+        )
+        service = CatalogueItem.objects.create(
+            code="SMOKE-LAB", name="Smoke lab", kind=CatalogueItem.Kind.SERVICE,
+            department="Laboratory", base_unit="service", sale_unit="service",
+            units_per_sale_unit=1,
+        )
+        service_order = ServiceOrder.objects.create(
+            encounter=encounter, service=service, requested_by=self.clinician,
+        )
+
+        role_pages = [
+            (self.owner, [
+                reverse("dashboard"), reverse("reports"), reverse("exceptions"),
+                reverse("audit_review"), reverse("settings"), reverse("csv_import"),
+                reverse("patients"), reverse("patient_detail", kwargs={"pk": self.patient.pk}),
+                reverse("purchasing"), reverse("downtime_forms"),
+            ]),
+            (self.reception, [
+                reverse("patient_create"), reverse("encounter_create", kwargs={"patient_id": self.patient.pk}),
+                reverse("pharmacy_orders"), reverse("shift_manage"),
+                reverse("invoice_payment", kwargs={"pk": order.invoice_id}),
+                reverse("receipt", kwargs={"pk": payment.pk}),
+            ]),
+            (self.pharmacist, [
+                reverse("pharmacy_orders"), reverse("pharmacy_order_create"),
+                reverse("pharmacy_order_detail", kwargs={"pk": order.pk}), reverse("stock"),
+            ]),
+            (self.clinician, [
+                reverse("queue"), reverse("clinical_note", kwargs={"encounter_id": encounter.pk}),
+                reverse("prescription_create", kwargs={"encounter_id": encounter.pk}),
+                reverse("service_order_create", kwargs={"encounter_id": encounter.pk}),
+                reverse("service_order_update", kwargs={"pk": service_order.pk}),
+                reverse("departments"), reverse("wards"),
+                reverse("admission_create", kwargs={"encounter_id": encounter.pk}),
+            ]),
+            (self.procurement, [reverse("purchasing"), reverse("purchase_order_create"), reverse("csv_import")]),
+        ]
+        eye_staff = self.make_user("eye-smoke", Role.EYE)
+        role_pages.append((eye_staff, [reverse("eye_clinic")]))
+
+        for user, urls in role_pages:
+            self.client.force_login(user)
+            for url in urls:
+                with self.subTest(user=user.username, url=url):
+                    response = self.client.get(url)
+                    self.assertEqual(response.status_code, 200)
+
+        self.client.logout()
+        self.assertEqual(self.client.get(reverse("health")).status_code, 200)
+
+    def test_owner_report_download_is_a_named_pdf(self):
+        self.client.login(username=self.owner.username, password=self.password)
+        response = self.client.get(reverse("report_download_pdf"), {"days": "30"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/pdf")
+        self.assertIn("KFBH-owner-report-30-days.pdf", response["Content-Disposition"])
+        self.assertTrue(response.content.startswith(b"%PDF"))
+        self.assertGreater(len(response.content), 3000)
+
+    def test_patient_access_record_is_a_watermarked_pdf_flow(self):
+        self.client.login(username=self.owner.username, password=self.password)
+        response = self.client.get(reverse("patient_access_pdf", kwargs={"pk": self.patient.pk}))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/pdf")
+        self.assertIn(self.patient.patient_number, response["Content-Disposition"])
+        self.assertTrue(response.content.startswith(b"%PDF"))
+
+    def test_reviewer_can_verify_mpesa_from_reports(self):
+        order = self.prepare(1)
+        payment = record_payment(
+            actor=self.reception, invoice_id=order.invoice_id, amount=5,
+            method="mpesa", reference="VERIFY-001", idempotency_key="verify-ui",
+        )
+        self.client.login(username=self.reviewer.username, password=self.password)
+        response = self.client.post(reverse("payment_verify", kwargs={"pk": payment.pk}))
+        self.assertRedirects(response, reverse("reports"))
+        payment.refresh_from_db()
+        order.refresh_from_db()
+        self.assertEqual(payment.verification_status, Payment.Verification.MANUAL)
+        self.assertEqual(order.status, PharmacyOrder.Status.CLEARED)
+
+    def test_credit_note_request_and_review_have_complete_ui_flow(self):
+        order = self.prepare(2)
+        self.client.login(username=self.reception.username, password=self.password)
+        response = self.client.post(
+            reverse("credit_note_create", kwargs={"pk": order.invoice_id}),
+            {"amount": "5.00", "reason": "Duplicate charge correction"},
+        )
+        self.assertEqual(response.status_code, 302)
+        note = CreditNote.objects.get(invoice=order.invoice)
+        self.client.logout()
+        self.client.login(username=self.reviewer.username, password=self.password)
+        self.client.post(
+            reverse("credit_note_review", kwargs={"pk": note.pk}),
+            {"decision": "approve"},
+        )
+        note.refresh_from_db()
+        self.assertEqual(note.status, CreditNote.Status.APPROVED)
+
+    def test_requester_cannot_release_own_result(self):
+        encounter = Encounter.objects.create(patient=self.patient, started_by=self.reception)
+        service = CatalogueItem.objects.create(
+            code="XRAY-T", name="X-ray test", kind="service", department="Imaging",
+            base_unit="service", sale_unit="service", units_per_sale_unit=1,
+        )
+        order = ServiceOrder.objects.create(
+            encounter=encounter, service=service, requested_by=self.clinician,
+        )
+        self.client.login(username=self.clinician.username, password=self.password)
+        response = self.client.post(
+            reverse("service_order_update", kwargs={"pk": order.pk}),
+            {"status": "released", "result": "Demonstration result"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "cannot release their own result")
+        order.refresh_from_db()
+        self.assertEqual(order.status, ServiceOrder.Status.REQUESTED)
+
+    def test_multi_item_prescription_creates_one_signed_order(self):
+        second = CatalogueItem.objects.create(
+            code="TEST-CAP", name="Test capsule", kind=CatalogueItem.Kind.PRODUCT,
+            department="Pharmacy", base_unit="capsule", sale_unit="box",
+            units_per_sale_unit=10, reorder_level=2,
+        )
+        encounter = Encounter.objects.create(patient=self.patient, started_by=self.reception)
+        self.client.login(username=self.clinician.username, password=self.password)
+        payload = {
+            "items-TOTAL_FORMS": "2", "items-INITIAL_FORMS": "0",
+            "items-MIN_NUM_FORMS": "1", "items-MAX_NUM_FORMS": "1000",
+        }
+        for index, product in enumerate((self.product, second)):
+            payload.update({
+                f"items-{index}-product": str(product.pk),
+                f"items-{index}-strength": "As labelled",
+                f"items-{index}-dose": "One",
+                f"items-{index}-route": "Oral",
+                f"items-{index}-frequency": "Daily",
+                f"items-{index}-duration": "Five days",
+                f"items-{index}-quantity_base_units": "5",
+                f"items-{index}-instructions": "Demonstration only",
+            })
+        response = self.client.post(reverse("prescription_create", kwargs={"encounter_id": encounter.pk}), payload)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(PrescriptionItem.objects.filter(prescription__encounter=encounter).count(), 2)
+
+    def test_multi_line_purchase_request(self):
+        supplier = Supplier.objects.create(name="Workflow Supplier")
+        self.client.login(username=self.procurement.username, password=self.password)
+        payload = {
+            "supplier": supplier.pk, "reference": "QUOTE-1", "notes": "Monthly order",
+            "lines-TOTAL_FORMS": "2", "lines-INITIAL_FORMS": "0",
+            "lines-MIN_NUM_FORMS": "1", "lines-MAX_NUM_FORMS": "1000",
+            "lines-0-product": self.product.pk, "lines-0-quantity_base_units": "20",
+            "lines-0-quoted_unit_cost": "2.50",
+            "lines-1-product": self.product.pk, "lines-1-quantity_base_units": "30",
+            "lines-1-quoted_unit_cost": "2.25",
+        }
+        response = self.client.post(reverse("purchase_order_create"), payload)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(PurchaseOrderLine.objects.filter(order__reference="QUOTE-1").count(), 2)
+
+    def test_attachment_download_requires_clinical_role(self):
+        with TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=media_root):
+            self.client.login(username=self.clinician.username, password=self.password)
+            upload = SimpleUploadedFile("consent.pdf", b"%PDF-1.4 demonstration", content_type="application/pdf")
+            response = self.client.post(
+                reverse("patient_attachment_upload", kwargs={"pk": self.patient.pk}),
+                {"file": upload, "description": "Signed consent"},
+            )
+            self.assertEqual(response.status_code, 302)
+            attachment = ClinicalAttachment.objects.get(patient=self.patient)
+            download = self.client.get(reverse("patient_attachment_download", kwargs={"pk": attachment.pk}))
+            self.assertEqual(download.status_code, 200)
+            download.close()
+            self.client.logout()
+            self.client.login(username=self.reception.username, password=self.password)
+            self.assertEqual(
+                self.client.get(reverse("patient_attachment_download", kwargs={"pk": attachment.pk})).status_code,
+                403,
+            )
+
+    def test_patient_csv_import_commits_external_reference_once(self):
+        self.client.login(username=self.owner.username, password=self.password)
+        csv_bytes = (
+            b"external_reference,first_name,last_name,date_of_birth,estimated_age_years,sex,phone,guardian_name,guardian_phone\n"
+            b"LEGACY-44,Mary,Wafula,1995-03-02,,F,0700000011,,\n"
+        )
+        response = self.client.post(reverse("csv_import"), {
+            "import_kind": "patients",
+            "csv_file": SimpleUploadedFile("patients.csv", csv_bytes, content_type="text/csv"),
+        })
+        self.assertEqual(response.status_code, 200)
+        job = ImportJob.objects.get(filename="patients.csv")
+        self.assertEqual(job.error_count, 0)
+        self.client.post(reverse("csv_import"), {"commit_job": job.pk})
+        self.client.post(reverse("csv_import"), {"commit_job": job.pk})
+        self.assertEqual(Patient.objects.filter(external_reference="LEGACY-44").count(), 1)
+
+    def test_opening_stock_import_creates_witnessed_ledger_entry(self):
+        self.client.login(username=self.owner.username, password=self.password)
+        csv_bytes = (
+            b"product_code,batch_number,expiry_date,purchase_cost_per_base_unit,physical_count_base_units,witness_name,count_reference\n"
+            b"TEST-TAB,IMPORT-BATCH-01,2027-12-31,2.25,75,Independent Witness,COUNT-IMPORT-01\n"
+        )
+        response = self.client.post(reverse("csv_import"), {
+            "import_kind": "opening_stock",
+            "csv_file": SimpleUploadedFile("opening-stock.csv", csv_bytes, content_type="text/csv"),
+        })
+        self.assertEqual(response.status_code, 200)
+        job = ImportJob.objects.get(filename="opening-stock.csv")
+        self.assertEqual(job.error_count, 0)
+        self.client.post(reverse("csv_import"), {"commit_job": job.pk})
+        batch = StockBatch.objects.get(item=self.product, batch_number="IMPORT-BATCH-01")
+        self.assertEqual(batch.quantity_on_hand, Decimal("75"))
+        movement = batch.movements.get()
+        self.assertEqual(movement.reference_id, "COUNT-IMPORT-01")
+        self.assertIn("Independent Witness", movement.reason)
+
+    def test_opening_receivable_import_posts_reviewed_patient_balance(self):
+        self.patient.external_reference = "LEGACY-PATIENT-1"
+        self.patient.save(update_fields=["external_reference"])
+        self.client.login(username=self.owner.username, password=self.password)
+        csv_bytes = (
+            b"external_patient_reference,external_invoice_reference,original_invoice_date,description,department,outstanding_amount,review_reference\n"
+            b"LEGACY-PATIENT-1,LEGACY-INV-1,2026-01-15,Opening clinic balance,Outpatient,1250.00,OWNER-REVIEW-1\n"
+        )
+        response = self.client.post(reverse("csv_import"), {
+            "import_kind": "opening_receivables",
+            "csv_file": SimpleUploadedFile("receivables.csv", csv_bytes, content_type="text/csv"),
+        })
+        self.assertEqual(response.status_code, 200)
+        job = ImportJob.objects.get(filename="receivables.csv")
+        self.assertEqual(job.error_count, 0)
+        self.client.post(reverse("csv_import"), {"commit_job": job.pk})
+        invoice = Invoice.objects.get(external_reference="LEGACY-INV-1")
+        self.assertEqual(invoice.patient, self.patient)
+        self.assertEqual(invoice.original_invoice_date.isoformat(), "2026-01-15")
+        self.assertEqual(invoice.balance, Decimal("1250.00"))
+        self.assertIn("OWNER-REVIEW-1", invoice.lines.get().description)
