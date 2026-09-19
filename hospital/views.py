@@ -233,7 +233,7 @@ def patient_list(request):
     return render(request, "hospital/patient_list.html", {"patients": page, "page": page, "query": query})
 
 
-@role_required(Role.RECEPTION)
+@role_required(Role.OWNER, Role.RECEPTION)
 def patient_create(request):
     form = PatientForm(request.POST or None)
     duplicate_candidates = []
@@ -275,7 +275,7 @@ def patient_detail(request, pk):
     })
 
 
-@role_required(Role.CLINICIAN, Role.NURSE)
+@role_required(Role.OWNER, Role.CLINICIAN, Role.NURSE)
 def patient_attachment_upload(request, pk):
     if request.method != "POST":
         raise Http404
@@ -343,7 +343,7 @@ def credit_note_create(request, pk):
     return render(request, "hospital/credit_note_form.html", {"form": form, "invoice": invoice})
 
 
-@role_required(Role.RECEPTION, Role.CLINICIAN)
+@role_required(Role.OWNER, Role.RECEPTION, Role.CLINICIAN)
 def encounter_create(request, patient_id):
     patient = get_object_or_404(Patient, pk=patient_id)
     form = EncounterForm(request.POST or None)
@@ -372,7 +372,7 @@ TRIAGE_RANK = Case(
 )
 
 
-@role_required(Role.RECEPTION, Role.CLINICIAN, Role.NURSE, Role.LAB)
+@role_required(Role.OWNER, Role.RECEPTION, Role.CLINICIAN, Role.NURSE, Role.LAB)
 def queue(request):
     encounters = (
         Encounter.objects.exclude(status=Encounter.Status.CLOSED)
@@ -383,7 +383,7 @@ def queue(request):
     return render(request, "hospital/queue.html", {"encounters": encounters})
 
 
-@role_required(Role.CLINICIAN)
+@role_required(Role.OWNER, Role.CLINICIAN)
 def clinical_note(request, encounter_id):
     encounter = get_object_or_404(Encounter.objects.select_related("patient"), pk=encounter_id)
     draft = ClinicalNote.objects.filter(encounter=encounter, author=request.user, status=ClinicalNote.Status.DRAFT).first()
@@ -428,7 +428,7 @@ def clinical_note(request, encounter_id):
     return render(request, "hospital/clinical_note_form.html", {"form": form, "encounter": encounter, "draft": draft})
 
 
-@role_required(Role.CLINICIAN)
+@role_required(Role.OWNER, Role.CLINICIAN)
 def prescription_create(request, encounter_id):
     encounter = get_object_or_404(Encounter.objects.select_related("patient"), pk=encounter_id)
     # Accept the original single-line payload as well as the new formset so
@@ -458,7 +458,7 @@ def prescription_create(request, encounter_id):
     return render(request, "hospital/prescription_form.html", {"form": form, "formset": formset, "encounter": encounter})
 
 
-@role_required(Role.CLINICIAN)
+@role_required(Role.OWNER, Role.CLINICIAN)
 def service_order_create(request, encounter_id):
     encounter = get_object_or_404(Encounter.objects.select_related("patient"), pk=encounter_id)
     form = ServiceOrderForm(request.POST or None)
@@ -475,14 +475,14 @@ def service_order_create(request, encounter_id):
     return render(request, "hospital/service_order_form.html", {"form": form, "encounter": encounter})
 
 
-@role_required(Role.PHARMACY, Role.RECEPTION)
+@role_required(Role.OWNER, Role.PHARMACY, Role.RECEPTION)
 def pharmacy_orders(request):
     orders = PharmacyOrder.objects.select_related("patient", "invoice", "prepared_by").order_by("-created_at")[:100]
     pending_prescriptions = Prescription.objects.filter(status="active", pharmacyorder__isnull=True).select_related("encounter__patient", "prescriber").prefetch_related("items__product") if user_role(request.user) == Role.PHARMACY else []
     return render(request, "hospital/pharmacy_orders.html", {"orders": orders, "pending_prescriptions": pending_prescriptions})
 
 
-@role_required(Role.PHARMACY)
+@role_required(Role.OWNER, Role.PHARMACY)
 def pharmacy_prepare_prescription(request, prescription_id):
     if request.method != "POST":
         raise Http404
@@ -510,7 +510,7 @@ def pharmacy_prepare_prescription(request, prescription_id):
         return redirect("pharmacy_orders")
 
 
-@role_required(Role.PHARMACY)
+@role_required(Role.OWNER, Role.PHARMACY)
 def pharmacy_order_create(request):
     form = PharmacyBasketForm(request.POST or None)
     if request.method == "POST" and form.is_valid():
@@ -535,13 +535,13 @@ def pharmacy_order_create(request):
     return render(request, "hospital/pharmacy_order_form.html", {"form": form})
 
 
-@role_required(Role.PHARMACY, Role.RECEPTION)
+@role_required(Role.OWNER, Role.PHARMACY, Role.RECEPTION)
 def pharmacy_order_detail(request, pk):
     order = get_object_or_404(PharmacyOrder.objects.select_related("patient", "invoice", "prepared_by", "dispensed_by"), pk=pk)
     return render(request, "hospital/pharmacy_order_detail.html", {"order": order})
 
 
-@role_required(Role.RECEPTION)
+@role_required(Role.OWNER, Role.RECEPTION)
 def invoice_payment(request, pk):
     invoice = get_object_or_404(Invoice, pk=pk)
     form = PaymentForm(request.POST or None, initial={"amount": invoice.balance})
@@ -571,7 +571,7 @@ def receipt(request, pk):
     return render(request, "hospital/receipt.html", {"payment": payment, "duplicate": request.GET.get("reprint") == "1"})
 
 
-@role_required(Role.PHARMACY)
+@role_required(Role.OWNER, Role.PHARMACY)
 def pharmacy_dispense(request, pk):
     if request.method != "POST":
         raise Http404
@@ -583,7 +583,7 @@ def pharmacy_dispense(request, pk):
     return redirect("pharmacy_order_detail", pk=pk)
 
 
-@role_required(Role.RECEPTION)
+@role_required(Role.OWNER, Role.RECEPTION)
 def shift_manage(request):
     shift = CashShift.objects.filter(cashier=request.user, status=CashShift.Status.OPEN).first()
     form = ShiftCloseForm(request.POST or None, instance=shift) if shift else ShiftOpenForm(request.POST or None)
@@ -698,7 +698,7 @@ def deliveries(request):
     })
 
 
-@role_required(Role.PROCUREMENT, Role.PHARMACY)
+@role_required(Role.OWNER, Role.PROCUREMENT, Role.PHARMACY)
 def goods_receipt_create(request, pk):
     """Record what physically arrived and photograph the invoice that came with it."""
     order = get_object_or_404(
@@ -837,7 +837,7 @@ def stock_counts(request):
     })
 
 
-@role_required(Role.PHARMACY, Role.PROCUREMENT)
+@role_required(Role.OWNER, Role.PHARMACY, Role.PROCUREMENT)
 def stock_count_open(request):
     if request.method != "POST":
         raise Http404
@@ -1053,13 +1053,13 @@ def audit_review(request):
     })
 
 
-@role_required(Role.CLINICIAN, Role.NURSE, Role.LAB)
+@role_required(Role.OWNER, Role.CLINICIAN, Role.NURSE, Role.LAB)
 def departments(request):
     work = ServiceOrder.objects.select_related("encounter__patient", "service", "requested_by").order_by("status", "created_at")
     return render(request, "hospital/departments.html", {"work": work})
 
 
-@role_required(Role.LAB, Role.CLINICIAN)
+@role_required(Role.OWNER, Role.LAB, Role.CLINICIAN)
 def service_order_update(request, pk):
     order = get_object_or_404(ServiceOrder.objects.select_related("encounter__patient", "service"), pk=pk)
     form = ServiceResultForm(request.POST or None, instance=order)
@@ -1084,7 +1084,7 @@ def wards(request):
     return render(request, "hospital/wards.html", {"wards": wards_qs, "admissions": Admission.objects.filter(discharged_at__isnull=True).select_related("patient", "bed__ward")})
 
 
-@role_required(Role.CLINICIAN)
+@role_required(Role.OWNER, Role.CLINICIAN)
 def admission_create(request, encounter_id):
     encounter = get_object_or_404(Encounter.objects.select_related("patient"), pk=encounter_id)
     form = AdmissionForm(request.POST or None)
@@ -1108,7 +1108,7 @@ def eye_clinic(request):
     return render(request, "hospital/eye.html", {"waiting": waiting, "sessions": sessions, "payables": payables})
 
 
-@role_required(Role.EYE, Role.CLINICIAN)
+@role_required(Role.OWNER, Role.EYE, Role.CLINICIAN)
 def eye_case_complete(request, pk):
     if request.method != "POST":
         raise Http404
@@ -1141,7 +1141,7 @@ def purchasing(request):
     return render(request, "hospital/purchasing.html", {"orders": orders})
 
 
-@role_required(Role.PROCUREMENT)
+@role_required(Role.OWNER, Role.PROCUREMENT)
 def purchase_order_create(request):
     form = PurchaseOrderForm(request.POST or None)
     lines = PurchaseOrderLineFormSet(request.POST or None, prefix="lines")
@@ -1526,7 +1526,7 @@ def custody(request):
     })
 
 
-@role_required(Role.PHARMACY)
+@role_required(Role.OWNER, Role.PHARMACY)
 def custody_issue(request):
     form = DepartmentIssueForm(request.POST or None)
     lines = DepartmentIssueLineFormSet(request.POST or None, prefix="lines")
@@ -1565,7 +1565,7 @@ def custody_issue(request):
     return render(request, "hospital/custody_issue_form.html", {"form": form, "formset": lines})
 
 
-@role_required(Role.NURSE, Role.CLINICIAN, Role.PHARMACY)
+@role_required(Role.OWNER, Role.NURSE, Role.CLINICIAN, Role.PHARMACY)
 def custody_account(request, pk):
     issue = get_object_or_404(
         DepartmentIssue.objects.select_related("patient").prefetch_related("lines__batch__item"), pk=pk
@@ -1620,7 +1620,7 @@ def write_offs(request):
     })
 
 
-@role_required(Role.PHARMACY, Role.PROCUREMENT)
+@role_required(Role.OWNER, Role.PHARMACY, Role.PROCUREMENT)
 def write_off_request(request):
     if request.method != "POST":
         raise Http404

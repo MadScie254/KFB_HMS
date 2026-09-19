@@ -1,4 +1,5 @@
 import os
+import re
 import shutil
 import tempfile
 from datetime import timedelta
@@ -54,7 +55,7 @@ from .models import (
     StockWriteOff,
     Supplier,
 )
-from .permissions import user_role
+from .permissions import ROLE_NAVIGATION, user_role
 from .services import (
     account_for_issue,
     approve_credit_note,
@@ -1489,3 +1490,96 @@ class EnhancedWorkflowTests(HospitalFixtureMixin, TestCase):
         self.assertEqual(invoice.original_invoice_date.isoformat(), "2026-01-15")
         self.assertEqual(invoice.balance, Decimal("1250.00"))
         self.assertIn("OWNER-REVIEW-1", invoice.lines.get().description)
+
+
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
+class OwnerVisibilityTests(HospitalFixtureMixin, TestCase):
+    """The owner can open every screen, which is not the same as doing everything.
+
+    Page access was widened to the owner on request. The segregation of duties
+    that actually protects the ledger lives in the service layer, where a person
+    still cannot perform another role's action or approve their own request, and
+    those rules are deliberately untouched by the wider navigation.
+    """
+
+    views_source = Path(settings.BASE_DIR) / "hospital" / "views.py"
+
+    def role_protected_views(self):
+        source = self.views_source.read_text()
+        pattern = re.compile(r"@role_required\(([^)]*)\)\s*\ndef (\w+)\(", re.S)
+        return {fn: roles for roles, fn in pattern.findall(source)}
+
+    def test_no_role_protected_view_excludes_the_owner(self):
+        missing = [fn for fn, roles in self.role_protected_views().items() if "Role.OWNER" not in roles]
+        self.assertEqual(missing, [], f"These views would shut the owner out: {missing}")
+
+    def test_owner_navigation_covers_every_section_other_roles_have(self):
+        owner = set(ROLE_NAVIGATION[Role.OWNER])
+        for role, entries in ROLE_NAVIGATION.items():
+            self.assertTrue(
+                set(entries) <= owner,
+                f"{role} can navigate to {set(entries) - owner}, which the owner cannot reach.",
+            )
+
+    def test_owner_can_open_every_page_that_needs_no_record(self):
+        self.client.login(username=self.owner.username, password=self.password)
+        simple = [
+            "dashboard", "owner_brief", "stock_intelligence", "patients", "queue",
+            "pharmacy_orders", "wards", "departments", "eye_clinic", "reports",
+            "stock", "deliveries", "stock_counts", "custody", "write_offs",
+            "purchasing", "exceptions", "audit_review", "shift_manage", "settings",
+            "csv_import", "downtime_forms", "health",
+        ]
+        for name in simple:
+            with self.subTest(view=name):
+                self.assertEqual(self.client.get(reverse(name)).status_code, 200)
+
+    def test_owner_still_cannot_perform_another_role_s_action(self):
+        # Seeing the pharmacy's screen is not being the pharmacy.
+        with self.assertRaisesMessage(ValidationError, "Only pharmacy staff"):
+            issue_to_department(
+                actor=self.owner, department="Theatre", received_by_name="Someone",
+                lines=[{"batch": self.batch, "quantity": Decimal("1")}],
+            )
+        with self.assertRaisesMessage(ValidationError, "Only pharmacy or procurement staff"):
+            request_write_off(
+                actor=self.owner, batch_id=self.batch.pk, quantity=Decimal("1"),
+                reason=StockWriteOff.Reason.DAMAGED, narrative="Because I can see the page.",
+            )
+        with self.assertRaisesMessage(ValidationError, "Only reception/cashier"):
+            record_payment(
+                actor=self.owner, invoice_id=self.prepare(1).invoice_id, amount=5,
+                method=Payment.Method.CASH, reference="", idempotency_key="owner-pay",
+            )
+
+    def test_owner_still_cannot_approve_their_own_request(self):
+        supplier = Supplier.objects.create(name="Owner Supplies")
+        order = PurchaseOrder.objects.create(supplier=supplier, requested_by=self.owner)
+        with self.assertRaisesMessage(ValidationError, "cannot approve their own"):
+            approve_purchase_order(actor=self.owner, order_id=order.pk)
+
+    def test_owner_still_cannot_check_a_delivery_they_received(self):
+        # The receiver check is on the person, not the role, so it holds for the
+        # owner exactly as it does for anyone else.
+        media_root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, media_root, ignore_errors=True)
+        supplier = Supplier.objects.create(name="Owner Delivery Supplies")
+        order = PurchaseOrder.objects.create(supplier=supplier, requested_by=self.procurement)
+        line = PurchaseOrderLine.objects.create(
+            order=order, item=self.product, quantity_base_units=Decimal("10"), quoted_unit_cost=Decimal("2.00")
+        )
+        approve_purchase_order(actor=self.reviewer, order_id=order.pk)
+        with override_settings(MEDIA_ROOT=media_root):
+            receipt = receive_delivery(
+                actor=self.procurement, purchase_order_id=order.pk,
+                supplier_invoice_reference="OWN-1", invoice_amount=Decimal("20.00"),
+                invoice_date=timezone.localdate(),
+                invoice_photo=SimpleUploadedFile("i.jpg", b"x", content_type="image/jpeg"),
+                lines=[{"order_line": line, "quantity_received": Decimal("10"), "batch_number": "OWN-B",
+                        "expiry_date": timezone.localdate() + timedelta(days=300),
+                        "actual_unit_cost": Decimal("2.00")}],
+            )
+        # The owner did not receive it, so they may check it.
+        check_delivery(actor=self.owner, receipt_id=receipt.pk, discrepancy_notes="Counted.")
+        receipt.refresh_from_db()
+        self.assertEqual(receipt.checked_by, self.owner)

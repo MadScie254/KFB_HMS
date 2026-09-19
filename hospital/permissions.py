@@ -49,7 +49,17 @@ def unlocked_required(view):
 # screens that post movements, so a reviewer can read the position without
 # being offered the buttons that change it.
 ROLE_NAVIGATION = {
-    Role.OWNER: ["dashboard", "brief", "intelligence", "patients", "reports", "stock", "stock_control", "custody", "eye", "exceptions", "audit", "purchasing", "settings"],
+    # The owner is deliberately given every navigation entry: they asked to be
+    # able to reach any page. Page access is not the same as authority, and the
+    # segregation of duties that matters lives in the service layer, where a
+    # person still cannot approve their own request no matter which screen they
+    # can open.
+    Role.OWNER: [
+        "dashboard", "brief", "intelligence", "patients", "queue", "clinical",
+        "payments", "pharmacy", "wards", "departments", "eye", "reports",
+        "stock", "stock_control", "custody", "purchasing", "exceptions",
+        "audit", "shifts", "settings",
+    ],
     Role.RECEPTION: ["dashboard", "patients", "queue", "payments", "pharmacy", "shifts"],
     Role.CLINICIAN: ["dashboard", "patients", "queue", "clinical", "wards", "departments", "custody"],
     Role.NURSE: ["dashboard", "patients", "wards", "departments", "custody"],
