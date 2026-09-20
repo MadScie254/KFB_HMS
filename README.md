@@ -35,6 +35,17 @@ See `docs/IMPLEMENTATION_STATUS.md` for exact scope and known gaps.
 
 Prerequisites: Windows 10/11 or a supported Linux host, Python 3.11 or newer, and a modern browser.
 
+**After every `git pull`, reinstall the dependencies before starting the server:**
+
+```
+.venv\Scripts\python.exe -m pip install -r requirements.txt     # Windows
+.venv/bin/python -m pip install -r requirements.txt              # Linux/macOS
+```
+
+A pull can add a dependency, and starting without it fails at import. The
+`scripts/run-demo` wrappers do this step for you, so `.\scripts\run-demo.ps1`
+(or `./scripts/run-demo.sh`) is the safer way in.
+
 One command creates the virtual environment, installs the locked dependencies, migrates, seeds the fictional data and starts the server. It is safe to re-run.
 
 ```powershell

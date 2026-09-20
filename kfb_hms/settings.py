@@ -17,6 +17,20 @@ DEBUG = os.getenv("KFB_DEBUG", "1" if DEMO_MODE else "0") == "1"
 ALLOWED_HOSTS = [h.strip() for h in os.getenv("KFB_ALLOWED_HOSTS", "127.0.0.1,localhost").split(",") if h.strip()]
 CSRF_TRUSTED_ORIGINS = [u.strip() for u in os.getenv("KFB_CSRF_TRUSTED_ORIGINS", "").split(",") if u.strip()]
 
+# Pulling new code without reinstalling is the normal way to arrive here, and
+# Django reports it as a forty-line traceback ending in ModuleNotFoundError
+# inside the WSGI handler, which says nothing about what to do. Say it plainly.
+try:
+    import whitenoise  # noqa: F401
+except ModuleNotFoundError as exc:  # pragma: no cover - exercised by hand
+    raise RuntimeError(
+        f"A required dependency is missing: {exc.name}.\n"
+        "The dependencies changed since this environment was built. Install them with:\n"
+        "    python -m pip install -r requirements.txt\n"
+        "or start the demo with scripts/run-demo.sh (or run-demo.ps1 on Windows), "
+        "which installs them for you."
+    ) from exc
+
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",
