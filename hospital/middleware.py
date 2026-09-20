@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.shortcuts import redirect
 from django.urls import reverse
 
@@ -36,11 +37,26 @@ class ScreenLockMiddleware:
 
 
 class AuditRequestMiddleware:
+    """Keep patient data out of caches.
+
+    Every response was marked no-store indiscriminately. Static assets are now
+    served by WhiteNoise, which returns before this middleware is reached, so
+    in practice that is settled upstream; the exemption stays for any path under
+    STATIC_URL or MEDIA_URL that is later routed through Django, because those
+    carry no patient data and are cheap to cache. Everything else is no-store.
+    """
+
     def __init__(self, get_response):
         self.get_response = get_response
+        self.static_prefixes = tuple(
+            prefix for prefix in (settings.STATIC_URL, getattr(settings, "MEDIA_URL", None)) if prefix
+        )
 
     def __call__(self, request):
         response = self.get_response(request)
+        if request.path.startswith(self.static_prefixes):
+            response.headers.setdefault("Cache-Control", "public, max-age=3600")
+            return response
         response.headers.setdefault("Cache-Control", "no-store, private")
         response.headers.setdefault("Pragma", "no-cache")
         return response

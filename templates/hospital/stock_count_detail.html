@@ -1,0 +1,106 @@
+{% extends "base.html" %}{% block title %}{{ count.reference }}{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <p class="breadcrumbs"><a href="{% url 'stock' %}">Stock</a> / <a href="{% url 'stock_counts' %}">Stock counts</a> / {{ count.reference }}</p>
+    <h1>{{ count.reference }}</h1>
+    <p>{{ count.location }} · frozen {{ count.cutoff_at|date:"j M Y, H:i" }} by {{ count.counted_by.staff_profile }}{% if count.blind_count %} · blind count{% endif %}</p>
+  </div>
+  <div class="heading-actions"><span class="large-status {{ count.status }}">{{ count.get_status_display }}</span></div>
+</div>
+
+{% if count.notes %}<div class="report-notice">{% include "hospital/_icon.html" with name="file" %}<div><strong>Why this count was taken</strong><span>{{ count.notes }}</span></div></div>{% endif %}
+
+{% if can_enter %}
+<form method="post" class="panel form-panel" data-unsaved-warning>{% csrf_token %}
+  <div class="panel-head">
+    <div><p class="eyebrow">Count the shelf</p><h2>Enter what you physically counted</h2></div>
+    <span>{{ lines|length }} batch{{ lines|length|pluralize:"es" }}</span>
+  </div>
+  <p class="help-text">Enter a number for every line, including zero where the shelf is empty. {% if count.blind_count %}Expected quantities are hidden until the sheet is submitted.{% endif %}</p>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Product</th><th>Batch</th><th>Expiry</th>{% if show_expected %}<th class="numeric">Expected</th>{% endif %}<th class="numeric">Counted</th><th>Reason for any difference</th></tr></thead>
+      <tbody>
+      {% for line in lines %}
+      <tr>
+        <td><strong>{{ line.batch.item.name }}</strong><small>{{ line.batch.item.code }}</small></td>
+        <td>{{ line.batch.batch_number }}</td>
+        <td>{{ line.batch.expiry_date|date:"j M Y"|default:"Not recorded" }}</td>
+        {% if show_expected %}<td class="numeric">{{ line.expected_quantity|floatformat:"-3" }}</td>{% endif %}
+        <td class="numeric">
+          <label class="visually-hidden" for="counted-{{ line.pk }}">Counted quantity for {{ line.batch.item.name }} batch {{ line.batch.batch_number }}</label>
+          <input class="field-control" id="counted-{{ line.pk }}" name="counted-{{ line.pk }}" type="number" step="0.001" min="0" inputmode="decimal" required>
+        </td>
+        <td>
+          <label class="visually-hidden" for="reason-{{ line.pk }}">Reason for {{ line.batch.item.name }} batch {{ line.batch.batch_number }}</label>
+          <input class="field-control" id="reason-{{ line.pk }}" name="reason-{{ line.pk }}" type="text" maxlength="255" placeholder="Damage, breakage, miscount…">
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <div class="callout warning-callout">
+    <strong>Submitting does not change any balance.</strong>
+    <p>The sheet goes to a delegated reviewer. Only their approval posts adjustment movements, and only for the lines that differ.</p>
+  </div>
+  <div class="form-actions">
+    <a class="button ghost" href="{% url 'stock_counts' %}">Leave the sheet open</a>
+    <button class="button primary" type="submit">Submit for independent review</button>
+  </div>
+</form>
+{% else %}
+
+<div class="content-grid">
+  <section class="panel span-2">
+    <div class="panel-head"><div><p class="eyebrow">Counted against the frozen ledger</p><h2>Count result</h2></div><span>{{ count.variance_line_count }} line{{ count.variance_line_count|pluralize }} with a variance</span></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Product</th><th>Batch</th><th class="numeric">Expected</th><th class="numeric">Counted</th><th class="numeric">Variance</th><th class="numeric">Value</th><th>Reason recorded</th></tr></thead>
+        <tbody>
+        {% for line in lines %}
+        <tr>
+          <td><strong>{{ line.batch.item.name }}</strong><small>{{ line.batch.item.code }}</small></td>
+          <td>{{ line.batch.batch_number }}</td>
+          <td class="numeric">{{ line.expected_quantity|floatformat:"-3" }}</td>
+          <td class="numeric">{{ line.counted_quantity|floatformat:"-3" }}</td>
+          <td class="numeric"><span class="quantity {% if line.variance < 0 %}negative{% endif %}">{{ line.variance|floatformat:"-3" }}</span></td>
+          <td class="numeric">KES {{ line.variance_value|floatformat:2 }}</td>
+          <td>{{ line.reason|default:"—" }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><div><p class="eyebrow">Accountability</p><h2>This count</h2></div></div>
+    <dl class="summary-list">
+      <div><dt>Status</dt><dd><span class="status {{ count.status }}">{{ count.get_status_display }}</span></dd></div>
+      <div><dt>Cutoff</dt><dd>{{ count.cutoff_at|date:"j M Y, H:i" }}</dd></div>
+      <div><dt>Counted by</dt><dd>{{ count.counted_by.staff_profile }}</dd></div>
+      <div><dt>Witnessed by</dt><dd>{{ count.witnessed_by.staff_profile|default:"Not recorded" }}</dd></div>
+      <div><dt>Reviewed by</dt><dd>{{ count.reviewed_by.staff_profile|default:"Awaiting review" }}</dd></div>
+      <div><dt>Net variance</dt><dd>{{ count.net_variance|floatformat:"-3" }} units</dd></div>
+    </dl>
+    {% if count.review_notes %}<div class="callout"><strong>Review notes</strong><p>{{ count.review_notes }}</p></div>{% endif %}
+
+    {% if can_review %}
+    <div class="section-divider"><div><p class="eyebrow">Independent review</p><h2>Decide</h2></div></div>
+    <form method="post" action="{% url 'stock_count_review' count.pk %}" class="form-stack" data-confirm="Record this decision? Approving posts an adjustment movement for every variance on the sheet.">{% csrf_token %}
+      <div class="form-grid one-column">{% include "hospital/_form_fields.html" with form=review_form %}</div>
+      <div class="decision-actions">
+        <button class="button secondary" name="decision" value="reject" type="submit">Reject</button>
+        <button class="button primary" name="decision" value="approve" type="submit">Approve and post adjustments</button>
+      </div>
+    </form>
+    <div class="callout warning-callout"><strong>Approval writes to the ledger.</strong><p>One adjustment movement is posted for each differing line, attributed to you. Rejecting changes no balance at all.</p></div>
+    {% elif count.status == 'submitted' %}
+    <div class="callout warning-callout"><strong>Awaiting a delegated reviewer.</strong><p>The person who counted cannot approve their own sheet.</p></div>
+    {% endif %}
+  </section>
+</div>
+{% endif %}
+{% endblock %}

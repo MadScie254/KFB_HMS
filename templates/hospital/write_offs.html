@@ -1,0 +1,85 @@
+{% extends "base.html" %}{% block title %}Write-offs{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <p class="breadcrumbs"><a href="{% url 'stock' %}">Stock</a> / Write-offs</p>
+    <h1>Write-offs and disposition</h1>
+    <p>Stock stays on the balance, and in the valuation, until somebody with authority takes it off.</p>
+  </div>
+</div>
+
+<div class="content-grid">
+  <section class="panel span-2">
+    <div class="panel-head"><div><p class="eyebrow">Awaiting a decision</p><h2>Proposed write-offs</h2></div><span>{{ pending|length }} pending</span></div>
+    {% if pending %}
+    <ul class="review-list">
+      {% for record in pending %}
+      <li>
+        <div>
+          <strong>{{ record.reference }} · {{ record.batch.item.name }}</strong>
+          <p>{{ record.quantity|floatformat:"-3" }} {{ record.batch.item.base_unit }} from batch {{ record.batch.batch_number }} · KES {{ record.value_at_cost|floatformat:2 }} at cost</p>
+          <p><span class="status warning">{{ record.get_reason_display }}</span> {{ record.narrative }}</p>
+          <small>Requested by {{ record.requested_by.staff_profile }} · {{ record.created_at|timesince }} ago</small>
+        </div>
+        {% if can_review %}
+        <form method="post" action="{% url 'write_off_review' record.pk %}" class="vertical-actions" data-confirm="Record this decision? Approving removes the stock from the balance.">{% csrf_token %}
+          <div class="form-grid one-column">{% include "hospital/_form_fields.html" with form=review_form %}</div>
+          <div class="decision-actions">
+            <button class="button secondary small" name="decision" value="reject" type="submit">Reject</button>
+            <button class="button primary small" name="decision" value="approve" type="submit">Approve and remove</button>
+          </div>
+        </form>
+        {% else %}<span class="status pending">Awaiting reviewer</span>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <div class="empty"><strong>Nothing is waiting for a decision.</strong><p>A write-off needs a requester and a different approver.</p></div>
+    {% endif %}
+
+    {% if decided %}
+    <div class="section-divider"><div><p class="eyebrow">Decided</p><h2>History</h2></div></div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Reference</th><th>Item / batch</th><th class="numeric">Quantity</th><th class="numeric">Value</th><th>Reason</th><th>Outcome</th></tr></thead>
+        <tbody>
+        {% for record in decided %}
+        <tr>
+          <td><strong>{{ record.reference }}</strong><small>{{ record.created_at|date:"j M Y" }}</small></td>
+          <td>{{ record.batch.item.name }}<small>{{ record.batch.batch_number }}</small></td>
+          <td class="numeric">{{ record.quantity|floatformat:"-3" }}</td>
+          <td class="numeric">KES {{ record.value_at_cost|floatformat:2 }}</td>
+          <td>{{ record.get_reason_display }}</td>
+          <td><span class="status {{ record.status }}">{{ record.get_status_display }}</span><small>{{ record.reviewed_by.staff_profile }}</small></td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    {% if can_request %}
+    <div class="panel-head"><div><p class="eyebrow">Propose</p><h2>Write stock off</h2></div></div>
+    <form method="post" action="{% url 'write_off_request' %}" class="form-stack">{% csrf_token %}
+      <div class="form-grid one-column">{% include "hospital/_form_fields.html" with form=form %}</div>
+      <button class="button primary full" type="submit">Send for independent approval</button>
+    </form>
+    {% endif %}
+
+    {% if expired %}
+    <div class="section-divider"><div><p class="eyebrow">Sitting in the balance</p><h2>Expired stock</h2></div></div>
+    <ul class="record-list compact-list">
+      {% for row in expired %}
+      <li><div><strong>{{ row.item.name }}</strong><p>Batch {{ row.batch.batch_number }}</p><small>Expired {{ row.batch.expiry_date|date:"j M Y" }} · KES {{ row.cost_value|floatformat:2 }} at cost</small></div><span class="quantity negative">{{ row.on_hand|floatformat:"-3" }}</span></li>
+      {% endfor %}
+    </ul>
+    <p class="help-text">Expired stock is already excluded from sellable value, but it stays in the ledger balance until it is written off.</p>
+    {% else %}
+    <div class="section-divider"><div><p class="eyebrow">Nothing held</p><h2>Expired stock</h2></div></div>
+    <div class="empty compact"><strong>No expired stock on the shelf.</strong></div>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

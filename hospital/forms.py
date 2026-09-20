@@ -3,6 +3,7 @@ from decimal import Decimal
 from django import forms
 from django.core.validators import FileExtensionValidator
 from django.forms import formset_factory
+from django.utils import timezone
 
 from .models import (
     Admission,
@@ -12,16 +13,85 @@ from .models import (
     ClinicalAttachment,
     ClinicalNote,
     CreditNote,
+    DepartmentIssue,
     Encounter,
     Patient,
     Payment,
     PurchaseOrder,
+    PurchaseOrderLine,
     ServiceOrder,
+    StockBatch,
+    StockWriteOff,
     Supplier,
 )
 
+# Leading bytes of the formats this hospital accepts. The browser-supplied
+# content type is attacker-controlled and the extension is just a name, so
+# neither says what a file actually is. Reading the signature does.
+FILE_SIGNATURES = {
+    "pdf": [b"%PDF-"],
+    "jpg": [b"\xff\xd8\xff"],
+    "jpeg": [b"\xff\xd8\xff"],
+    "png": [b"\x89PNG\r\n\x1a\n"],
+    "heic": [b"ftypheic", b"ftypheix", b"ftyphevc", b"ftypmif1", b"ftypmsf1", b"ftypheim"],
+    "heif": [b"ftypheic", b"ftypheix", b"ftyphevc", b"ftypmif1", b"ftypmsf1", b"ftypheim"],
+}
 
-class StyledFormMixin:
+
+def validate_upload(uploaded, *, allowed, max_bytes, description):
+    """Check size, extension and the file's own leading bytes.
+
+    A stored file is served back to staff later. Accepting one because the
+    browser said it was a PNG means trusting the uploader about the contents of
+    their own upload.
+    """
+    if uploaded.size > max_bytes:
+        raise forms.ValidationError(f"File exceeds the {max_bytes // (1024 * 1024)} MB limit.")
+    if uploaded.size == 0:
+        raise forms.ValidationError("That file is empty.")
+    extension = uploaded.name.rsplit(".", 1)[-1].lower() if "." in uploaded.name else ""
+    if extension not in allowed:
+        raise forms.ValidationError(description)
+
+    position = uploaded.tell()
+    uploaded.seek(0)
+    head = uploaded.read(32)
+    uploaded.seek(position)
+    signatures = FILE_SIGNATURES.get(extension, [])
+    # ISO-BMFF (HEIC) carries its brand at offset 4, not at the start.
+    if signatures and not any(head.startswith(sig) or sig in head[:24] for sig in signatures):
+        raise forms.ValidationError(
+            f"That file is named .{extension} but its contents are not a {extension.upper()} file."
+        )
+    return uploaded
+
+
+class SeparatorTolerantMixin:
+    """Accept a number copied straight off the screen.
+
+    Figures are displayed grouped ("KES 1,540.00"), so sooner or later somebody
+    copies one and pastes it into a form. Rejecting their own number back at
+    them, with "Enter a number", is a needless dead end.
+    """
+
+    GROUPED_FIELDS = (forms.DecimalField, forms.IntegerField, forms.FloatField)
+
+    def clean(self):
+        return super().clean()
+
+    def _clean_fields(self):
+        for name, field in self.fields.items():
+            if not isinstance(field, self.GROUPED_FIELDS):
+                continue
+            raw = self.data.get(self.add_prefix(name))
+            if isinstance(raw, str) and "," in raw:
+                stripped = raw.replace(",", "").replace("\u00a0", "").strip()
+                self.data = self.data.copy()
+                self.data[self.add_prefix(name)] = stripped
+        super()._clean_fields()
+
+
+class StyledFormMixin(SeparatorTolerantMixin):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         for field in self.fields.values():
@@ -230,10 +300,219 @@ class ClinicalAttachmentForm(StyledFormMixin, forms.ModelForm):
         fields = ["file", "description"]
 
     def clean_file(self):
-        uploaded = self.cleaned_data["file"]
-        if uploaded.size > 10 * 1024 * 1024:
-            raise forms.ValidationError("File exceeds the 10 MB limit.")
-        allowed_types = {"application/pdf", "image/jpeg", "image/png"}
-        if uploaded.content_type not in allowed_types:
-            raise forms.ValidationError("Upload a PDF, JPG or PNG file.")
-        return uploaded
+        return validate_upload(
+            self.cleaned_data["file"],
+            allowed={"pdf", "jpg", "jpeg", "png"},
+            max_bytes=10 * 1024 * 1024,
+            description="Upload a PDF, JPG or PNG file.",
+        )
+
+
+class GoodsReceiptForm(StyledFormMixin, forms.Form):
+    """Delivery header: the supplier's own document, photographed at the counter."""
+
+    supplier_invoice_reference = forms.CharField(
+        max_length=100,
+        label="Supplier invoice / delivery note number",
+        help_text="As printed on the document. One invoice cannot be received twice against the same order.",
+    )
+    invoice_amount = forms.DecimalField(
+        min_value=Decimal("0.00"), max_digits=14, decimal_places=2,
+        label="Invoice total (KES)",
+        help_text="The amount the supplier is billing. A difference against the goods counted in is flagged for review.",
+    )
+    invoice_date = forms.DateField(
+        required=False, label="Invoice date", widget=forms.DateInput(attrs={"type": "date"})
+    )
+    delivered_on = forms.DateField(
+        label="Delivered on", widget=forms.DateInput(attrs={"type": "date"}),
+        help_text="The day the goods physically arrived, which may differ from today.",
+    )
+    invoice_photo = forms.FileField(
+        label="Photograph of the supplier invoice",
+        validators=[FileExtensionValidator(["jpg", "jpeg", "png", "pdf", "heic"])],
+        help_text="Required. Photograph or scan the invoice/delivery note. JPG, PNG, HEIC or PDF, maximum 10 MB.",
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["delivered_on"].initial = timezone.localdate()
+
+    def clean_invoice_photo(self):
+        return validate_upload(
+            self.cleaned_data["invoice_photo"],
+            allowed={"jpg", "jpeg", "png", "heic", "heif", "pdf"},
+            max_bytes=10 * 1024 * 1024,
+            description="Upload a photograph (JPG, PNG or HEIC) or a PDF scan.",
+        )
+
+    def clean_delivered_on(self):
+        delivered = self.cleaned_data["delivered_on"]
+        if delivered > timezone.localdate():
+            raise forms.ValidationError("A delivery cannot be recorded as arriving in the future.")
+        return delivered
+
+    def clean(self):
+        data = super().clean()
+        invoice_date = data.get("invoice_date")
+        if invoice_date and invoice_date > timezone.localdate():
+            self.add_error("invoice_date", "The invoice date cannot be in the future.")
+        return data
+
+
+class GoodsReceiptLineForm(StyledFormMixin, forms.Form):
+    """One delivered batch. Quantities are in the product base unit."""
+
+    order_line = forms.ModelChoiceField(queryset=PurchaseOrderLine.objects.none(), label="Ordered item")
+    quantity_received = forms.DecimalField(
+        min_value=Decimal("0.001"), max_digits=14, decimal_places=3, label="Quantity received",
+    )
+    batch_number = forms.CharField(max_length=80, label="Batch number")
+    expiry_date = forms.DateField(required=False, label="Expiry date", widget=forms.DateInput(attrs={"type": "date"}))
+    actual_unit_cost = forms.DecimalField(
+        min_value=Decimal("0.00"), max_digits=14, decimal_places=2, label="Actual unit cost",
+    )
+
+    def __init__(self, *args, order=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        queryset = PurchaseOrderLine.objects.none() if order is None else PurchaseOrderLine.objects.filter(order=order).select_related("item")
+        self.fields["order_line"].queryset = queryset
+        self.fields["order_line"].label_from_instance = lambda line: (
+            f"{line.item.name} — ordered {line.quantity_base_units} {line.item.base_unit or 'units'}"
+        )
+
+    def clean_expiry_date(self):
+        expiry = self.cleaned_data.get("expiry_date")
+        if expiry and expiry < timezone.localdate():
+            raise forms.ValidationError("This batch has already expired and cannot be received as sellable stock.")
+        return expiry
+
+
+class BaseGoodsReceiptLineFormSet(forms.BaseFormSet):
+    """Passes the order down so each row can only choose that order's lines."""
+
+    def __init__(self, *args, order=None, **kwargs):
+        self.order = order
+        super().__init__(*args, **kwargs)
+
+    def get_form_kwargs(self, index):
+        kwargs = super().get_form_kwargs(index)
+        kwargs["order"] = self.order
+        return kwargs
+
+
+GoodsReceiptLineFormSet = formset_factory(
+    GoodsReceiptLineForm, formset=BaseGoodsReceiptLineFormSet, extra=1, min_num=1, validate_min=True, can_delete=True
+)
+
+
+class DeliveryCheckForm(StyledFormMixin, forms.Form):
+    """Independent confirmation that the delivery matches its invoice."""
+
+    discrepancy_notes = forms.CharField(
+        required=False,
+        widget=forms.Textarea(attrs={"rows": 3}),
+        label="What you found",
+        help_text="Record anything that did not match: short counts, damage, different batches, a different price.",
+    )
+
+
+class StockCountOpenForm(StyledFormMixin, forms.Form):
+    location = forms.CharField(max_length=80, initial="Pharmacy", label="Counting location")
+    blind_count = forms.BooleanField(
+        required=False, initial=True, label="Blind count",
+        help_text="Hide expected quantities while counting so the shelf is counted, not confirmed.",
+    )
+    notes = forms.CharField(
+        required=False, widget=forms.Textarea(attrs={"rows": 2}), label="Notes",
+        help_text="Why this count is being taken, and who is witnessing it.",
+    )
+
+
+class StockCountReviewForm(StyledFormMixin, forms.Form):
+    review_notes = forms.CharField(
+        required=False, widget=forms.Textarea(attrs={"rows": 3}), label="Review notes",
+        help_text="Approving posts an adjustment movement for every variance. Nothing is edited in place.",
+    )
+
+
+class DepartmentIssueForm(StyledFormMixin, forms.Form):
+    """Who is taking custody of stock leaving the pharmacy."""
+
+    department = forms.CharField(max_length=80, label="Department or ward")
+    received_by_name = forms.CharField(
+        max_length=160, label="Received by",
+        help_text="The named person taking custody. Not a role; a person.",
+    )
+    kind = forms.ChoiceField(choices=DepartmentIssue.Kind.choices, label="Issue type", initial=DepartmentIssue.Kind.GENERAL)
+    patient_number = forms.CharField(
+        max_length=20, required=False, label="Patient number",
+        help_text="Required for a patient-specific issue.",
+    )
+    notes = forms.CharField(required=False, widget=forms.Textarea(attrs={"rows": 2}), label="Notes")
+
+    def clean(self):
+        data = super().clean()
+        if data.get("kind") == DepartmentIssue.Kind.PATIENT and not data.get("patient_number"):
+            self.add_error("patient_number", "A patient-specific issue must name the patient it is for.")
+        return data
+
+
+class DepartmentIssueLineForm(StyledFormMixin, forms.Form):
+    batch = forms.ModelChoiceField(queryset=StockBatch.objects.none(), label="Batch")
+    quantity = forms.DecimalField(min_value=Decimal("0.001"), max_digits=14, decimal_places=3, label="Quantity")
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["batch"].queryset = (
+            StockBatch.objects.filter(status=StockBatch.Status.ACTIVE)
+            .select_related("item").order_by("item__name", "expiry_date")
+        )
+        self.fields["batch"].label_from_instance = lambda batch: (
+            f"{batch.item.name} — batch {batch.batch_number}"
+            + (f", expires {batch.expiry_date:%b %Y}" if batch.expiry_date else "")
+        )
+
+
+DepartmentIssueLineFormSet = formset_factory(
+    DepartmentIssueLineForm, extra=2, min_num=1, validate_min=True, can_delete=True
+)
+
+
+class WriteOffRequestForm(StyledFormMixin, forms.Form):
+    """Proposing that stock leave the balance, with a reason someone can review."""
+
+    batch = forms.ModelChoiceField(queryset=StockBatch.objects.none(), label="Batch")
+    quantity = forms.DecimalField(min_value=Decimal("0.001"), max_digits=14, decimal_places=3, label="Quantity")
+    reason = forms.ChoiceField(choices=StockWriteOff.Reason.choices, label="Reason")
+    narrative = forms.CharField(
+        widget=forms.Textarea(attrs={"rows": 3}), label="What happened",
+        help_text="A reviewer who was not there has to be able to judge this.",
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["batch"].queryset = StockBatch.objects.select_related("item").order_by("item__name", "expiry_date")
+        self.fields["batch"].label_from_instance = lambda batch: (
+            f"{batch.item.name} — batch {batch.batch_number}"
+            + (f", expires {batch.expiry_date:%b %Y}" if batch.expiry_date else "")
+            + (" (expired)" if batch.is_expired else "")
+        )
+
+
+class WriteOffReviewForm(StyledFormMixin, forms.Form):
+    review_notes = forms.CharField(
+        required=False, widget=forms.Textarea(attrs={"rows": 3}), label="Review notes",
+        help_text="Approving posts an adjustment movement that removes the stock. Rejecting changes no balance.",
+    )
+
+
+class BatchDispositionForm(StyledFormMixin, forms.Form):
+    status = forms.ChoiceField(
+        choices=[
+            (StockBatch.Status.ACTIVE, "Release back to sellable stock"),
+            (StockBatch.Status.QUARANTINE, "Hold in quarantine"),
+        ],
+        label="Disposition",
+    )
+    reason = forms.CharField(widget=forms.Textarea(attrs={"rows": 2}), label="Why this was authorised")

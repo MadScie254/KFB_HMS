@@ -18,4 +18,15 @@ jobs:
       - run: python -m pip install -r requirements.txt -r requirements-dev.txt
       - run: ruff check hospital kfb_hms
       - run: python manage.py test
-      - run: KFB_SECRET_KEY=ci-only-key KFB_ALLOWED_HOSTS=localhost python manage.py check --deploy
+      # A model change without its migration passes every test and then breaks
+      # the next deployment, so the two are pinned together here.
+      - run: python manage.py makemigrations --check --dry-run
+      # Checked against a production configuration, not the demo one. Run in
+      # demo mode this validates settings no hospital will ever use, so it
+      # could not fail on a production misconfiguration.
+      - run: >-
+          KFB_ENV=production
+          KFB_SECRET_KEY=ci-only-not-a-real-secret-0123456789abcdefghijklmnopqrstuvwxyz
+          KFB_DATABASE_URL=postgresql://ci:ci@127.0.0.1:5432/ci
+          KFB_ALLOWED_HOSTS=hospital.example.test
+          python manage.py check --deploy --fail-level WARNING

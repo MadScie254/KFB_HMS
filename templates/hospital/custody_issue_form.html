@@ -1,0 +1,35 @@
+{% extends "base.html" %}{% block title %}Issue to a department{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <p class="breadcrumbs"><a href="{% url 'stock' %}">Stock</a> / <a href="{% url 'custody' %}">Ward custody</a> / Issue</p>
+    <h1>Issue stock to a department</h1>
+    <p>This moves custody. It does not record use, and it does not bill anyone.</p>
+  </div>
+</div>
+
+<form method="post" class="panel form-panel" data-unsaved-warning data-formset>{% csrf_token %}
+  <div class="panel-head"><div><p class="eyebrow">Who is taking it</p><h2>Destination and custody</h2></div></div>
+  <div class="form-grid">{% include "hospital/_form_fields.html" %}</div>
+
+  <div class="section-divider">
+    <div><p class="eyebrow">What is going</p><h2>Batches issued</h2></div>
+    <button class="button secondary small" type="button" data-add-form>{% include "hospital/_icon.html" with name="plus" %} Add batch</button>
+  </div>
+  <p class="help-text">Only active batches can be issued. Quantities are in the product base unit.</p>
+  {{ formset.management_form }}
+  {% if formset.non_form_errors %}<div class="message error">{{ formset.non_form_errors }}</div>{% endif %}
+  <div class="repeatable-list" data-form-list>{% for line_form in formset %}{% include "hospital/_formset_row.html" with line_form=line_form %}{% endfor %}</div>
+  <template data-form-template>{% include "hospital/_formset_row.html" with line_form=formset.empty_form %}</template>
+
+  <div class="callout warning-callout">
+    <strong>The stock stays the hospital's until it is accounted for.</strong>
+    <p>These units leave the pharmacy balance now and appear as outstanding departmental custody against the named person. They are never deducted a second time when they are administered.</p>
+  </div>
+
+  <div class="form-actions">
+    <a class="button ghost" href="{% url 'custody' %}">Cancel</a>
+    <button class="button primary" type="submit">Issue and transfer custody</button>
+  </div>
+</form>
+{% endblock %}
