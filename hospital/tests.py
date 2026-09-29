@@ -38,6 +38,7 @@ from .models import (
     CatalogueItem,
     ClinicalAttachment,
     ClinicalNote,
+    ClinicianPayable,
     CreditNote,
     DepartmentIssue,
     Encounter,
@@ -407,11 +408,37 @@ class WorkflowTests(HospitalFixtureMixin, TestCase):
         self.assertEqual(order.invoice.balance, Decimal("40"))
 
     def test_bilateral_case_accrues_one_case_fee(self):
-        case = EyeCase.objects.create(patient=self.patient, proposed_procedure="Unspecified eye procedure", eye="both", readiness="ready", package_price=24000)
+        case = EyeCase.objects.create(
+            patient=self.patient, proposed_procedure="Unspecified eye procedure", eye="both",
+            readiness="ready", payment_status="paid", package_price=24000,
+        )
         complete_eye_case(actor=self.clinician, case_id=case.pk)
+        case.refresh_from_db()
+        completed_at = case.completed_at
         complete_eye_case(actor=self.clinician, case_id=case.pk)
         self.assertEqual(case.payable.amount, Decimal("2000"))
         self.assertEqual(type(case).objects.get(pk=case.pk).payable.amount, Decimal("2000"))
+        case.refresh_from_db()
+        self.assertEqual(case.completed_at, completed_at)
+        self.assertEqual(AuditEvent.objects.filter(action="eye_case.completed", entity_id=str(case.pk)).count(), 1)
+
+    def test_unpaid_or_cancelled_eye_case_cannot_accrue_a_payable(self):
+        case = EyeCase.objects.create(
+            patient=self.patient, proposed_procedure="Eye procedure", eye="left",
+            readiness="ready", package_price=24000,
+        )
+        with self.assertRaisesMessage(ValidationError, "Payment clearance"):
+            complete_eye_case(actor=self.clinician, case_id=case.pk)
+        self.client.force_login(self.clinician)
+        self.assertNotContains(self.client.get(reverse("eye_clinic")), "Complete case")
+        case.payment_status = "paid"
+        case.save(update_fields=["payment_status"])
+        self.assertContains(self.client.get(reverse("eye_clinic")), "Complete case")
+        case.status = "cancelled"
+        case.save(update_fields=["status"])
+        with self.assertRaisesMessage(ValidationError, "cancelled eye case"):
+            complete_eye_case(actor=self.clinician, case_id=case.pk)
+        self.assertFalse(ClinicianPayable.objects.filter(eye_case=case).exists())
 
     def test_purchase_requester_cannot_self_approve(self):
         supplier = Supplier.objects.create(name="Demo Supplier")
@@ -421,6 +448,18 @@ class WorkflowTests(HospitalFixtureMixin, TestCase):
         approve_purchase_order(actor=self.reviewer, order_id=po.pk)
         po.refresh_from_db()
         self.assertEqual(po.status, "approved")
+
+    def test_cancelled_or_received_purchase_order_cannot_be_reapproved(self):
+        supplier = Supplier.objects.create(name="Transition Supplier")
+        order = PurchaseOrder.objects.create(supplier=supplier, requested_by=self.procurement, status="cancelled")
+        with self.assertRaisesMessage(ValidationError, "Only a requested purchase order"):
+            approve_purchase_order(actor=self.reviewer, order_id=order.pk)
+        order.status = "received"
+        order.save(update_fields=["status"])
+        with self.assertRaisesMessage(ValidationError, "Only a requested purchase order"):
+            approve_purchase_order(actor=self.reviewer, order_id=order.pk)
+        order.refresh_from_db()
+        self.assertEqual(order.status, "received")
 
     def test_signed_note_cannot_be_signed_twice(self):
         encounter = Encounter.objects.create(patient=self.patient, started_by=self.reception)

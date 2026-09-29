@@ -403,6 +403,8 @@ def approve_purchase_order(*, actor, order_id, request=None):
     order = PurchaseOrder.objects.select_for_update().get(pk=order_id)
     if order.requested_by_id == actor.id:
         raise ValidationError("The requester cannot approve their own purchase order.")
+    if order.status != "requested":
+        raise ValidationError("Only a requested purchase order can be approved.")
     order.approved_by = actor
     order.status = "approved"
     order.save(update_fields=["approved_by", "status", "updated_at"])
@@ -414,9 +416,17 @@ def approve_purchase_order(*, actor, order_id, request=None):
 def complete_eye_case(*, actor, case_id, request=None):
     if user_role(actor) not in {Role.EYE, Role.CLINICIAN}:
         raise ValidationError("Only authorised clinical eye staff may complete a case.")
-    case = EyeCase.objects.select_for_update().get(pk=case_id)
+    case = EyeCase.objects.select_for_update().select_related("session").get(pk=case_id)
+    if case.status == "completed":
+        return case
+    if case.status not in {"waiting", "confirmed"}:
+        raise ValidationError("A cancelled eye case cannot be completed.")
     if case.readiness != "ready":
         raise ValidationError("Clinical readiness must be confirmed before completion.")
+    if case.payment_status != "paid":
+        raise ValidationError("Payment clearance is required before completing an eye case.")
+    if case.session_id and case.session.status == "cancelled":
+        raise ValidationError("A case in a cancelled eye session cannot be completed.")
     case.status = "completed"
     case.completed_at = timezone.now()
     case.save(update_fields=["status", "completed_at", "updated_at"])
