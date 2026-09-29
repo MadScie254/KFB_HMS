@@ -437,6 +437,7 @@ class Invoice(ReferenceNumberMixin, TimeStampedModel):
 
 class InvoiceLine(models.Model):
     invoice = models.ForeignKey(Invoice, on_delete=models.PROTECT, related_name="lines")
+    service_order = models.OneToOneField("ServiceOrder", null=True, blank=True, on_delete=models.PROTECT, related_name="charge_line")
     item = models.ForeignKey(CatalogueItem, on_delete=models.PROTECT)
     description = models.CharField(max_length=200)
     department = models.CharField(max_length=40)

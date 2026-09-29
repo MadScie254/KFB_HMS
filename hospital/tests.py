@@ -88,6 +88,7 @@ from .services import (
     review_write_off,
     set_batch_disposition,
     submit_stock_count,
+    update_service_order,
 )
 from .views import owner_brief_context
 
@@ -595,6 +596,7 @@ class WorkflowTests(HospitalFixtureMixin, TestCase):
     def test_service_result_requires_content_before_release(self):
         encounter = Encounter.objects.create(patient=self.patient, started_by=self.reception)
         service = CatalogueItem.objects.create(code="LAB-T", name="Lab test", kind="service", department="Laboratory", base_unit="service", sale_unit="service", units_per_sale_unit=1)
+        PriceVersion.objects.create(item=service, amount=Decimal("150"), reason="Test", approved_by=self.owner)
         order = ServiceOrder.objects.create(encounter=encounter, service=service, requested_by=self.clinician)
         lab = self.make_user("lab", Role.LAB)
         self.client.login(username=lab.username, password=self.password)
@@ -607,6 +609,57 @@ class WorkflowTests(HospitalFixtureMixin, TestCase):
         order.refresh_from_db()
         self.assertEqual(order.status, ServiceOrder.Status.RELEASED)
         self.assertIsNotNone(order.released_at)
+        self.assertEqual(order.charge_line.invoice.balance, Decimal("150"))
+
+    def test_released_service_has_one_versioned_charge_and_keeps_clinical_release_separate_from_debt(self):
+        encounter = Encounter.objects.create(patient=self.patient, started_by=self.reception)
+        service = CatalogueItem.objects.create(
+            code="LAB-CHARGE", name="Blood panel", kind=CatalogueItem.Kind.SERVICE,
+            department="Laboratory", base_unit="service", sale_unit="service", units_per_sale_unit=1,
+        )
+        price = PriceVersion.objects.create(item=service, amount=Decimal("250"), reason="Approved tariff", approved_by=self.owner)
+        order = ServiceOrder.objects.create(encounter=encounter, service=service, requested_by=self.clinician)
+        lab = self.make_user("billing-lab", Role.LAB)
+        with self.assertRaisesMessage(ValidationError, "requester cannot release"):
+            update_service_order(
+                actor=self.clinician, order_id=order.pk, status=ServiceOrder.Status.RELEASED,
+                result="Normal", request=None,
+            )
+        update_service_order(actor=lab, order_id=order.pk, status=ServiceOrder.Status.RELEASED, result="Normal")
+        order.refresh_from_db()
+        line = order.charge_line
+        self.assertEqual(line.price_version, price)
+        self.assertEqual(line.unit_price, Decimal("250"))
+        self.assertEqual(line.invoice.status, Invoice.Status.POSTED)
+        self.assertEqual(line.invoice.balance, Decimal("250"))
+        self.assertEqual(line.invoice.patient, self.patient)
+        self.assertEqual(line.invoice.encounter, encounter)
+        self.client.force_login(self.reception)
+        self.assertContains(
+            self.client.get(reverse("patient_detail", kwargs={"pk": self.patient.pk})),
+            reverse("invoice_payment", kwargs={"pk": line.invoice_id}),
+        )
+        released_at = order.released_at
+        update_service_order(actor=lab, order_id=order.pk, status=ServiceOrder.Status.RELEASED, result="Changed retry text")
+        order.refresh_from_db()
+        self.assertEqual(order.released_at, released_at)
+        self.assertEqual(order.result, "Normal")
+        self.assertEqual(InvoiceLine.objects.filter(service_order=order).count(), 1)
+        self.assertEqual(AuditEvent.objects.filter(action="service_order.released", entity_id=str(order.pk)).count(), 1)
+
+    def test_service_without_approved_price_cannot_be_released_unbilled(self):
+        encounter = Encounter.objects.create(patient=self.patient, started_by=self.reception)
+        service = CatalogueItem.objects.create(
+            code="LAB-UNPRICED", name="Unpriced test", kind=CatalogueItem.Kind.SERVICE,
+            department="Laboratory", base_unit="service", sale_unit="service", units_per_sale_unit=1,
+        )
+        order = ServiceOrder.objects.create(encounter=encounter, service=service, requested_by=self.clinician)
+        lab = self.make_user("unpriced-lab", Role.LAB)
+        with self.assertRaisesMessage(ValidationError, "no active approved price"):
+            update_service_order(actor=lab, order_id=order.pk, status=ServiceOrder.Status.RELEASED, result="Result")
+        order.refresh_from_db()
+        self.assertEqual(order.status, ServiceOrder.Status.REQUESTED)
+        self.assertFalse(InvoiceLine.objects.filter(service_order=order).exists())
 
     def test_outpatient_prescription_prices_then_dispenses_actual_quantity(self):
         encounter = Encounter.objects.create(patient=self.patient, started_by=self.reception, status=Encounter.Status.CLINICIAN)

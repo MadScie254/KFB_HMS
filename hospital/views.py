@@ -121,6 +121,7 @@ from .services import (
     review_write_off,
     set_batch_disposition,
     submit_stock_count,
+    update_service_order,
 )
 
 ZERO_MONEY = Value(Decimal("0.00"), output_field=DecimalField(max_digits=14, decimal_places=2))
@@ -1205,15 +1206,14 @@ def service_order_update(request, pk):
     order = get_object_or_404(ServiceOrder.objects.select_related("encounter__patient", "service"), pk=pk)
     form = ServiceResultForm(request.POST or None, instance=order)
     if request.method == "POST" and form.is_valid():
-        updated = form.save(commit=False)
-        if updated.status == ServiceOrder.Status.RELEASED and order.requested_by_id == request.user.id:
-            form.add_error("status", "The requester cannot release their own result. Send it for independent review.")
+        try:
+            update_service_order(
+                actor=request.user, order_id=order.pk,
+                status=form.cleaned_data["status"], result=form.cleaned_data["result"], request=request,
+            )
+        except ValidationError as exc:
+            form.add_error(None, _validation_message(exc))
         else:
-            updated.performer = request.user
-            if updated.status == ServiceOrder.Status.RELEASED:
-                updated.released_at = timezone.now()
-            updated.save()
-            audit(request.user, f"service_order.{updated.status}", updated, request=request)
             messages.success(request, "Department work item updated.")
             return redirect("departments")
     return render(request, "hospital/service_result_form.html", {"form": form, "order": order})

@@ -28,6 +28,7 @@ from .models import (
     PharmacyOrderItem,
     PurchaseOrder,
     Role,
+    ServiceOrder,
     Setting,
     StockBatch,
     StockCount,
@@ -180,6 +181,49 @@ def discharge_admission(*, actor, admission_id, summary, request=None):
     audit(actor, "admission.discharged", admission, reason=summary, request=request)
     close_encounter(actor=actor, encounter_id=encounter_id, reason=f"Discharged: {summary}", request=request)
     return admission
+
+
+@transaction.atomic
+def update_service_order(*, actor, order_id, status, result, request=None):
+    if user_role(actor) not in {Role.LAB, Role.CLINICIAN, Role.OWNER}:
+        raise ValidationError("Only authorised clinical or laboratory staff may update a service order.")
+    order = ServiceOrder.objects.select_for_update().select_related("encounter__patient", "service").get(pk=order_id)
+    if order.status == ServiceOrder.Status.RELEASED:
+        if status == ServiceOrder.Status.RELEASED and InvoiceLine.objects.filter(service_order=order).exists():
+            return order
+        raise ValidationError("This result is already released and cannot be changed.")
+    if status == ServiceOrder.Status.RELEASED:
+        if order.requested_by_id == actor.id:
+            raise ValidationError("The requester cannot release their own result. Send it for independent review.")
+        if not result.strip():
+            raise ValidationError("Enter a result before release.")
+        price = active_price(order.service)
+        if price is None:
+            raise ValidationError(f"{order.service.name} has no active approved price. Release cannot post a zero charge.")
+        order.status = ServiceOrder.Status.RELEASED
+        order.result = result.strip()
+        order.performer = actor
+        order.released_at = timezone.now()
+        order.save(update_fields=["status", "result", "performer", "released_at", "updated_at"])
+        invoice = Invoice.objects.create(
+            patient=order.encounter.patient, encounter=order.encounter,
+            customer_name=order.encounter.patient.full_name,
+            status=Invoice.Status.POSTED, posted_at=order.released_at,
+            created_by=actor,
+        )
+        InvoiceLine.objects.create(
+            invoice=invoice, service_order=order, item=order.service,
+            description=order.service.name, department=order.service.department,
+            quantity=Decimal("1"), unit_price=price.amount, price_version=price,
+        )
+        audit(actor, "service_order.released", order, after={"invoice": invoice.invoice_number}, request=request)
+        return order
+    order.status = status
+    order.result = result.strip()
+    order.performer = actor
+    order.save(update_fields=["status", "result", "performer", "updated_at"])
+    audit(actor, f"service_order.{status}", order, request=request)
+    return order
 
 
 @transaction.atomic
