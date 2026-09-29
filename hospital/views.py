@@ -1204,6 +1204,10 @@ def departments(request):
 @role_required(Role.OWNER, Role.LAB, Role.CLINICIAN)
 def service_order_update(request, pk):
     order = get_object_or_404(ServiceOrder.objects.select_related("encounter__patient", "service"), pk=pk)
+    can_update = order.status != ServiceOrder.Status.RELEASED and (
+        order.status != ServiceOrder.Status.REVIEW
+        or request.user.id not in {order.requested_by_id, order.performer_id}
+    )
     form = ServiceResultForm(request.POST or None, instance=order)
     if request.method == "POST" and form.is_valid():
         try:
@@ -1216,7 +1220,9 @@ def service_order_update(request, pk):
         else:
             messages.success(request, "Department work item updated.")
             return redirect("departments")
-    return render(request, "hospital/service_result_form.html", {"form": form, "order": order})
+    return render(request, "hospital/service_result_form.html", {
+        "form": form, "order": order, "can_update": can_update,
+    })
 
 
 @role_required(Role.CLINICIAN, Role.NURSE, Role.OWNER)

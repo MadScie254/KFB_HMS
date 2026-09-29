@@ -201,6 +201,19 @@ class ServiceResultForm(StyledFormMixin, forms.ModelForm):
         fields = ["status", "result"]
         widgets = {"result": forms.Textarea(attrs={"rows": 7})}
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        next_status = {
+            ServiceOrder.Status.REQUESTED: ServiceOrder.Status.IN_PROGRESS,
+            ServiceOrder.Status.IN_PROGRESS: ServiceOrder.Status.REVIEW,
+            ServiceOrder.Status.REVIEW: ServiceOrder.Status.RELEASED,
+        }.get(self.instance.status)
+        self.fields["status"].choices = [
+            (value, label) for value, label in ServiceOrder.Status.choices if value == next_status
+        ]
+        if not self.is_bound and next_status:
+            self.initial["status"] = next_status
+
     def clean(self):
         data = super().clean()
         if data.get("status") in {ServiceOrder.Status.REVIEW, ServiceOrder.Status.RELEASED} and not data.get("result", "").strip():

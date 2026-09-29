@@ -192,19 +192,26 @@ def update_service_order(*, actor, order_id, status, result, request=None):
         if status == ServiceOrder.Status.RELEASED and InvoiceLine.objects.filter(service_order=order).exists():
             return order
         raise ValidationError("This result is already released and cannot be changed.")
+    next_status = {
+        ServiceOrder.Status.REQUESTED: ServiceOrder.Status.IN_PROGRESS,
+        ServiceOrder.Status.IN_PROGRESS: ServiceOrder.Status.REVIEW,
+        ServiceOrder.Status.REVIEW: ServiceOrder.Status.RELEASED,
+    }.get(order.status)
+    if status != next_status:
+        raise ValidationError(f"Move this service order from {order.get_status_display()} to the next review step before release.")
     if status == ServiceOrder.Status.RELEASED:
-        if order.requested_by_id == actor.id:
-            raise ValidationError("The requester cannot release their own result. Send it for independent review.")
-        if not result.strip():
-            raise ValidationError("Enter a result before release.")
+        if order.requested_by_id == actor.id or order.performer_id == actor.id:
+            raise ValidationError("The requester or performer cannot release their own result. Independent review is required.")
+        if not order.result.strip() or result.strip() != order.result:
+            raise ValidationError("Release the reviewed result without editing it. Ask the performer to correct it first.")
         price = active_price(order.service)
         if price is None:
             raise ValidationError(f"{order.service.name} has no active approved price. Release cannot post a zero charge.")
         order.status = ServiceOrder.Status.RELEASED
-        order.result = result.strip()
-        order.performer = actor
+        order.reviewed_by = actor
+        order.reviewed_at = timezone.now()
         order.released_at = timezone.now()
-        order.save(update_fields=["status", "result", "performer", "released_at", "updated_at"])
+        order.save(update_fields=["status", "reviewed_by", "reviewed_at", "released_at", "updated_at"])
         invoice = Invoice.objects.create(
             patient=order.encounter.patient, encounter=order.encounter,
             customer_name=order.encounter.patient.full_name,
@@ -218,9 +225,14 @@ def update_service_order(*, actor, order_id, status, result, request=None):
         )
         audit(actor, "service_order.released", order, after={"invoice": invoice.invoice_number}, request=request)
         return order
+    if status == ServiceOrder.Status.REVIEW and order.performer_id != actor.id:
+        raise ValidationError("Only the recorded performer may submit this result for review.")
+    if status == ServiceOrder.Status.REVIEW and not result.strip():
+        raise ValidationError("Enter a result before submitting it for review.")
     order.status = status
     order.result = result.strip()
-    order.performer = actor
+    if status == ServiceOrder.Status.IN_PROGRESS:
+        order.performer = actor
     order.save(update_fields=["status", "result", "performer", "updated_at"])
     audit(actor, f"service_order.{status}", order, request=request)
     return order

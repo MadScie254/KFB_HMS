@@ -699,6 +699,8 @@ class ServiceOrder(TimeStampedModel):
     service = models.ForeignKey(CatalogueItem, on_delete=models.PROTECT, limit_choices_to={"kind": CatalogueItem.Kind.SERVICE})
     requested_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="service_orders_requested")
     performer = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="service_orders_performed")
+    reviewed_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="service_orders_reviewed")
+    reviewed_at = models.DateTimeField(null=True, blank=True)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.REQUESTED)
     specimen_details = models.CharField(max_length=255, blank=True)
     result = models.TextField(blank=True)
