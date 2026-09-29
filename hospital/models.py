@@ -352,6 +352,7 @@ class StockMovement(models.Model):
             # SUM over a slice of it. Unindexed, each one is a full scan that
             # grows for as long as the hospital stays open.
             models.Index(fields=["batch", "event_at"]),
+            models.Index(fields=["entered_at", "event_at"]),
             models.Index(fields=["movement_type", "event_at"]),
             models.Index(fields=["event_at"]),
             models.Index(fields=["reference_type", "reference_id"]),
@@ -915,6 +916,7 @@ class StockCount(ReferenceNumberMixin, TimeStampedModel):
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.FROZEN)
     location = models.CharField(max_length=80, default="Pharmacy")
     cutoff_at = models.DateTimeField(default=timezone.now)
+    submitted_at = models.DateTimeField(null=True, blank=True)
     blind_count = models.BooleanField(default=True)
     notes = models.TextField(blank=True)
     review_notes = models.TextField(blank=True)

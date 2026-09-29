@@ -17,7 +17,7 @@
     <div><p class="eyebrow">Count the shelf</p><h2>Enter what you physically counted</h2></div>
     <span>{{ lines|length }} batch{{ lines|length|pluralize:"es" }}</span>
   </div>
-  <p class="help-text">Enter a number for every line, including zero where the shelf is empty. {% if count.blind_count %}Expected quantities are hidden until the sheet is submitted.{% endif %}</p>
+  <p class="help-text">Pause stock movements while counting. If stock moves before submission, start a new sheet. Enter a number for every line, including zero where the shelf is empty. {% if count.blind_count %}Expected quantities are hidden until the sheet is submitted.{% endif %}</p>
   <div class="table-wrap">
     <table>
       <thead><tr><th>Product</th><th>Batch</th><th>Expiry</th>{% if show_expected %}<th class="numeric">Expected</th>{% endif %}<th class="numeric">Counted</th><th>Reason for any difference</th></tr></thead>

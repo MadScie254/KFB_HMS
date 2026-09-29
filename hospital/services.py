@@ -571,9 +571,8 @@ def check_delivery(*, actor, receipt_id, discrepancy_notes="", request=None):
 def open_stock_count(*, actor, location="Pharmacy", blind_count=True, notes="", request=None):
     """Freeze a count sheet: every batch with its ledger balance at the cutoff.
 
-    Expected quantities are captured once, at the cutoff, so a movement posted
-    while the shelf is being counted cannot quietly change what the count is
-    later judged against.
+    Expected quantities are captured once, at the cutoff. Submission rejects
+    the sheet if stock moves while the shelf is being counted.
     """
     if user_role(actor) not in {Role.PHARMACY, Role.PROCUREMENT}:
         raise ValidationError("Only pharmacy or procurement staff may open a stock count.")
@@ -619,6 +618,14 @@ def open_stock_count(*, actor, location="Pharmacy", blind_count=True, notes="", 
     return count
 
 
+def _stock_moved_during_count(count, submitted_at):
+    """Catch ordinary and backdated ledger entries that invalidate the snapshot."""
+    return StockMovement.objects.filter(
+        entered_at__gt=count.cutoff_at,
+        event_at__lte=submitted_at,
+    ).exists()
+
+
 @transaction.atomic
 def submit_stock_count(*, actor, count_id, counted, reasons=None, request=None):
     """Record the counted quantities and send the sheet for independent review."""
@@ -628,6 +635,9 @@ def submit_stock_count(*, actor, count_id, counted, reasons=None, request=None):
         raise ValidationError("Only the person who opened this count may submit it.")
     if count.status != StockCount.Status.FROZEN:
         raise ValidationError("This count has already been submitted.")
+    submitted_at = timezone.now()
+    if _stock_moved_during_count(count, submitted_at):
+        raise ValidationError("Stock moved after this sheet was frozen. Start a new count against a fresh ledger snapshot.")
     for line in count.lines.select_for_update():
         if line.pk not in counted:
             raise ValidationError("Enter a counted quantity for every line on the frozen sheet.")
@@ -638,7 +648,8 @@ def submit_stock_count(*, actor, count_id, counted, reasons=None, request=None):
         line.reason = str(reasons.get(line.pk, ""))[:255]
         line.save(update_fields=["counted_quantity", "reason"])
     count.status = StockCount.Status.SUBMITTED
-    count.save(update_fields=["status", "updated_at"])
+    count.submitted_at = submitted_at
+    count.save(update_fields=["status", "submitted_at", "updated_at"])
     audit(actor, "stock_count.submitted", count, after={"net_variance": str(count.net_variance)}, request=request)
     return count
 
@@ -658,6 +669,8 @@ def review_stock_count(*, actor, count_id, approve, review_notes="", request=Non
         raise ValidationError("A stock count cannot be reviewed by the person who counted it.")
     if count.status != StockCount.Status.SUBMITTED:
         raise ValidationError("Only a submitted count can be reviewed.")
+    if approve and _stock_moved_during_count(count, count.submitted_at or count.updated_at):
+        raise ValidationError("Stock moved during this count. Reject the stale sheet and start a new count.")
 
     posted = 0
     if approve:

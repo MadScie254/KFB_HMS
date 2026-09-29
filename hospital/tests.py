@@ -733,6 +733,58 @@ class StockControlTests(HospitalFixtureMixin, TestCase):
             "A movement posted after the cutoff must not change what the count is judged against.",
         )
 
+    def test_movement_during_count_requires_a_new_sheet(self):
+        for movement_type, delta in (
+            (StockMovement.MovementType.DISPENSE, Decimal("-2")),
+            (StockMovement.MovementType.RECEIPT, Decimal("5")),
+        ):
+            with self.subTest(movement_type=movement_type):
+                count = open_stock_count(actor=self.pharmacist)
+                line = count.lines.get(batch=self.batch)
+                StockMovement.objects.create(
+                    batch=self.batch, movement_type=movement_type, quantity_delta=delta,
+                    reference_type="Test", reference_id=str(count.pk),
+                    idempotency_key=f"during-count-{count.pk}", entered_by=self.pharmacist,
+                )
+                with self.assertRaisesMessage(ValidationError, "Start a new count"):
+                    submit_stock_count(
+                        actor=self.pharmacist, count_id=count.pk,
+                        counted={line.pk: line.expected_quantity + delta},
+                    )
+                count.refresh_from_db()
+                self.assertEqual(count.status, StockCount.Status.FROZEN)
+                self.assertFalse(StockMovement.objects.filter(
+                    reference_type="StockCount", reference_id=str(count.pk),
+                ).exists())
+
+    def test_backdated_movement_after_submission_blocks_approval(self):
+        count = open_stock_count(actor=self.pharmacist)
+        line = count.lines.get(batch=self.batch)
+        submit_stock_count(actor=self.pharmacist, count_id=count.pk, counted={line.pk: Decimal("194")})
+        StockMovement.objects.create(
+            batch=self.batch, movement_type=StockMovement.MovementType.RECEIPT,
+            quantity_delta=Decimal("2"), event_at=count.cutoff_at,
+            reference_type="Test", reference_id="backdated",
+            idempotency_key="late-backdated-count", entered_by=self.pharmacist,
+        )
+        with self.assertRaisesMessage(ValidationError, "Reject the stale sheet"):
+            review_stock_count(actor=self.reviewer, count_id=count.pk, approve=True)
+        self.assertFalse(StockMovement.objects.filter(
+            reference_type="StockCount", reference_id=str(count.pk),
+        ).exists())
+
+    def test_movement_after_submission_does_not_block_valid_adjustment(self):
+        count = open_stock_count(actor=self.pharmacist)
+        line = count.lines.get(batch=self.batch)
+        submit_stock_count(actor=self.pharmacist, count_id=count.pk, counted={line.pk: Decimal("194")})
+        StockMovement.objects.create(
+            batch=self.batch, movement_type=StockMovement.MovementType.DISPENSE,
+            quantity_delta=Decimal("-2"), reference_type="Test", reference_id="after-submit",
+            idempotency_key="after-submit-count", entered_by=self.pharmacist,
+        )
+        review_stock_count(actor=self.reviewer, count_id=count.pk, approve=True)
+        self.assertEqual(self.batch.quantity_on_hand, Decimal("192"))
+
 
 @override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
 class StockScreenTests(HospitalFixtureMixin, TestCase):
