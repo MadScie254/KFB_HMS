@@ -1,18 +1,22 @@
 import os
 import re
 import shutil
+import subprocess
 import tempfile
+import zipfile
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
-from django.test import SimpleTestCase, TestCase, override_settings
+from django.core.management.base import CommandError
+from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
@@ -83,6 +87,59 @@ PNG_BYTES = bytes.fromhex(
     "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
     "1f15c4890000000a49444154789c6360000002000100ffff03000006000557bfabd40000000049454e44ae426082"
 )
+
+
+class BackupEncryptionTests(TransactionTestCase):
+    @override_settings(DEMO_MODE=True, ENVIRONMENT="demo")
+    def test_demo_backup_remains_a_valid_zip_with_checksum(self):
+        with TemporaryDirectory() as output:
+            with patch.dict(os.environ, {"KFB_BACKUP_ENCRYPTION_RECIPIENT": ""}):
+                call_command("backup_kfb", output=output)
+            archives = list(Path(output).glob("*.zip"))
+            self.assertEqual(len(archives), 1)
+            self.assertTrue((Path(f"{archives[0]}.sha256")).exists())
+            with zipfile.ZipFile(archives[0]) as archive:
+                self.assertIn("database.sqlite3", archive.namelist())
+                self.assertIn("manifest.json", archive.namelist())
+
+    @override_settings(DEMO_MODE=False, ENVIRONMENT="production")
+    def test_missing_age_leaves_no_plaintext_backup(self):
+        with TemporaryDirectory() as output:
+            with patch.dict(os.environ, {"KFB_BACKUP_ENCRYPTION_RECIPIENT": "age1test"}):
+                with patch("hospital.management.commands.backup_kfb.shutil.which", return_value=None):
+                    with self.assertRaises(CommandError):
+                        call_command("backup_kfb", output=output)
+            self.assertEqual(list(Path(output).iterdir()), [])
+
+    @override_settings(DEMO_MODE=False, ENVIRONMENT="production")
+    def test_failed_encryption_leaves_no_plaintext_backup(self):
+        with TemporaryDirectory() as output:
+            with patch.dict(os.environ, {"KFB_BACKUP_ENCRYPTION_RECIPIENT": "age1test"}):
+                with patch("hospital.management.commands.backup_kfb.shutil.which", return_value="age"):
+                    with patch(
+                        "hospital.management.commands.backup_kfb.subprocess.run",
+                        return_value=subprocess.CompletedProcess([], 1, stderr="invalid recipient"),
+                    ):
+                        with self.assertRaises(CommandError):
+                            call_command("backup_kfb", output=output)
+            self.assertEqual(list(Path(output).iterdir()), [])
+
+    @override_settings(DEMO_MODE=False, ENVIRONMENT="production")
+    def test_success_publishes_only_encrypted_archive_and_checksum(self):
+        def encrypt(command, **kwargs):
+            Path(command[command.index("--output") + 1]).write_bytes(b"age-encrypted-test")
+            return subprocess.CompletedProcess(command, 0)
+
+        with TemporaryDirectory() as output:
+            with patch.dict(os.environ, {"KFB_BACKUP_ENCRYPTION_RECIPIENT": "age1test"}):
+                with patch("hospital.management.commands.backup_kfb.shutil.which", return_value="age"):
+                    with patch("hospital.management.commands.backup_kfb.subprocess.run", side_effect=encrypt):
+                        call_command("backup_kfb", output=output)
+            files = list(Path(output).iterdir())
+            self.assertEqual(len(files), 2)
+            self.assertEqual(len(list(Path(output).glob("*.zip.age"))), 1)
+            self.assertEqual(len(list(Path(output).glob("*.zip"))), 0)
+            self.assertEqual(len(list(Path(output).glob("*.zip.age.sha256"))), 1)
 
 
 class HospitalFixtureMixin:
