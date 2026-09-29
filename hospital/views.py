@@ -15,20 +15,35 @@ from django.contrib.auth.views import LoginView
 from django.core.exceptions import ValidationError
 from django.core.paginator import Paginator
 from django.db import connection, transaction
-from django.db.models import Case, Count, DecimalField, F, IntegerField, Max, Q, Sum, Value, When
-from django.db.models.functions import Coalesce
+from django.db.models import Case, Count, DecimalField, IntegerField, Max, Q, Sum, Value, When
 from django.http import FileResponse, Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 from django.utils import timezone
-from django.utils.http import content_disposition_header
+from django.utils.http import content_disposition_header, urlencode
 
+from .analytics import (
+    control_adoption,
+    departmental_custody,
+    receiving_summary,
+    shrinkage,
+    stock_activity,
+    stock_position,
+    supplier_price_history,
+)
 from .forms import (
     AdmissionForm,
+    BatchDispositionForm,
     ClinicalAttachmentForm,
     ClinicalNoteForm,
     CreditNoteForm,
     CsvImportForm,
+    DeliveryCheckForm,
+    DepartmentIssueForm,
+    DepartmentIssueLineFormSet,
     EncounterForm,
+    GoodsReceiptForm,
+    GoodsReceiptLineFormSet,
     PatientForm,
     PaymentForm,
     PharmacyBasketForm,
@@ -40,6 +55,10 @@ from .forms import (
     ServiceResultForm,
     ShiftCloseForm,
     ShiftOpenForm,
+    StockCountOpenForm,
+    StockCountReviewForm,
+    WriteOffRequestForm,
+    WriteOffReviewForm,
 )
 from .models import (
     Admission,
@@ -51,10 +70,12 @@ from .models import (
     ClinicalNote,
     ClinicianPayable,
     CreditNote,
+    DepartmentIssue,
     Encounter,
     ExceptionRecord,
     EyeCase,
     EyeSession,
+    GoodsReceipt,
     ImportJob,
     Invoice,
     InvoiceLine,
@@ -72,24 +93,35 @@ from .models import (
     ServiceOrder,
     Setting,
     StockBatch,
+    StockCount,
     StockMovement,
+    StockWriteOff,
     Ward,
 )
 from .pdf_reports import build_financial_report_pdf, build_patient_access_pdf
 from .permissions import role_required, user_role
 from .services import (
+    account_for_issue,
     approve_credit_note,
     approve_purchase_order,
     audit,
+    check_delivery,
     complete_eye_case,
     dispense_order,
+    issue_to_department,
+    open_stock_count,
     prepare_pharmacy_order,
+    receive_delivery,
     record_payment,
+    request_write_off,
+    review_stock_count,
+    review_write_off,
+    set_batch_disposition,
+    submit_stock_count,
     verify_mpesa,
 )
 
 ZERO_MONEY = Value(Decimal("0.00"), output_field=DecimalField(max_digits=14, decimal_places=2))
-ZERO_QUANTITY = Value(Decimal("0.000"), output_field=DecimalField(max_digits=14, decimal_places=3))
 
 
 def _validation_message(exc):
@@ -98,16 +130,16 @@ def _validation_message(exc):
     return str(exc)
 
 
-def batches_with_balance(queryset=None):
-    """Stock batches carrying their ledger balance as one aggregated query.
+def _period_days(value, default=7):
+    """A safe reporting window from a query string, clamped to one year."""
+    days = int(value) if str(value).isdigit() else default
+    return max(1, min(days, 365))
 
-    Reading ``StockBatch.quantity_on_hand`` inside a loop or template issues one
-    SUM per row; on a real catalogue that is hundreds of queries per page.
-    """
-    base = queryset if queryset is not None else StockBatch.objects.all()
-    return base.select_related("item").annotate(
-        on_hand=Coalesce(Sum("movements__quantity_delta"), ZERO_QUANTITY)
-    )
+
+def _filter_query(**params):
+    """Query-string tail that keeps active filters on pagination links."""
+    active = {key: value for key, value in params.items() if value not in (None, "")}
+    return f"&{urlencode(active)}" if active else ""
 
 
 def invoiced_total(invoices):
@@ -130,6 +162,92 @@ def outstanding_receivables():
         invoice__in=open_invoices, payment__status=Payment.Status.VALID
     ).aggregate(v=Sum("amount"))["v"] or Decimal("0.00")
     return billed - credited - paid
+
+
+# What each role is allowed to find. Search must never become a way around the
+# page permissions: a receptionist searching a batch number finds nothing,
+# because they cannot open the stock ledger either.
+SEARCH_SCOPES = {
+    "patients": {Role.OWNER, Role.RECEPTION, Role.CLINICIAN, Role.NURSE, Role.EYE},
+    "encounters": {Role.OWNER, Role.RECEPTION, Role.CLINICIAN, Role.NURSE, Role.LAB},
+    "stock": {Role.OWNER, Role.PHARMACY, Role.PROCUREMENT, Role.REVIEWER},
+    "orders": {Role.OWNER, Role.PHARMACY, Role.RECEPTION},
+    "invoices": {Role.OWNER, Role.RECEPTION, Role.REVIEWER},
+    "deliveries": {Role.OWNER, Role.PROCUREMENT, Role.PHARMACY, Role.REVIEWER},
+}
+
+
+@login_required
+def quick_search(request):
+    """Everything the signed-in person may reach, from one box.
+
+    Finding a patient used to mean opening Patients and searching there;
+    finding a batch meant knowing which stock filter hid it. This answers the
+    question directly, and only ever returns records the caller's role could
+    already open.
+    """
+    term = (request.GET.get("q") or "").strip()
+    role = user_role(request.user)
+    results = []
+    if len(term) < 2:
+        return JsonResponse({"query": term, "results": results})
+
+    def allowed(scope):
+        return role in SEARCH_SCOPES.get(scope, set())
+
+    if allowed("patients"):
+        for patient in Patient.objects.filter(
+            Q(first_name__icontains=term) | Q(last_name__icontains=term)
+            | Q(patient_number__icontains=term) | Q(phone__icontains=term)
+            | Q(id_number__icontains=term)
+        ).order_by("last_name")[:5]:
+            results.append({
+                "kind": "Patient", "icon": "users", "label": patient.full_name,
+                "detail": f"{patient.patient_number}" + (f" · {patient.phone}" if patient.phone else ""),
+                "url": reverse("patient_detail", args=[patient.pk]),
+            })
+
+    if allowed("encounters"):
+        for encounter in Encounter.objects.filter(
+            encounter_number__icontains=term
+        ).select_related("patient").order_by("-created_at")[:4]:
+            results.append({
+                "kind": "Visit", "icon": "list", "label": encounter.encounter_number,
+                "detail": f"{encounter.patient.full_name} · {encounter.get_status_display()}",
+                "url": reverse("patient_detail", args=[encounter.patient_id]),
+            })
+
+    if allowed("stock"):
+        for batch in StockBatch.objects.filter(
+            Q(batch_number__icontains=term) | Q(item__name__icontains=term) | Q(item__code__icontains=term)
+        ).select_related("item").order_by("item__name")[:5]:
+            results.append({
+                "kind": "Batch", "icon": "box", "label": f"{batch.item.name}",
+                "detail": f"Batch {batch.batch_number}" + (f" · expires {batch.expiry_date:%b %Y}" if batch.expiry_date else ""),
+                "url": f"{reverse('stock')}?{urlencode({'q': batch.batch_number})}",
+            })
+
+    if allowed("orders"):
+        for order in PharmacyOrder.objects.filter(
+            order_number__icontains=term
+        ).select_related("patient").order_by("-created_at")[:4]:
+            results.append({
+                "kind": "Pharmacy order", "icon": "pill", "label": order.order_number,
+                "detail": order.customer_name or (order.patient.full_name if order.patient_id else ""),
+                "url": reverse("pharmacy_order_detail", args=[order.pk]),
+            })
+
+    if allowed("deliveries"):
+        for receipt in GoodsReceipt.objects.filter(
+            Q(receipt_number__icontains=term) | Q(supplier_invoice_reference__icontains=term)
+        ).select_related("purchase_order__supplier").order_by("-delivered_at")[:4]:
+            results.append({
+                "kind": "Delivery", "icon": "truck", "label": receipt.receipt_number,
+                "detail": f"{receipt.purchase_order.supplier.name} · invoice {receipt.supplier_invoice_reference}",
+                "url": reverse("goods_receipt_detail", args=[receipt.pk]),
+            })
+
+    return JsonResponse({"query": term, "results": results[:16]})
 
 
 def health(request):
@@ -156,11 +274,19 @@ def dashboard(request):
         "open_encounters": Encounter.objects.exclude(status=Encounter.Status.CLOSED).count(),
         "today_patients": Patient.objects.filter(created_at__gte=start).count(),
         "open_orders": PharmacyOrder.objects.exclude(status__in=[PharmacyOrder.Status.DISPENSED, PharmacyOrder.Status.CANCELLED]).count(),
-        "low_stock": batches_with_balance().filter(on_hand__lte=F("item__reorder_level"))[:8],
         "exceptions": ExceptionRecord.objects.exclude(status=ExceptionRecord.Status.RESOLVED).order_by("-created_at")[:6],
         "queue": Encounter.objects.exclude(status=Encounter.Status.CLOSED).select_related("patient").order_by("created_at")[:8],
         "my_shift": CashShift.objects.filter(cashier=request.user, status=CashShift.Status.OPEN).first(),
     }
+    if role in {Role.PHARMACY, Role.PROCUREMENT, Role.OWNER}:
+        # The people who can act on a shortage are the only ones shown one.
+        position = stock_position()
+        context.update({
+            "stock": position,
+            "low_stock": position["below_reorder"][:6],
+            "expiring_stock": position["expiring_soon"][:6],
+            "unchecked_deliveries": GoodsReceipt.objects.filter(checked_by__isnull=True).count(),
+        })
     if role == Role.OWNER:
         valid_payments = Payment.objects.filter(status=Payment.Status.VALID, received_at__gte=start)
         posted = Invoice.objects.filter(posted_at__gte=start).exclude(status=Invoice.Status.DRAFT)
@@ -193,7 +319,7 @@ def patient_list(request):
     return render(request, "hospital/patient_list.html", {"patients": page, "page": page, "query": query})
 
 
-@role_required(Role.RECEPTION)
+@role_required(Role.OWNER, Role.RECEPTION)
 def patient_create(request):
     form = PatientForm(request.POST or None)
     duplicate_candidates = []
@@ -235,7 +361,7 @@ def patient_detail(request, pk):
     })
 
 
-@role_required(Role.CLINICIAN, Role.NURSE)
+@role_required(Role.OWNER, Role.CLINICIAN, Role.NURSE)
 def patient_attachment_upload(request, pk):
     if request.method != "POST":
         raise Http404
@@ -303,7 +429,7 @@ def credit_note_create(request, pk):
     return render(request, "hospital/credit_note_form.html", {"form": form, "invoice": invoice})
 
 
-@role_required(Role.RECEPTION, Role.CLINICIAN)
+@role_required(Role.OWNER, Role.RECEPTION, Role.CLINICIAN)
 def encounter_create(request, patient_id):
     patient = get_object_or_404(Patient, pk=patient_id)
     form = EncounterForm(request.POST or None)
@@ -332,7 +458,7 @@ TRIAGE_RANK = Case(
 )
 
 
-@role_required(Role.RECEPTION, Role.CLINICIAN, Role.NURSE, Role.LAB)
+@role_required(Role.OWNER, Role.RECEPTION, Role.CLINICIAN, Role.NURSE, Role.LAB)
 def queue(request):
     encounters = (
         Encounter.objects.exclude(status=Encounter.Status.CLOSED)
@@ -343,7 +469,7 @@ def queue(request):
     return render(request, "hospital/queue.html", {"encounters": encounters})
 
 
-@role_required(Role.CLINICIAN)
+@role_required(Role.OWNER, Role.CLINICIAN)
 def clinical_note(request, encounter_id):
     encounter = get_object_or_404(Encounter.objects.select_related("patient"), pk=encounter_id)
     draft = ClinicalNote.objects.filter(encounter=encounter, author=request.user, status=ClinicalNote.Status.DRAFT).first()
@@ -388,7 +514,7 @@ def clinical_note(request, encounter_id):
     return render(request, "hospital/clinical_note_form.html", {"form": form, "encounter": encounter, "draft": draft})
 
 
-@role_required(Role.CLINICIAN)
+@role_required(Role.OWNER, Role.CLINICIAN)
 def prescription_create(request, encounter_id):
     encounter = get_object_or_404(Encounter.objects.select_related("patient"), pk=encounter_id)
     # Accept the original single-line payload as well as the new formset so
@@ -418,7 +544,7 @@ def prescription_create(request, encounter_id):
     return render(request, "hospital/prescription_form.html", {"form": form, "formset": formset, "encounter": encounter})
 
 
-@role_required(Role.CLINICIAN)
+@role_required(Role.OWNER, Role.CLINICIAN)
 def service_order_create(request, encounter_id):
     encounter = get_object_or_404(Encounter.objects.select_related("patient"), pk=encounter_id)
     form = ServiceOrderForm(request.POST or None)
@@ -435,14 +561,14 @@ def service_order_create(request, encounter_id):
     return render(request, "hospital/service_order_form.html", {"form": form, "encounter": encounter})
 
 
-@role_required(Role.PHARMACY, Role.RECEPTION)
+@role_required(Role.OWNER, Role.PHARMACY, Role.RECEPTION)
 def pharmacy_orders(request):
     orders = PharmacyOrder.objects.select_related("patient", "invoice", "prepared_by").order_by("-created_at")[:100]
     pending_prescriptions = Prescription.objects.filter(status="active", pharmacyorder__isnull=True).select_related("encounter__patient", "prescriber").prefetch_related("items__product") if user_role(request.user) == Role.PHARMACY else []
     return render(request, "hospital/pharmacy_orders.html", {"orders": orders, "pending_prescriptions": pending_prescriptions})
 
 
-@role_required(Role.PHARMACY)
+@role_required(Role.OWNER, Role.PHARMACY)
 def pharmacy_prepare_prescription(request, prescription_id):
     if request.method != "POST":
         raise Http404
@@ -470,7 +596,7 @@ def pharmacy_prepare_prescription(request, prescription_id):
         return redirect("pharmacy_orders")
 
 
-@role_required(Role.PHARMACY)
+@role_required(Role.OWNER, Role.PHARMACY)
 def pharmacy_order_create(request):
     form = PharmacyBasketForm(request.POST or None)
     if request.method == "POST" and form.is_valid():
@@ -495,13 +621,13 @@ def pharmacy_order_create(request):
     return render(request, "hospital/pharmacy_order_form.html", {"form": form})
 
 
-@role_required(Role.PHARMACY, Role.RECEPTION)
+@role_required(Role.OWNER, Role.PHARMACY, Role.RECEPTION)
 def pharmacy_order_detail(request, pk):
     order = get_object_or_404(PharmacyOrder.objects.select_related("patient", "invoice", "prepared_by", "dispensed_by"), pk=pk)
     return render(request, "hospital/pharmacy_order_detail.html", {"order": order})
 
 
-@role_required(Role.RECEPTION)
+@role_required(Role.OWNER, Role.RECEPTION)
 def invoice_payment(request, pk):
     invoice = get_object_or_404(Invoice, pk=pk)
     form = PaymentForm(request.POST or None, initial={"amount": invoice.balance})
@@ -531,7 +657,7 @@ def receipt(request, pk):
     return render(request, "hospital/receipt.html", {"payment": payment, "duplicate": request.GET.get("reprint") == "1"})
 
 
-@role_required(Role.PHARMACY)
+@role_required(Role.OWNER, Role.PHARMACY)
 def pharmacy_dispense(request, pk):
     if request.method != "POST":
         raise Http404
@@ -543,7 +669,7 @@ def pharmacy_dispense(request, pk):
     return redirect("pharmacy_order_detail", pk=pk)
 
 
-@role_required(Role.RECEPTION)
+@role_required(Role.OWNER, Role.RECEPTION)
 def shift_manage(request):
     shift = CashShift.objects.filter(cashier=request.user, status=CashShift.Status.OPEN).first()
     form = ShiftCloseForm(request.POST or None, instance=shift) if shift else ShiftOpenForm(request.POST or None)
@@ -567,13 +693,325 @@ def shift_manage(request):
     return render(request, "hospital/shift_form.html", {"form": form, "shift": shift})
 
 
-@role_required(Role.PHARMACY, Role.PROCUREMENT, Role.OWNER)
+STOCK_VIEWS = {
+    "all": "All stock",
+    "low": "At or below reorder level",
+    "expiring": "Expiring soon",
+    "expired": "Expired",
+    "quarantine": "Quarantined",
+}
+
+
+@role_required(Role.PHARMACY, Role.PROCUREMENT, Role.OWNER, Role.REVIEWER)
 def stock_view(request):
-    batches = batches_with_balance().order_by("item__name", "expiry_date")
-    # entered_by.staff_profile is read per row in the template; without it that
-    # is one extra query per movement.
-    movements = StockMovement.objects.select_related("batch__item", "entered_by__staff_profile")[:50]
-    return render(request, "hospital/stock.html", {"batches": batches, "movements": movements})
+    """Stock position, valuation and the movements that produced them."""
+    query = request.GET.get("q", "").strip()
+    selected = request.GET.get("view", "all")
+    if selected not in STOCK_VIEWS:
+        selected = "all"
+    days = _period_days(request.GET.get("days", "7"))
+
+    position = stock_position()
+    activity = stock_activity(days)
+
+    products = position["products"]
+    if selected == "low":
+        products = [row for row in products if row["below_reorder"]]
+    elif selected == "expiring":
+        products = [row for row in products if row["has_near_expiry"]]
+    elif selected == "expired":
+        products = [row for row in products if row["has_expired"]]
+    elif selected == "quarantine":
+        quarantined_items = {row["item"].pk for row in position["quarantined"]}
+        products = [row for row in products if row["item"].pk in quarantined_items]
+    if query:
+        needle = query.lower()
+        products = [
+            row for row in products
+            if needle in row["item"].name.lower() or needle in row["item"].code.lower()
+        ]
+
+    batches_by_item = {}
+    for row in position["rows"]:
+        batches_by_item.setdefault(row["item"].pk, []).append(row)
+    for row in products:
+        row["batches"] = batches_by_item.get(row["item"].pk, [])
+
+    movements = StockMovement.objects.select_related(
+        "batch__item", "entered_by__staff_profile"
+    ).order_by("-event_at", "-entered_at")
+    if query:
+        movements = movements.filter(
+            Q(batch__item__name__icontains=query)
+            | Q(batch__item__code__icontains=query)
+            | Q(batch__batch_number__icontains=query)
+        )
+    page = Paginator(movements, 40).get_page(request.GET.get("page"))
+
+    return render(request, "hospital/stock.html", {
+        "position": position,
+        "activity": activity,
+        "products": products,
+        "movements": page,
+        "page": page,
+        "filter_query": _filter_query(q=query, view=selected, days=days),
+        "query": query,
+        "selected_view": selected,
+        "selected_view_label": STOCK_VIEWS[selected],
+        "stock_views": STOCK_VIEWS,
+        "days": days,
+        "can_receive": user_role(request.user) in {Role.PROCUREMENT, Role.PHARMACY},
+        "can_count": user_role(request.user) in {Role.PHARMACY, Role.PROCUREMENT},
+    })
+
+
+@role_required(Role.PROCUREMENT, Role.PHARMACY, Role.REVIEWER, Role.OWNER)
+def deliveries(request):
+    """Every delivery received, with its invoice evidence and check status."""
+    receipts = GoodsReceipt.objects.select_related(
+        "purchase_order__supplier", "received_by__staff_profile", "checked_by__staff_profile"
+    ).prefetch_related("lines__order_line__item")
+    awaiting = receipts.filter(checked_by__isnull=True)[:20]
+    open_orders = PurchaseOrder.objects.filter(
+        status__in=["approved", "part_received"]
+    ).select_related("supplier").prefetch_related("lines__item").order_by("-created_at")
+    return render(request, "hospital/deliveries.html", {
+        "receipts": receipts[:50],
+        "awaiting_check": awaiting,
+        "open_orders": open_orders,
+        "summary": receiving_summary(30),
+        "can_receive": user_role(request.user) in {Role.PROCUREMENT, Role.PHARMACY},
+    })
+
+
+@role_required(Role.OWNER, Role.PROCUREMENT, Role.PHARMACY)
+def goods_receipt_create(request, pk):
+    """Record what physically arrived and photograph the invoice that came with it."""
+    order = get_object_or_404(
+        PurchaseOrder.objects.select_related("supplier").prefetch_related("lines__item"), pk=pk
+    )
+    if order.status not in {"approved", "part_received"}:
+        messages.error(request, "Only an independently approved order can receive stock.")
+        return redirect("deliveries")
+
+    form = GoodsReceiptForm(request.POST or None, request.FILES or None)
+    lines = GoodsReceiptLineFormSet(request.POST or None, prefix="lines", order=order)
+    if request.method == "POST" and form.is_valid() and lines.is_valid():
+        payload = [
+            {
+                "order_line": row.cleaned_data["order_line"],
+                "quantity_received": row.cleaned_data["quantity_received"],
+                "batch_number": row.cleaned_data["batch_number"],
+                "expiry_date": row.cleaned_data.get("expiry_date"),
+                "actual_unit_cost": row.cleaned_data["actual_unit_cost"],
+            }
+            for row in lines
+            if row.cleaned_data and not row.cleaned_data.get("DELETE")
+        ]
+        delivered_on = form.cleaned_data["delivered_on"]
+        try:
+            receipt = receive_delivery(
+                actor=request.user,
+                purchase_order_id=order.pk,
+                supplier_invoice_reference=form.cleaned_data["supplier_invoice_reference"],
+                invoice_amount=form.cleaned_data["invoice_amount"],
+                invoice_date=form.cleaned_data.get("invoice_date"),
+                invoice_photo=form.cleaned_data["invoice_photo"],
+                lines=payload,
+                delivered_at=timezone.make_aware(
+                    timezone.datetime.combine(delivered_on, timezone.localtime().time())
+                ),
+                request=request,
+            )
+        except ValidationError as exc:
+            messages.error(request, _validation_message(exc))
+        else:
+            messages.success(
+                request,
+                f"{receipt.receipt_number} posted. Stock increased against invoice {receipt.supplier_invoice_reference}; a different member of staff must now check the delivery.",
+            )
+            return redirect("goods_receipt_detail", pk=receipt.pk)
+
+    received_so_far = {
+        line.pk: line.receipt_lines.aggregate(total=Sum("quantity_received"))["total"] or Decimal("0.000")
+        for line in order.lines.all()
+    }
+    return render(request, "hospital/goods_receipt_form.html", {
+        "form": form,
+        "formset": lines,
+        "order": order,
+        "received_so_far": [
+            (line, received_so_far.get(line.pk, Decimal("0.000")), Decimal(str(line.quantity_base_units)) - received_so_far.get(line.pk, Decimal("0.000")))
+            for line in order.lines.all()
+        ],
+    })
+
+
+@role_required(Role.PROCUREMENT, Role.PHARMACY, Role.REVIEWER, Role.OWNER)
+def goods_receipt_detail(request, pk):
+    receipt = get_object_or_404(
+        GoodsReceipt.objects.select_related(
+            "purchase_order__supplier", "received_by__staff_profile", "checked_by__staff_profile"
+        ).prefetch_related("lines__order_line__item", "lines__batch"),
+        pk=pk,
+    )
+    movements = StockMovement.objects.filter(
+        reference_type="GoodsReceipt", reference_id=str(receipt.pk)
+    ).select_related("batch__item")
+    evidence_name = receipt.invoice_photo_name or (receipt.invoice_photo.name if receipt.invoice_photo else "")
+    return render(request, "hospital/goods_receipt_detail.html", {
+        "receipt": receipt,
+        "movements": movements,
+        "check_form": DeliveryCheckForm(),
+        # A PDF scan cannot be shown inline, so the checker is offered the file.
+        "is_pdf_evidence": evidence_name.lower().endswith(".pdf"),
+        "can_check": (
+            receipt.checked_by_id is None
+            and receipt.received_by_id != request.user.id
+            and user_role(request.user) in {Role.PROCUREMENT, Role.PHARMACY, Role.REVIEWER, Role.OWNER}
+        ),
+    })
+
+
+@role_required(Role.PROCUREMENT, Role.PHARMACY, Role.REVIEWER, Role.OWNER)
+def goods_receipt_invoice(request, pk):
+    """Serve the stored invoice photograph to authorised staff only."""
+    receipt = get_object_or_404(GoodsReceipt, pk=pk)
+    if not receipt.invoice_photo:
+        raise Http404
+    name = receipt.invoice_photo_name or Path(receipt.invoice_photo.name).name
+    content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
+    receipt.invoice_photo.open("rb")
+    response = FileResponse(receipt.invoice_photo, content_type=content_type)
+    response["Content-Disposition"] = content_disposition_header(False, name)
+    response["X-Content-Type-Options"] = "nosniff"
+    audit(request.user, "goods_receipt.invoice_viewed", receipt, request=request)
+    return response
+
+
+@role_required(Role.PROCUREMENT, Role.PHARMACY, Role.REVIEWER, Role.OWNER)
+def goods_receipt_check(request, pk):
+    if request.method != "POST":
+        raise Http404
+    form = DeliveryCheckForm(request.POST)
+    if not form.is_valid():
+        messages.error(request, "Check notes could not be recorded.")
+        return redirect("goods_receipt_detail", pk=pk)
+    try:
+        receipt = check_delivery(
+            actor=request.user,
+            receipt_id=pk,
+            discrepancy_notes=form.cleaned_data["discrepancy_notes"],
+            request=request,
+        )
+        messages.success(request, f"{receipt.receipt_number} independently checked.")
+    except ValidationError as exc:
+        messages.error(request, _validation_message(exc))
+    return redirect("goods_receipt_detail", pk=pk)
+
+
+@role_required(Role.PHARMACY, Role.PROCUREMENT, Role.REVIEWER, Role.OWNER)
+def stock_counts(request):
+    counts = StockCount.objects.select_related(
+        "counted_by__staff_profile", "reviewed_by__staff_profile"
+    ).prefetch_related("lines__batch__item")
+    return render(request, "hospital/stock_counts.html", {
+        "counts": counts[:40],
+        "open_form": StockCountOpenForm(),
+        "can_open": user_role(request.user) in {Role.PHARMACY, Role.PROCUREMENT},
+        "can_review": user_role(request.user) in {Role.REVIEWER, Role.OWNER},
+    })
+
+
+@role_required(Role.OWNER, Role.PHARMACY, Role.PROCUREMENT)
+def stock_count_open(request):
+    if request.method != "POST":
+        raise Http404
+    form = StockCountOpenForm(request.POST)
+    if not form.is_valid():
+        messages.error(request, "Enter a counting location before freezing a sheet.")
+        return redirect("stock_counts")
+    try:
+        count = open_stock_count(
+            actor=request.user,
+            location=form.cleaned_data["location"],
+            blind_count=form.cleaned_data["blind_count"],
+            notes=form.cleaned_data["notes"],
+            request=request,
+        )
+    except ValidationError as exc:
+        messages.error(request, _validation_message(exc))
+        return redirect("stock_counts")
+    messages.success(request, f"{count.reference} frozen at {timezone.localtime(count.cutoff_at):%H:%M}. Count the shelf and enter what you find.")
+    return redirect("stock_count_detail", pk=count.pk)
+
+
+@role_required(Role.PHARMACY, Role.PROCUREMENT, Role.REVIEWER, Role.OWNER)
+def stock_count_detail(request, pk):
+    count = get_object_or_404(
+        StockCount.objects.select_related("counted_by__staff_profile", "reviewed_by__staff_profile"), pk=pk
+    )
+    lines = count.lines.select_related("batch__item").order_by("batch__item__name", "batch__expiry_date")
+    if request.method == "POST":
+        counted = {}
+        reasons = {}
+        for line in lines:
+            raw = request.POST.get(f"counted-{line.pk}", "").strip()
+            if raw == "":
+                messages.error(request, "Enter a counted quantity for every line, including the ones that are zero.")
+                break
+            try:
+                counted[line.pk] = Decimal(raw)
+            except (ArithmeticError, ValueError):
+                messages.error(request, f"{line.batch.item.name} batch {line.batch.batch_number}: enter a number.")
+                break
+            reasons[line.pk] = request.POST.get(f"reason-{line.pk}", "").strip()
+        else:
+            try:
+                submit_stock_count(actor=request.user, count_id=count.pk, counted=counted, reasons=reasons, request=request)
+            except ValidationError as exc:
+                messages.error(request, _validation_message(exc))
+            else:
+                messages.success(request, f"{count.reference} submitted. A delegated reviewer must approve before any adjustment is posted.")
+                return redirect("stock_count_detail", pk=count.pk)
+
+    role = user_role(request.user)
+    return render(request, "hospital/stock_count_detail.html", {
+        "count": count,
+        "lines": lines,
+        "review_form": StockCountReviewForm(),
+        "can_enter": count.status == StockCount.Status.FROZEN and count.counted_by_id == request.user.id,
+        "can_review": (
+            count.status == StockCount.Status.SUBMITTED
+            and role in {Role.REVIEWER, Role.OWNER}
+            and count.counted_by_id != request.user.id
+        ),
+        "show_expected": not count.blind_count or count.status != StockCount.Status.FROZEN,
+    })
+
+
+@role_required(Role.REVIEWER, Role.OWNER)
+def stock_count_review(request, pk):
+    if request.method != "POST":
+        raise Http404
+    form = StockCountReviewForm(request.POST)
+    notes = form.cleaned_data["review_notes"] if form.is_valid() else ""
+    try:
+        count = review_stock_count(
+            actor=request.user,
+            count_id=pk,
+            approve=request.POST.get("decision") == "approve",
+            review_notes=notes,
+            request=request,
+        )
+    except ValidationError as exc:
+        messages.error(request, _validation_message(exc))
+    else:
+        if count.status == StockCount.Status.APPROVED:
+            messages.success(request, f"{count.reference} approved. Adjustment movements posted for every variance.")
+        else:
+            messages.success(request, f"{count.reference} rejected. No stock balance was changed.")
+    return redirect("stock_count_detail", pk=pk)
 
 
 @role_required(Role.OWNER, Role.REVIEWER)
@@ -593,8 +1031,7 @@ def reports(request):
 
 
 def _report_context(days_value):
-    days = int(days_value) if str(days_value).isdigit() else 7
-    days = max(1, min(days, 365))
+    days = _period_days(days_value)
     start = timezone.now() - timedelta(days=days)
     invoices = Invoice.objects.filter(posted_at__gte=start).exclude(status=Invoice.Status.DRAFT)
     payments = Payment.objects.filter(received_at__gte=start, status=Payment.Status.VALID)
@@ -606,6 +1043,9 @@ def _report_context(days_value):
         "receivables": outstanding_receivables(),
         "department_activity": Encounter.objects.filter(created_at__gte=start).values("department").annotate(total=Count("id")).order_by("-total"),
         "recent_invoices": invoices.select_related("patient").order_by("-posted_at")[:25],
+        "stock": stock_position(),
+        "stock_activity": stock_activity(days),
+        "receiving": receiving_summary(days),
         "last_refresh": timezone.now(),
     }
 
@@ -691,6 +1131,7 @@ def audit_review(request):
     return render(request, "hospital/audit_review.html", {
         "records": page,
         "page": page,
+        "filter_query": _filter_query(q=query, action=action, role=role),
         "query": query,
         "action_filter": action,
         "role_filter": role,
@@ -698,13 +1139,13 @@ def audit_review(request):
     })
 
 
-@role_required(Role.CLINICIAN, Role.NURSE, Role.LAB)
+@role_required(Role.OWNER, Role.CLINICIAN, Role.NURSE, Role.LAB)
 def departments(request):
     work = ServiceOrder.objects.select_related("encounter__patient", "service", "requested_by").order_by("status", "created_at")
     return render(request, "hospital/departments.html", {"work": work})
 
 
-@role_required(Role.LAB, Role.CLINICIAN)
+@role_required(Role.OWNER, Role.LAB, Role.CLINICIAN)
 def service_order_update(request, pk):
     order = get_object_or_404(ServiceOrder.objects.select_related("encounter__patient", "service"), pk=pk)
     form = ServiceResultForm(request.POST or None, instance=order)
@@ -729,7 +1170,7 @@ def wards(request):
     return render(request, "hospital/wards.html", {"wards": wards_qs, "admissions": Admission.objects.filter(discharged_at__isnull=True).select_related("patient", "bed__ward")})
 
 
-@role_required(Role.CLINICIAN)
+@role_required(Role.OWNER, Role.CLINICIAN)
 def admission_create(request, encounter_id):
     encounter = get_object_or_404(Encounter.objects.select_related("patient"), pk=encounter_id)
     form = AdmissionForm(request.POST or None)
@@ -753,7 +1194,7 @@ def eye_clinic(request):
     return render(request, "hospital/eye.html", {"waiting": waiting, "sessions": sessions, "payables": payables})
 
 
-@role_required(Role.EYE, Role.CLINICIAN)
+@role_required(Role.OWNER, Role.EYE, Role.CLINICIAN)
 def eye_case_complete(request, pk):
     if request.method != "POST":
         raise Http404
@@ -778,11 +1219,15 @@ def settings_view(request):
 
 @role_required(Role.PROCUREMENT, Role.REVIEWER, Role.OWNER)
 def purchasing(request):
-    orders = PurchaseOrder.objects.select_related("supplier", "requested_by", "approved_by").prefetch_related("lines").order_by("-created_at")
+    # The template prints both staff profiles per row; without them on the
+    # select_related chain that is two extra queries for every purchase order.
+    orders = PurchaseOrder.objects.select_related(
+        "supplier", "requested_by__staff_profile", "approved_by__staff_profile"
+    ).prefetch_related("lines__item", "receipts").order_by("-created_at")
     return render(request, "hospital/purchasing.html", {"orders": orders})
 
 
-@role_required(Role.PROCUREMENT)
+@role_required(Role.OWNER, Role.PROCUREMENT)
 def purchase_order_create(request):
     form = PurchaseOrderForm(request.POST or None)
     lines = PurchaseOrderLineFormSet(request.POST or None, prefix="lines")
@@ -1143,8 +1588,303 @@ class ThrottledLoginView(LoginView):
 
     def post(self, request, *args, **kwargs):
         username = (request.POST.get("username") or "").strip()
-        if LoginAttempt.is_locked(username):
+        if LoginAttempt.is_locked(username, request.META.get("REMOTE_ADDR")):
             context = self.get_context_data(form=self.get_form())
             context["lockout_minutes"] = LoginAttempt.LOCKOUT_WINDOW_MINUTES
             return self.render_to_response(context, status=429)
         return super().post(request, *args, **kwargs)
+
+
+@role_required(Role.PHARMACY, Role.NURSE, Role.CLINICIAN, Role.PROCUREMENT, Role.OWNER, Role.REVIEWER)
+def custody(request):
+    """Stock that left the pharmacy and has not yet been accounted for."""
+    position = departmental_custody()
+    issues = DepartmentIssue.objects.select_related("patient", "issued_by__staff_profile").prefetch_related(
+        "lines__batch__item"
+    )
+    role = user_role(request.user)
+    return render(request, "hospital/custody.html", {
+        "position": position,
+        "outstanding": issues.filter(status=DepartmentIssue.Status.OUTSTANDING)[:40],
+        "settled": issues.filter(status=DepartmentIssue.Status.SETTLED)[:15],
+        "can_issue": role == Role.PHARMACY,
+        "can_account": role in {Role.NURSE, Role.CLINICIAN, Role.PHARMACY},
+    })
+
+
+@role_required(Role.OWNER, Role.PHARMACY)
+def custody_issue(request):
+    form = DepartmentIssueForm(request.POST or None)
+    lines = DepartmentIssueLineFormSet(request.POST or None, prefix="lines")
+    if request.method == "POST" and form.is_valid() and lines.is_valid():
+        patient = None
+        number = form.cleaned_data.get("patient_number", "").strip()
+        if number:
+            patient = Patient.objects.filter(patient_number__iexact=number).first()
+            if not patient:
+                form.add_error("patient_number", "No patient carries that number.")
+        if not form.errors:
+            payload = [
+                {"batch": row.cleaned_data["batch"], "quantity": row.cleaned_data["quantity"]}
+                for row in lines
+                if row.cleaned_data and not row.cleaned_data.get("DELETE")
+            ]
+            try:
+                issue = issue_to_department(
+                    actor=request.user,
+                    department=form.cleaned_data["department"],
+                    received_by_name=form.cleaned_data["received_by_name"],
+                    kind=form.cleaned_data["kind"],
+                    patient=patient,
+                    notes=form.cleaned_data["notes"],
+                    lines=payload,
+                    request=request,
+                )
+            except ValidationError as exc:
+                messages.error(request, _validation_message(exc))
+            else:
+                messages.success(
+                    request,
+                    f"{issue.reference} issued to {issue.department}. It stays outstanding until {issue.received_by_name} accounts for it.",
+                )
+                return redirect("custody")
+    return render(request, "hospital/custody_issue_form.html", {"form": form, "formset": lines})
+
+
+@role_required(Role.OWNER, Role.NURSE, Role.CLINICIAN, Role.PHARMACY)
+def custody_account(request, pk):
+    issue = get_object_or_404(
+        DepartmentIssue.objects.select_related("patient").prefetch_related("lines__batch__item"), pk=pk
+    )
+    if request.method == "POST":
+        outcomes = {}
+        for line in issue.lines.all():
+            def amount(prefix):
+                raw = request.POST.get(f"{prefix}-{line.pk}", "").strip()
+                return Decimal(raw) if raw else Decimal("0")
+            try:
+                outcomes[line.pk] = {
+                    "consumed": amount("consumed"),
+                    "returned": amount("returned"),
+                    "wasted": amount("wasted"),
+                }
+            except (ArithmeticError, ValueError):
+                messages.error(request, f"{line.batch.item.name}: enter numbers only.")
+                outcomes = None
+                break
+        if outcomes is not None:
+            try:
+                issue = account_for_issue(actor=request.user, issue_id=issue.pk, outcomes=outcomes, request=request)
+            except ValidationError as exc:
+                messages.error(request, _validation_message(exc))
+            else:
+                if issue.status == DepartmentIssue.Status.SETTLED:
+                    messages.success(request, f"{issue.reference} is fully accounted for.")
+                else:
+                    messages.success(
+                        request,
+                        f"{issue.reference} updated. {issue.outstanding_quantity} units remain in departmental custody.",
+                    )
+                return redirect("custody")
+    return render(request, "hospital/custody_account_form.html", {"issue": issue})
+
+
+@role_required(Role.PHARMACY, Role.PROCUREMENT, Role.REVIEWER, Role.OWNER)
+def write_offs(request):
+    records = StockWriteOff.objects.select_related(
+        "batch__item", "requested_by__staff_profile", "reviewed_by__staff_profile"
+    )
+    role = user_role(request.user)
+    return render(request, "hospital/write_offs.html", {
+        "pending": records.filter(status=StockWriteOff.Status.PENDING),
+        "decided": records.exclude(status=StockWriteOff.Status.PENDING)[:25],
+        "form": WriteOffRequestForm() if role in {Role.PHARMACY, Role.PROCUREMENT} else None,
+        "review_form": WriteOffReviewForm(),
+        "can_request": role in {Role.PHARMACY, Role.PROCUREMENT},
+        "can_review": role in {Role.REVIEWER, Role.OWNER},
+        "expired": stock_position()["expired"],
+    })
+
+
+@role_required(Role.OWNER, Role.PHARMACY, Role.PROCUREMENT)
+def write_off_request(request):
+    if request.method != "POST":
+        raise Http404
+    form = WriteOffRequestForm(request.POST)
+    if not form.is_valid():
+        messages.error(request, " ".join(error for errors in form.errors.values() for error in errors))
+        return redirect("write_offs")
+    try:
+        write_off = request_write_off(
+            actor=request.user,
+            batch_id=form.cleaned_data["batch"].pk,
+            quantity=form.cleaned_data["quantity"],
+            reason=form.cleaned_data["reason"],
+            narrative=form.cleaned_data["narrative"],
+            request=request,
+        )
+        messages.success(
+            request,
+            f"{write_off.reference} proposed for KES {write_off.value_at_cost:,.2f}. Stock stays on the balance until a reviewer approves it.",
+        )
+    except ValidationError as exc:
+        messages.error(request, _validation_message(exc))
+    return redirect("write_offs")
+
+
+@role_required(Role.REVIEWER, Role.OWNER)
+def write_off_review(request, pk):
+    if request.method != "POST":
+        raise Http404
+    form = WriteOffReviewForm(request.POST)
+    notes = form.cleaned_data["review_notes"] if form.is_valid() else ""
+    try:
+        write_off = review_write_off(
+            actor=request.user,
+            write_off_id=pk,
+            approve=request.POST.get("decision") == "approve",
+            review_notes=notes,
+            request=request,
+        )
+    except ValidationError as exc:
+        messages.error(request, _validation_message(exc))
+    else:
+        if write_off.status == StockWriteOff.Status.APPROVED:
+            messages.success(request, f"{write_off.reference} approved; KES {write_off.value_at_cost:,.2f} removed from stock.")
+        else:
+            messages.success(request, f"{write_off.reference} rejected. No balance changed.")
+    return redirect("write_offs")
+
+
+@role_required(Role.REVIEWER, Role.OWNER)
+def batch_disposition(request, pk):
+    if request.method != "POST":
+        raise Http404
+    form = BatchDispositionForm(request.POST)
+    if not form.is_valid():
+        messages.error(request, "Record a disposition and the reason for it.")
+        return redirect("stock")
+    try:
+        batch = set_batch_disposition(
+            actor=request.user, batch_id=pk,
+            status=form.cleaned_data["status"], reason=form.cleaned_data["reason"], request=request,
+        )
+        messages.success(request, f"{batch.item.name} batch {batch.batch_number} is now {batch.get_status_display().lower()}.")
+    except ValidationError as exc:
+        messages.error(request, _validation_message(exc))
+    return redirect("stock")
+
+
+@role_required(Role.OWNER, Role.REVIEWER, Role.PROCUREMENT)
+def stock_intelligence(request):
+    """Shrinkage, supplier price drift and whether the controls are being used.
+
+    Three questions the ledger can answer but no screen was asking: how much is
+    going missing, whether suppliers are walking their prices up, and whether
+    the controls are followed or quietly skipped.
+    """
+    days = _period_days(request.GET.get("days", "90"), default=90)
+    return render(request, "hospital/stock_intelligence.html", {
+        "days": days,
+        "shrinkage": shrinkage(days),
+        "prices": supplier_price_history(days),
+        "adoption": control_adoption(min(days, 90)),
+        "custody": departmental_custody(),
+    })
+
+
+def owner_brief_context(days=7):
+    """What needs the owner's attention, assembled in one place.
+
+    The specification forbids automatic external messaging, so this is a
+    standing in-app brief rather than a notification. Every line links to the
+    records behind it.
+    """
+    position = stock_position()
+    adoption = control_adoption(30)
+    custody = departmental_custody()
+    loss = shrinkage(90)
+
+    items = []
+    if position["expired_count"]:
+        items.append({
+            "severity": "urgent",
+            "headline": f"{position['expired_count']} expired batch{'es' if position['expired_count'] != 1 else ''} still on the shelf",
+            "detail": f"KES {position['expired_value']:,.2f} at cost. Expired stock cannot be sold and stays in the ledger until it is written off.",
+            "url": reverse("write_offs"),
+            "action": "Write it off",
+        })
+    if adoption["write_offs_pending"]:
+        items.append({
+            "severity": "warning",
+            "headline": f"{adoption['write_offs_pending']} write-off{'s' if adoption['write_offs_pending'] != 1 else ''} awaiting your approval",
+            "detail": "Stock stays on the balance until somebody with authority removes it.",
+            "url": reverse("write_offs"),
+            "action": "Review",
+        })
+    unchecked = receiving_summary(30)["unchecked_count"]
+    if unchecked:
+        items.append({
+            "severity": "warning",
+            "headline": f"{unchecked} deliver{'ies' if unchecked != 1 else 'y'} never independently checked",
+            "detail": "A delivery confirmed only by the person who received it has had no second pair of eyes.",
+            "url": reverse("deliveries"),
+            "action": "Open deliveries",
+        })
+    if custody["stale_count"]:
+        items.append({
+            "severity": "warning",
+            "headline": f"{custody['stale_count']} ward issue{'s' if custody['stale_count'] != 1 else ''} unaccounted for over a week",
+            "detail": f"KES {custody['stale_value']:,.2f} of stock left the pharmacy and nobody has said what happened to it.",
+            "url": reverse("custody"),
+            "action": "Chase it",
+        })
+    if position["below_reorder_count"]:
+        items.append({
+            "severity": "info",
+            "headline": f"{position['below_reorder_count']} product{'s' if position['below_reorder_count'] != 1 else ''} at or below reorder level",
+            "detail": "Running out stops sales as surely as losing stock does.",
+            "url": f"{reverse('stock')}?view=low",
+            "action": "See what to order",
+        })
+    if position["expiring_soon_count"]:
+        items.append({
+            "severity": "info",
+            "headline": f"{position['expiring_soon_count']} batch{'es' if position['expiring_soon_count'] != 1 else ''} expiring within {position['expiry_window_days']} days",
+            "detail": "Use or review these first.",
+            "url": f"{reverse('stock')}?view=expiring",
+            "action": "See them",
+        })
+    if loss["measured"] and loss["loss_value"] > 0:
+        percent = f" — {loss['as_percent_of_cogs']}% of cost of goods" if loss["as_percent_of_cogs"] is not None else ""
+        items.append({
+            "severity": "urgent",
+            "headline": f"KES {loss['loss_value']:,.2f} of unexplained stock loss in 90 days{percent}",
+            "detail": "Counted short against the ledger, with no write-off explaining it.",
+            "url": reverse("stock_intelligence"),
+            "action": "Investigate",
+        })
+    if not adoption["counts_approved"]:
+        items.append({
+            "severity": "warning",
+            "headline": "No stock count has been approved in the last 30 days",
+            "detail": "Without a count, stock loss cannot be measured at all — only guessed at.",
+            "url": reverse("stock_counts"),
+            "action": "Start a count",
+        })
+
+    order = {"urgent": 0, "warning": 1, "info": 2}
+    items.sort(key=lambda item: order[item["severity"]])
+    return {
+        "brief_items": items,
+        "brief_urgent": sum(1 for item in items if item["severity"] == "urgent"),
+        "brief_adoption": adoption,
+        "brief_generated_at": timezone.now(),
+    }
+
+
+@role_required(Role.OWNER, Role.REVIEWER)
+def owner_brief(request):
+    context = owner_brief_context()
+    context.update({"shrinkage": shrinkage(90), "custody": departmental_custody()})
+    return render(request, "hospital/owner_brief.html", context)

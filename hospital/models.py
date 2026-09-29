@@ -5,7 +5,7 @@ from decimal import Decimal
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator
-from django.db import models
+from django.db import IntegrityError, models, transaction
 from django.db.models import Q, Sum
 from django.utils import timezone
 
@@ -19,6 +19,59 @@ class TimeStampedModel(models.Model):
 
     class Meta:
         abstract = True
+
+
+class ReferenceNumberMixin(models.Model):
+    """Generate the human-readable reference on first save, retrying on collision.
+
+    Every reference here is a date prefix plus random hex, so two rows created
+    on the same day can collide. Without a retry that collision surfaces as an
+    IntegrityError that aborts whatever transaction the caller was inside — a
+    lost payment or a lost registration, not a cosmetic problem. Ten hex
+    characters make a collision vanishingly unlikely; the retry makes it
+    harmless when it happens anyway.
+    """
+
+    REFERENCE_FIELD = ""
+    REFERENCE_PREFIX = ""
+    REFERENCE_ENTROPY = 10
+    REFERENCE_ATTEMPTS = 6
+
+    class Meta:
+        abstract = True
+
+    def build_reference(self):
+        return (
+            f"{self.REFERENCE_PREFIX}-{timezone.localdate():%Y%m%d}-"
+            f"{uuid.uuid4().hex[:self.REFERENCE_ENTROPY].upper()}"
+        )
+
+    def _reference_taken(self, value):
+        taken = type(self)._base_manager.filter(**{self.REFERENCE_FIELD: value})
+        if self.pk is not None:
+            taken = taken.exclude(pk=self.pk)
+        return taken.exists()
+
+    def save(self, *args, **kwargs):
+        field = self.REFERENCE_FIELD
+        if not field or getattr(self, field, ""):
+            return super().save(*args, **kwargs)
+        for attempt in range(self.REFERENCE_ATTEMPTS):
+            setattr(self, field, self.build_reference())
+            try:
+                # A savepoint keeps the caller's transaction usable when a
+                # colliding insert is rejected, so the retry can proceed.
+                with transaction.atomic():
+                    return super().save(*args, **kwargs)
+            except IntegrityError:
+                # Only a clash on the reference we generated is ours to retry.
+                # Any other constraint the caller violated must surface intact.
+                if not self._reference_taken(getattr(self, field)):
+                    raise
+                if attempt == self.REFERENCE_ATTEMPTS - 1:
+                    raise
+                setattr(self, field, "")
+        raise IntegrityError(f"Could not allocate a unique {field} after {self.REFERENCE_ATTEMPTS} attempts.")
 
 
 class Role(models.TextChoices):
@@ -57,7 +110,10 @@ class Setting(TimeStampedModel):
         return self.key
 
 
-class Patient(TimeStampedModel):
+class Patient(ReferenceNumberMixin, TimeStampedModel):
+    REFERENCE_FIELD = "patient_number"
+    REFERENCE_ENTROPY = 9
+
     class Sex(models.TextChoices):
         FEMALE = "F", "Female"
         MALE = "M", "Male"
@@ -88,11 +144,9 @@ class Patient(TimeStampedModel):
             models.Index(fields=["id_number"]),
         ]
 
-    def save(self, *args, **kwargs):
-        if not self.patient_number:
-            # UUID-derived human identifier avoids unsafe MAX()+1 races.
-            self.patient_number = f"KFB-{timezone.localdate():%y}-{uuid.uuid4().hex[:7].upper()}"
-        super().save(*args, **kwargs)
+    def build_reference(self):
+        # UUID-derived human identifier avoids unsafe MAX()+1 races.
+        return f"KFB-{timezone.localdate():%y}-{uuid.uuid4().hex[:self.REFERENCE_ENTROPY].upper()}"
 
     @property
     def full_name(self):
@@ -102,7 +156,10 @@ class Patient(TimeStampedModel):
         return f"{self.patient_number} · {self.full_name}"
 
 
-class Encounter(TimeStampedModel):
+class Encounter(ReferenceNumberMixin, TimeStampedModel):
+    REFERENCE_FIELD = "encounter_number"
+    REFERENCE_PREFIX = "ENC"
+
     class Status(models.TextChoices):
         REGISTERED = "registered", "Registered"
         TRIAGE = "triage", "Waiting for triage"
@@ -124,11 +181,6 @@ class Encounter(TimeStampedModel):
 
     class Meta:
         ordering = ["-created_at"]
-
-    def save(self, *args, **kwargs):
-        if not self.encounter_number:
-            self.encounter_number = f"ENC-{timezone.localdate():%Y%m%d}-{uuid.uuid4().hex[:6].upper()}"
-        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.encounter_number
@@ -213,6 +265,7 @@ class PriceVersion(models.Model):
 
     class Meta:
         ordering = ["-effective_from"]
+        indexes = [models.Index(fields=["item", "effective_from", "effective_to"])]
 
 
 class StockBatch(TimeStampedModel):
@@ -229,6 +282,10 @@ class StockBatch(TimeStampedModel):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["item", "batch_number"], name="unique_item_batch")]
+        indexes = [
+            models.Index(fields=["item", "status"]),
+            models.Index(fields=["status", "expiry_date"]),
+        ]
 
     @property
     def quantity_on_hand(self):
@@ -237,6 +294,23 @@ class StockBatch(TimeStampedModel):
     @property
     def can_dispense(self):
         return self.status == self.Status.ACTIVE and (not self.expiry_date or self.expiry_date >= timezone.localdate())
+
+    @property
+    def is_expired(self):
+        return bool(self.expiry_date) and self.expiry_date < timezone.localdate()
+
+    def days_to_expiry(self):
+        if not self.expiry_date:
+            return None
+        return (self.expiry_date - timezone.localdate()).days
+
+    def balance_at(self, cutoff):
+        """Ledger balance as at a cutoff, by actual event time.
+
+        A count sheet frozen at 14:00 must be compared with the stock the
+        ledger says was there at 14:00, not with what it says now.
+        """
+        return self.movements.filter(event_at__lte=cutoff).aggregate(total=Sum("quantity_delta"))["total"] or Decimal("0.000")
 
     def __str__(self):
         return f"{self.item.name} · {self.batch_number}"
@@ -267,9 +341,21 @@ class StockMovement(models.Model):
 
     class Meta:
         ordering = ["-entered_at"]
+        indexes = [
+            # Every balance is a SUM over this table, and every statistic is a
+            # SUM over a slice of it. Unindexed, each one is a full scan that
+            # grows for as long as the hospital stays open.
+            models.Index(fields=["batch", "event_at"]),
+            models.Index(fields=["movement_type", "event_at"]),
+            models.Index(fields=["event_at"]),
+            models.Index(fields=["reference_type", "reference_id"]),
+        ]
 
 
-class Invoice(TimeStampedModel):
+class Invoice(ReferenceNumberMixin, TimeStampedModel):
+    REFERENCE_FIELD = "invoice_number"
+    REFERENCE_PREFIX = "INV"
+
     class Status(models.TextChoices):
         DRAFT = "draft", "Draft"
         POSTED = "posted", "Posted"
@@ -287,11 +373,6 @@ class Invoice(TimeStampedModel):
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.DRAFT)
     posted_at = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey(User, on_delete=models.PROTECT)
-
-    def save(self, *args, **kwargs):
-        if not self.invoice_number:
-            self.invoice_number = f"INV-{timezone.localdate():%Y%m%d}-{uuid.uuid4().hex[:6].upper()}"
-        super().save(*args, **kwargs)
 
     @property
     def total(self):
@@ -330,7 +411,10 @@ class InvoiceLine(models.Model):
         super().save(*args, **kwargs)
 
 
-class Payment(TimeStampedModel):
+class Payment(ReferenceNumberMixin, TimeStampedModel):
+    REFERENCE_FIELD = "receipt_number"
+    REFERENCE_PREFIX = "RCT"
+
     class Method(models.TextChoices):
         CASH = "cash", "Cash"
         MPESA = "mpesa", "M-PESA"
@@ -358,16 +442,29 @@ class Payment(TimeStampedModel):
     class Meta:
         constraints = [
             models.UniqueConstraint(fields=["method", "reference"], condition=~Q(reference=""), name="unique_payment_reference"),
+            # The rule also lives in clean() so a form reports it on the field.
+            # It lives here as well so no code path can write a referenceless
+            # M-PESA payment, which would be money with nothing to trace it to.
+            models.CheckConstraint(
+                condition=~Q(method="mpesa") | ~Q(reference=""),
+                name="mpesa_payment_requires_reference",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["method", "verification_status"]),
+            models.Index(fields=["received_at"]),
+            models.Index(fields=["status", "received_at"]),
         ]
 
+    def clean(self):
+        super().clean()
+        if self.method == self.Method.MPESA and not (self.reference or "").strip():
+            raise ValidationError({"reference": "An M-PESA reference is required."})
+
     def save(self, *args, **kwargs):
-        if not self.receipt_number:
-            self.receipt_number = f"RCT-{timezone.localdate():%Y%m%d}-{uuid.uuid4().hex[:6].upper()}"
         if self.method == self.Method.CASH:
             self.verification_status = self.Verification.NOT_APPLICABLE
-        elif not self.reference:
-            raise ValidationError("An M-PESA reference is required.")
-        super().save(*args, **kwargs)
+        return super().save(*args, **kwargs)
 
     @property
     def allocated_amount(self):
@@ -454,7 +551,10 @@ class PrescriptionItem(models.Model):
     dispensed_quantity = models.DecimalField(**QUANTITY)
 
 
-class PharmacyOrder(TimeStampedModel):
+class PharmacyOrder(ReferenceNumberMixin, TimeStampedModel):
+    REFERENCE_FIELD = "order_number"
+    REFERENCE_PREFIX = "RX"
+
     class Status(models.TextChoices):
         PREPARED = "prepared", "Prepared — payment required"
         CLEARED = "cleared", "Payment cleared"
@@ -471,11 +571,6 @@ class PharmacyOrder(TimeStampedModel):
     prepared_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="orders_prepared")
     dispensed_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="orders_dispensed")
     dispensed_at = models.DateTimeField(null=True, blank=True)
-
-    def save(self, *args, **kwargs):
-        if not self.order_number:
-            self.order_number = f"RX-{timezone.localdate():%Y%m%d}-{uuid.uuid4().hex[:6].upper()}"
-        super().save(*args, **kwargs)
 
 
 class PharmacyOrderItem(models.Model):
@@ -611,7 +706,10 @@ class Supplier(TimeStampedModel):
     active = models.BooleanField(default=True)
 
 
-class PurchaseOrder(TimeStampedModel):
+class PurchaseOrder(ReferenceNumberMixin, TimeStampedModel):
+    REFERENCE_FIELD = "order_number"
+    REFERENCE_PREFIX = "PO"
+
     order_number = models.CharField(max_length=30, unique=True, blank=True)
     supplier = models.ForeignKey(Supplier, on_delete=models.PROTECT)
     status = models.CharField(max_length=18, choices=[("requested", "Requested"), ("approved", "Approved"), ("part_received", "Part received"), ("received", "Received"), ("cancelled", "Cancelled")], default="requested")
@@ -621,11 +719,9 @@ class PurchaseOrder(TimeStampedModel):
     notes = models.TextField(blank=True)
 
     def save(self, *args, **kwargs):
-        if not self.order_number:
-            self.order_number = f"PO-{timezone.localdate():%Y%m%d}-{uuid.uuid4().hex[:6].upper()}"
         if self.approved_by_id and self.approved_by_id == self.requested_by_id:
             raise ValidationError("The requester cannot approve their own purchase order.")
-        super().save(*args, **kwargs)
+        return super().save(*args, **kwargs)
 
 
 class PurchaseOrderLine(models.Model):
@@ -639,44 +735,198 @@ class PurchaseOrderLine(models.Model):
         return (self.quantity_base_units * self.quoted_unit_cost).quantize(Decimal("0.01"))
 
 
-class GoodsReceipt(TimeStampedModel):
+class GoodsReceipt(ReferenceNumberMixin, TimeStampedModel):
+    """A delivery actually received against a purchase order.
+
+    The supplier's invoice or delivery note is photographed at the counter and
+    stored with the receipt. Stock balances against a document the hospital
+    holds, not against a typed reference only the receiver ever saw.
+    """
+
+    REFERENCE_FIELD = "receipt_number"
+    REFERENCE_PREFIX = "GRN"
+
+    receipt_number = models.CharField(max_length=30, unique=True, blank=True)
     purchase_order = models.ForeignKey(PurchaseOrder, on_delete=models.PROTECT, related_name="receipts")
     supplier_invoice_reference = models.CharField(max_length=100)
+    invoice_photo = models.FileField(upload_to="supplier_invoices/%Y/%m/", blank=True)
+    invoice_photo_name = models.CharField(max_length=255, blank=True)
+    invoice_amount = models.DecimalField(**MONEY)
+    invoice_date = models.DateField(null=True, blank=True)
+    delivered_at = models.DateTimeField(default=timezone.now)
+    posted_at = models.DateTimeField(null=True, blank=True)
     received_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="goods_received")
     checked_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="goods_checked")
     checked_at = models.DateTimeField(null=True, blank=True)
     discrepancy_notes = models.TextField(blank=True)
 
     class Meta:
+        ordering = ["-delivered_at"]
         constraints = [models.UniqueConstraint(fields=["purchase_order", "supplier_invoice_reference"], name="unique_supplier_invoice_per_order")]
+        indexes = [models.Index(fields=["delivered_at"]), models.Index(fields=["checked_by", "delivered_at"])]
 
     def clean(self):
         if self.checked_by_id and self.checked_by_id == self.received_by_id:
             raise ValidationError("The delivery checker must differ from the receiver.")
 
+    @property
+    def received_value(self):
+        """What the delivered quantities cost at the unit costs entered."""
+        return sum(
+            (line.line_cost for line in self.lines.all()),
+            Decimal("0.00"),
+        ).quantize(Decimal("0.01"))
+
+    @property
+    def invoice_variance(self):
+        """Supplier invoice total minus the value of what was physically counted in."""
+        return (self.invoice_amount - self.received_value).quantize(Decimal("0.01"))
+
+    def __str__(self):
+        return f"{self.receipt_number} · {self.supplier_invoice_reference}"
+
 
 class GoodsReceiptLine(models.Model):
     receipt = models.ForeignKey(GoodsReceipt, on_delete=models.PROTECT, related_name="lines")
-    order_line = models.ForeignKey(PurchaseOrderLine, on_delete=models.PROTECT)
+    order_line = models.ForeignKey(PurchaseOrderLine, on_delete=models.PROTECT, related_name="receipt_lines")
+    batch = models.ForeignKey(StockBatch, null=True, blank=True, on_delete=models.PROTECT, related_name="receipt_lines")
     quantity_received = models.DecimalField(**QUANTITY, validators=[MinValueValidator(Decimal("0.001"))])
     batch_number = models.CharField(max_length=80)
     expiry_date = models.DateField(null=True, blank=True)
     actual_unit_cost = models.DecimalField(**MONEY, validators=[MinValueValidator(Decimal("0.00"))])
 
+    @property
+    def line_cost(self):
+        return (Decimal(str(self.quantity_received)) * Decimal(str(self.actual_unit_cost))).quantize(Decimal("0.01"))
 
-class StockCount(TimeStampedModel):
-    status = models.CharField(max_length=16, choices=[("frozen", "Snapshot frozen"), ("submitted", "Submitted"), ("approved", "Approved")], default="frozen")
+    @property
+    def cost_variance(self):
+        """Actual unit cost minus the quoted unit cost on the approved order."""
+        return (Decimal(str(self.actual_unit_cost)) - Decimal(str(self.order_line.quoted_unit_cost))).quantize(Decimal("0.01"))
+
+
+class DepartmentIssue(ReferenceNumberMixin, TimeStampedModel):
+    """Stock handed from pharmacy into a named department's custody.
+
+    Issuing moves custody; it does not consume. The quantity stays visible as
+    unconsumed departmental stock until it is administered, consumed, returned
+    or written off, so medicine that left the pharmacy and never reached a
+    patient is a number somebody can see rather than an absence nobody notices.
+    """
+
+    REFERENCE_FIELD = "reference"
+    REFERENCE_PREFIX = "ISS"
+
+    class Kind(models.TextChoices):
+        PATIENT = "patient", "Patient-specific"
+        GENERAL = "general", "General consumable"
+
+    class Status(models.TextChoices):
+        OUTSTANDING = "outstanding", "In departmental custody"
+        SETTLED = "settled", "Fully accounted for"
+
+    reference = models.CharField(max_length=30, unique=True, blank=True)
+    department = models.CharField(max_length=80)
+    received_by_name = models.CharField(max_length=160)
+    kind = models.CharField(max_length=12, choices=Kind.choices, default=Kind.GENERAL)
+    patient = models.ForeignKey(Patient, null=True, blank=True, on_delete=models.PROTECT, related_name="stock_issues")
+    status = models.CharField(max_length=14, choices=Status.choices, default=Status.OUTSTANDING)
+    notes = models.TextField(blank=True)
+    issued_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="stock_issues")
+    issued_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["-issued_at"]
+        indexes = [models.Index(fields=["status", "issued_at"]), models.Index(fields=["department"])]
+
+    def clean(self):
+        if self.kind == self.Kind.PATIENT and not self.patient_id:
+            raise ValidationError("A patient-specific issue must name the patient it is for.")
+
+    @property
+    def outstanding_quantity(self):
+        return sum((line.outstanding for line in self.lines.all()), Decimal("0.000"))
+
+    def refresh_status(self):
+        self.status = self.Status.SETTLED if self.outstanding_quantity <= 0 else self.Status.OUTSTANDING
+        self.save(update_fields=["status", "updated_at"])
+
+    def __str__(self):
+        return f"{self.reference} · {self.department}"
+
+
+class DepartmentIssueLine(models.Model):
+    issue = models.ForeignKey(DepartmentIssue, on_delete=models.PROTECT, related_name="lines")
+    batch = models.ForeignKey(StockBatch, on_delete=models.PROTECT, related_name="issue_lines")
+    quantity_issued = models.DecimalField(**QUANTITY, validators=[MinValueValidator(Decimal("0.001"))])
+    quantity_consumed = models.DecimalField(**QUANTITY)
+    quantity_returned = models.DecimalField(**QUANTITY)
+    quantity_wasted = models.DecimalField(**QUANTITY)
+
+    @property
+    def accounted(self):
+        return self.quantity_consumed + self.quantity_returned + self.quantity_wasted
+
+    @property
+    def outstanding(self):
+        """Issued but not yet administered, returned or written off."""
+        return self.quantity_issued - self.accounted
+
+    @property
+    def issued_value(self):
+        return (self.quantity_issued * self.batch.purchase_cost_per_base_unit).quantize(Decimal("0.01"))
+
+    def __str__(self):
+        return f"{self.batch} × {self.quantity_issued}"
+
+
+class StockCount(ReferenceNumberMixin, TimeStampedModel):
+    """A physical count reconciled against the ledger at a frozen cutoff.
+
+    Approval is what posts the correcting movements; the count itself never
+    edits a balance, so a miscount is visible as a reviewed variance rather
+    than an untraceable overwrite.
+    """
+
+    REFERENCE_FIELD = "reference"
+    REFERENCE_PREFIX = "SC"
+
+    class Status(models.TextChoices):
+        FROZEN = "frozen", "Snapshot frozen"
+        SUBMITTED = "submitted", "Submitted for review"
+        APPROVED = "approved", "Approved and posted"
+        REJECTED = "rejected", "Rejected"
+
+    reference = models.CharField(max_length=30, unique=True, blank=True)
+    status = models.CharField(max_length=16, choices=Status.choices, default=Status.FROZEN)
     location = models.CharField(max_length=80, default="Pharmacy")
     cutoff_at = models.DateTimeField(default=timezone.now)
     blind_count = models.BooleanField(default=True)
+    notes = models.TextField(blank=True)
+    review_notes = models.TextField(blank=True)
     counted_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="stock_counts")
     witnessed_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="stock_counts_witnessed")
     reviewed_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="stock_counts_reviewed")
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-cutoff_at"]
+
+    @property
+    def net_variance(self):
+        return sum((line.variance for line in self.lines.all()), Decimal("0.000"))
+
+    @property
+    def variance_line_count(self):
+        return sum(1 for line in self.lines.all() if line.variance)
+
+    def __str__(self):
+        return f"{self.reference} · {self.location}"
 
 
 class StockCountLine(models.Model):
     count = models.ForeignKey(StockCount, on_delete=models.PROTECT, related_name="lines")
-    batch = models.ForeignKey(StockBatch, on_delete=models.PROTECT)
+    batch = models.ForeignKey(StockBatch, on_delete=models.PROTECT, related_name="count_lines")
     expected_quantity = models.DecimalField(**QUANTITY)
     counted_quantity = models.DecimalField(**QUANTITY)
     reason = models.CharField(max_length=255, blank=True)
@@ -684,6 +934,58 @@ class StockCountLine(models.Model):
     @property
     def variance(self):
         return self.counted_quantity - self.expected_quantity
+
+    @property
+    def variance_value(self):
+        """Variance priced at the batch purchase cost, for a reviewable figure."""
+        return (self.variance * self.batch.purchase_cost_per_base_unit).quantize(Decimal("0.01"))
+
+
+class StockWriteOff(ReferenceNumberMixin, TimeStampedModel):
+    """A proposal to remove stock that can no longer be sold or used.
+
+    Expired medicine sits in the balance and in the valuation until somebody
+    authorises its removal. Requesting is separate from approving so that no
+    one person can quietly make stock disappear, and approval is what posts the
+    movement.
+    """
+
+    REFERENCE_FIELD = "reference"
+    REFERENCE_PREFIX = "WO"
+
+    class Reason(models.TextChoices):
+        EXPIRED = "expired", "Expired"
+        DAMAGED = "damaged", "Damaged or broken"
+        CONTAMINATED = "contaminated", "Contaminated or unsafe"
+        RECALLED = "recalled", "Recalled by supplier or authority"
+        OTHER = "other", "Other, described below"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Awaiting independent approval"
+        APPROVED = "approved", "Approved and posted"
+        REJECTED = "rejected", "Rejected"
+
+    reference = models.CharField(max_length=30, unique=True, blank=True)
+    batch = models.ForeignKey(StockBatch, on_delete=models.PROTECT, related_name="write_offs")
+    quantity = models.DecimalField(**QUANTITY, validators=[MinValueValidator(Decimal("0.001"))])
+    reason = models.CharField(max_length=16, choices=Reason.choices)
+    narrative = models.TextField()
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.PENDING)
+    requested_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="write_offs_requested")
+    reviewed_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="write_offs_reviewed")
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_notes = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["status", "created_at"]), models.Index(fields=["batch", "status"])]
+
+    @property
+    def value_at_cost(self):
+        return (self.quantity * self.batch.purchase_cost_per_base_unit).quantize(Decimal("0.01"))
+
+    def __str__(self):
+        return f"{self.reference} · {self.batch}"
 
 
 class TheatreCase(TimeStampedModel):
@@ -755,10 +1057,18 @@ class Refund(TimeStampedModel):
 
 
 class ExceptionRecord(TimeStampedModel):
+    """Something a human needs to look at, raised once per distinct occurrence.
+
+    ``dedupe_key`` is what makes raising one idempotent. Matching on the summary
+    text alone is not safe: nothing stops two rows sharing a summary, and once
+    two exist every later attempt to raise the same exception fails outright.
+    """
+
     class Status(models.TextChoices):
         OPEN = "open", "Open"
         IN_REVIEW = "in_review", "In review"
         RESOLVED = "resolved", "Resolved"
+    dedupe_key = models.CharField(max_length=64, blank=True)
     category = models.CharField(max_length=40)
     severity = models.CharField(max_length=12, choices=[("info", "Information"), ("warning", "Warning"), ("urgent", "Urgent")], default="warning")
     summary = models.CharField(max_length=255)
@@ -767,6 +1077,17 @@ class ExceptionRecord(TimeStampedModel):
     assigned_to = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="assigned_exceptions")
     resolution = models.TextField(blank=True)
     resolved_at = models.DateTimeField(null=True, blank=True)
+    occurrence_count = models.PositiveIntegerField(default=1)
+    last_seen_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["dedupe_key"], condition=~Q(dedupe_key=""), name="unique_exception_dedupe_key"
+            )
+        ]
+        indexes = [models.Index(fields=["status", "severity"]), models.Index(fields=["category"])]
 
 
 class ImportJob(TimeStampedModel):
@@ -846,6 +1167,11 @@ class LoginAttempt(models.Model):
 
     LOCKOUT_THRESHOLD = 8
     LOCKOUT_WINDOW_MINUTES = 15
+    # One address gets more room than one account, because a busy shared
+    # workstation legitimately produces several people's typos. It still gets a
+    # ceiling: a per-username lock alone lets an attacker spray a whole staff
+    # list from one machine and never trip anything.
+    ADDRESS_LOCKOUT_THRESHOLD = 30
 
     @classmethod
     def window_start(cls):
@@ -856,11 +1182,23 @@ class LoginAttempt(models.Model):
         return cls.objects.filter(username=username[:150], attempted_at__gte=cls.window_start()).count()
 
     @classmethod
-    def is_locked(cls, username):
-        if not username:
-            return False
-        return cls.recent_failures(username) >= cls.LOCKOUT_THRESHOLD
+    def recent_failures_from(cls, ip_address):
+        if not ip_address:
+            return 0
+        return cls.objects.filter(ip_address=ip_address, attempted_at__gte=cls.window_start()).count()
+
+    @classmethod
+    def is_locked(cls, username, ip_address=None):
+        if username and cls.recent_failures(username) >= cls.LOCKOUT_THRESHOLD:
+            return True
+        return cls.recent_failures_from(ip_address) >= cls.ADDRESS_LOCKOUT_THRESHOLD
 
     @classmethod
     def clear(cls, username):
+        """Clear this account's failures on a successful sign-in.
+
+        The address history is deliberately kept: one person remembering their
+        password says nothing about the other twenty-nine attempts from that
+        machine, and clearing it would hand a spray attack a free reset.
+        """
         cls.objects.filter(username=username[:150]).delete()

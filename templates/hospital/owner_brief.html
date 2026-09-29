@@ -1,0 +1,81 @@
+{% extends "base.html" %}{% block title %}Today's brief{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <p class="eyebrow">{{ now_local|date:"l, j F Y" }}</p>
+    <h1>What needs you today</h1>
+    <p>Assembled from the ledger at {{ brief_generated_at|date:"H:i" }} EAT. Nothing here is sent anywhere; it is only shown to you.</p>
+  </div>
+  <div class="heading-actions"><a class="button secondary" href="{% url 'stock_intelligence' %}">Stock intelligence</a><a class="button primary" href="{% url 'reports' %}">Owner reports</a></div>
+</div>
+
+{% if brief_items %}
+<section class="panel">
+  <div class="panel-head">
+    <div><p class="eyebrow">Ranked by urgency</p><h2>{{ brief_items|length }} item{{ brief_items|pluralize }} for your attention</h2></div>
+    {% if brief_urgent %}<span class="status emergency">{{ brief_urgent }} urgent</span>{% endif %}
+  </div>
+  <ul class="review-list">
+    {% for item in brief_items %}
+    <li>
+      <div>
+        <span class="severity {{ item.severity }}">{{ item.severity|title }}</span>
+        <strong>{{ item.headline }}</strong>
+        <p>{{ item.detail }}</p>
+      </div>
+      <a class="button secondary small" href="{{ item.url }}">{{ item.action }}</a>
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% else %}
+<section class="panel">
+  <div class="empty">
+    <strong>Nothing needs you right now.</strong>
+    <p>No expired stock held, no unchecked deliveries, no ward issue outstanding beyond a week, nothing below reorder level, and a stock count approved within the last month.</p>
+  </div>
+</section>
+{% endif %}
+
+<div class="content-grid">
+  <section class="panel">
+    <div class="panel-head"><div><p class="eyebrow">Last 90 days</p><h2>Unexplained loss</h2></div></div>
+    {% if shrinkage.measured %}
+    <dl class="summary-list">
+      <div><dt>Counted short</dt><dd>KES {{ shrinkage.loss_value|floatformat:2 }}</dd></div>
+      <div><dt>Counted over</dt><dd>KES {{ shrinkage.gain_value|floatformat:2 }}</dd></div>
+      <div><dt>Authorised write-offs</dt><dd>KES {{ shrinkage.written_off_value|floatformat:2 }}</dd></div>
+      <div><dt>Against cost of goods</dt><dd>{% if shrinkage.as_percent_of_cogs is not None %}{{ shrinkage.as_percent_of_cogs }}%{% else %}Not comparable{% endif %}</dd></div>
+    </dl>
+    <p class="help-text">Write-offs have a named reason and an approver, so they are a loss the hospital chose to take. They are never added to the unexplained figure.</p>
+    {% else %}
+    <div class="empty compact">
+      <strong>Not yet measurable.</strong>
+      <p>Stock loss can only be measured against a physical count. Until a count is approved, any figure here would be a guess.</p>
+      <p><a class="button secondary small" href="{% url 'stock_counts' %}">Start a count</a></p>
+    </div>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><div><p class="eyebrow">Outside the pharmacy</p><h2>Ward custody</h2></div><a href="{% url 'custody' %}">Open</a></div>
+    <dl class="summary-list">
+      <div><dt>Held by departments</dt><dd>KES {{ custody.outstanding_value|floatformat:2 }}</dd></div>
+      <div><dt>Open issues</dt><dd>{{ custody.issue_count }}</dd></div>
+      <div><dt>Outstanding over 7 days</dt><dd>{% if custody.stale_count %}<span class="status warning">{{ custody.stale_count }}</span>{% else %}None{% endif %}</dd></div>
+    </dl>
+    <p class="help-text">Already out of the pharmacy balance, so it is not counted twice in stock value.</p>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><div><p class="eyebrow">Last 30 days</p><h2>Are the controls used?</h2></div></div>
+    <dl class="summary-list">
+      <div><dt>Deliveries with invoice evidence</dt><dd>{% if brief_adoption.evidence_percent is not None %}{{ brief_adoption.evidence_percent }}%{% else %}No deliveries{% endif %}</dd></div>
+      <div><dt>Independently checked</dt><dd>{% if brief_adoption.checked_percent is not None %}{{ brief_adoption.checked_percent }}%{% else %}No deliveries{% endif %}</dd></div>
+      <div><dt>Checked within 24 hours</dt><dd>{% if brief_adoption.checked_promptly_percent is not None %}{{ brief_adoption.checked_promptly_percent }}%{% else %}No deliveries{% endif %}</dd></div>
+      <div><dt>Counts approved</dt><dd>{{ brief_adoption.counts_approved }} of {{ brief_adoption.counts_taken }}</dd></div>
+    </dl>
+    <p class="help-text">A control nobody follows looks the same as a control nobody needed. These tell them apart.</p>
+  </section>
+</div>
+{% endblock %}

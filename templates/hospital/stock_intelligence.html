@@ -1,0 +1,100 @@
+{% extends "base.html" %}{% block title %}Stock intelligence{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <p class="breadcrumbs"><a href="{% url 'stock' %}">Stock</a> / Intelligence</p>
+    <h1>Stock intelligence</h1>
+    <p>How much is going missing, whether suppliers are walking their prices up, and whether the controls are actually being followed.</p>
+  </div>
+  <div class="heading-actions">
+    <form method="get" class="filter-bar">
+      <label for="days">Period</label>
+      <select id="days" name="days" onchange="this.form.submit()">
+        <option value="30" {% if days == 30 %}selected{% endif %}>Last 30 days</option>
+        <option value="90" {% if days == 90 %}selected{% endif %}>Last 90 days</option>
+        <option value="180" {% if days == 180 %}selected{% endif %}>Last 180 days</option>
+        <option value="365" {% if days == 365 %}selected{% endif %}>Last year</option>
+      </select>
+    </form>
+  </div>
+</div>
+
+<section class="kpi-grid" aria-label="Loss position">
+  <div class="kpi {% if shrinkage.loss_value %}warning{% endif %}{% if not shrinkage.measured %} unavailable{% endif %}">
+    <span>Unexplained loss</span>
+    {% if shrinkage.measured %}<strong>KES {{ shrinkage.loss_value|floatformat:2 }}</strong><small>Counted short against the ledger</small>
+    {% else %}<strong>Not measured</strong><small>Needs an approved stock count</small>{% endif %}
+  </div>
+  <div class="kpi {% if not shrinkage.measured or shrinkage.as_percent_of_cogs is None %}unavailable{% endif %}">
+    <span>Loss against cost of goods</span>
+    {% if shrinkage.measured and shrinkage.as_percent_of_cogs is not None %}<strong>{{ shrinkage.as_percent_of_cogs }}%</strong><small>Of KES {{ shrinkage.cost_of_goods_dispensed|floatformat:2 }} dispensed</small>
+    {% else %}<strong>Unavailable</strong><small>Needs a count and a dispense in the period</small>{% endif %}
+  </div>
+  <div class="kpi"><span>Counted over</span><strong>KES {{ shrinkage.gain_value|floatformat:2 }}</strong><small>Found more than the ledger expected</small></div>
+  <div class="kpi"><span>Authorised write-offs</span><strong>KES {{ shrinkage.written_off_value|floatformat:2 }}</strong><small>A decided loss, never counted as shrinkage</small></div>
+  <div class="kpi {% if custody.stale_count %}warning{% endif %}"><span>Held outside the pharmacy</span><strong>KES {{ custody.outstanding_value|floatformat:2 }}</strong><small>{{ custody.stale_count }} issue{{ custody.stale_count|pluralize }} outstanding over 7 days</small></div>
+</section>
+
+<div class="content-grid">
+  <section class="panel span-2">
+    <div class="panel-head"><div><p class="eyebrow">Paid per unit over time</p><h2>Supplier price movement</h2></div><span>{{ prices.rows|length }} product{{ prices.rows|length|pluralize }}</span></div>
+    {% if prices.rows %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Product</th><th>Supplier</th><th class="numeric">Latest cost</th><th class="numeric">Previous</th><th class="numeric">Change</th><th class="numeric">Range</th><th>Deliveries</th></tr></thead>
+        <tbody>
+        {% for row in prices.rows %}
+        <tr>
+          <td><strong>{{ row.item.name }}</strong><small>{{ row.item.code }}</small></td>
+          <td>{{ row.latest.supplier }}<small>{{ row.latest.delivered_at|date:"j M Y" }}</small></td>
+          <td class="numeric">KES {{ row.latest.unit_cost|floatformat:2 }}</td>
+          <td class="numeric">{% if row.previous %}KES {{ row.previous.unit_cost|floatformat:2 }}{% else %}—{% endif %}</td>
+          <td class="numeric">
+            {% if row.percent_change is not None %}
+              <span class="status {% if row.percent_change > 0 %}warning{% else %}active{% endif %}">{% if row.percent_change > 0 %}+{% endif %}{{ row.percent_change }}%</span>
+            {% else %}<small>First delivery</small>{% endif %}
+          </td>
+          <td class="numeric"><small>{{ row.lowest|floatformat:2 }} – {{ row.highest|floatformat:2 }}</small></td>
+          <td>{{ row.delivery_count }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <p class="help-text">Ordered by the size of the move. A supplier drifting a price upward is leakage that no single delivery looks odd enough to catch.</p>
+    {% else %}
+    <div class="empty"><strong>No delivery history yet.</strong><p>Price movement needs at least one recorded delivery per product.</p></div>
+    {% endif %}
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><div><p class="eyebrow">Last {{ adoption.days }} days</p><h2>Control adoption</h2></div></div>
+    <dl class="summary-list">
+      <div><dt>Deliveries recorded</dt><dd>{{ adoption.deliveries }}</dd></div>
+      <div><dt>With invoice evidence</dt><dd>{% if adoption.evidence_percent is not None %}{{ adoption.evidence_percent }}%{% else %}—{% endif %}</dd></div>
+      <div><dt>Independently checked</dt><dd>{% if adoption.checked_percent is not None %}{{ adoption.checked_percent }}%{% else %}—{% endif %}</dd></div>
+      <div><dt>Checked within 24 hours</dt><dd>{% if adoption.checked_promptly_percent is not None %}{{ adoption.checked_promptly_percent }}%{% else %}—{% endif %}</dd></div>
+      <div><dt>Counts approved</dt><dd>{{ adoption.counts_approved }} of {{ adoption.counts_taken }}</dd></div>
+      <div><dt>Ward issues open</dt><dd>{{ adoption.issues_outstanding }} of {{ adoption.issues_made }}</dd></div>
+      <div><dt>Write-offs pending</dt><dd>{{ adoption.write_offs_pending }}</dd></div>
+    </dl>
+    <p class="help-text">A control nobody follows looks the same as a control nobody needed.</p>
+  </section>
+</div>
+
+{% if shrinkage.worst_items %}
+<section class="panel">
+  <div class="panel-head"><div><p class="eyebrow">Where the loss is</p><h2>Products counted short</h2></div></div>
+  <ul class="bar-list">
+    {% for row in shrinkage.worst_items %}
+    <li>
+      <span>{{ row.item.name|truncatechars:24 }}</span>
+      <div><i style="width:{% widthratio row.value shrinkage.worst_items.0.value 100 %}%"></i></div>
+      <strong>{{ row.units|floatformat:"-3" }}</strong>
+    </li>
+    {% endfor %}
+  </ul>
+  <p class="help-text">Valued at purchase cost, from approved count variances only.</p>
+</section>
+{% endif %}
+{% endblock %}

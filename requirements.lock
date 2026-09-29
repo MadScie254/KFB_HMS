@@ -8,3 +8,4 @@ ruff==0.13.1
 sqlparse==0.6.0
 tzdata==2026.4
 waitress==3.0.2
+whitenoise==6.12.0

@@ -15,11 +15,14 @@ from hospital.models import (
     EyeSession,
     Patient,
     PriceVersion,
+    PurchaseOrder,
+    PurchaseOrderLine,
     Role,
     Setting,
     StaffProfile,
     StockBatch,
     StockMovement,
+    Supplier,
     Ward,
 )
 from hospital.services import prepare_pharmacy_order
@@ -56,6 +59,10 @@ class Command(BaseCommand):
             profile.display_name = name
             profile.active_shift_label = "Day shift" if role in {Role.RECEPTION, Role.NURSE} else "On duty"
             profile.save()
+            # The post_save signal already attached a default-role profile to this
+            # User instance. Without re-pointing that cached relation, every later
+            # role check in this command reads the stale default and the seed fails.
+            user.staff_profile = profile
             users[role] = user
 
         setup = [
@@ -72,6 +79,11 @@ class Command(BaseCommand):
             ("tax_and_fiscal_receipts", "Not verified", "Confirm current Kenyan fiscal obligations with an authoritative adviser.", False),
             ("backup_encryption_recipient", "Not configured", "Owner must hold tested recovery keys and separate backup media.", False),
             ("clinical_templates", "Demo fields only", "Qualified clinical staff must review templates before real care.", False),
+            ("near_expiry_days", "90", "Days before expiry at which a batch is raised for review. Confirm against actual reorder lead times.", False),
+            ("purchase_cost_variance_fraction", "0.10", "Fraction by which a delivered unit cost may differ from the approved quote before it is flagged.", False),
+            ("supplier_invoice_tolerance", "1.00", "KES difference between a supplier invoice and the goods counted in before it is flagged.", False),
+            ("stock_variance_review_value", "500.00", "KES value of an approved count variance that raises a stock discrepancy exception.", False),
+            ("opening_stock_witness", "Not configured", "Name the staff who witnessed the opening count; demo balances are fictional.", False),
         ]
         for key, value, description, confirmed in setup:
             Setting.objects.update_or_create(key=key, defaults={"value": value, "description": description, "production_confirmed": confirmed, "updated_by": users[Role.OWNER]})
@@ -114,6 +126,25 @@ class Command(BaseCommand):
                 patient=None,
                 items=[(products["MED-ORS"], Decimal("2"))],
             )
+
+        supplier, _ = Supplier.objects.get_or_create(
+            name="Webuye Pharmaceutical Distributors (Demo)",
+            defaults={"phone": "0700000100", "payment_details": "Fictional demo supplier; verify real payment details independently."},
+        )
+        # An approved order with no delivery yet, so the receiving workflow can be
+        # demonstrated: procurement records what arrives and photographs the invoice.
+        if not PurchaseOrder.objects.filter(supplier=supplier).exists():
+            order = PurchaseOrder.objects.create(
+                supplier=supplier,
+                requested_by=users[Role.PROCUREMENT],
+                reference="DEMO-QUOTE-001",
+                notes="Fictional demo restock request.",
+            )
+            for code, quantity, cost in [("MED-PARA500", Decimal("500"), Decimal("2.10")), ("MED-ORS", Decimal("120"), Decimal("20.00"))]:
+                PurchaseOrderLine.objects.create(order=order, item=products[code], quantity_base_units=quantity, quoted_unit_cost=cost)
+            order.approved_by = users[Role.REVIEWER]
+            order.status = "approved"
+            order.save()
 
         patient_rows = [
             ("Amina", "Nanjala", date(1992, 5, 14), "F", "0700000001", "none"),

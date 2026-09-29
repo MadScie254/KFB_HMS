@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+{% extends "base.html" %}{% load hospital_extras %}
 {% block title %}Queue{% endblock %}
 {% block content %}
 <div class="page-heading">
@@ -6,11 +6,18 @@
 </div>
 <section class="panel">
 {% if encounters %}
-  <div class="table-wrap"><table><thead><tr><th>Patient</th><th>Identifiers</th><th>Department</th><th>Urgency</th><th>Status</th><th>Actions</th></tr></thead><tbody>
-  {% for e in encounters %}<tr>
+  <div class="table-toolbar">
+    <span class="help-text">{{ encounters|length }} waiting · most urgent first, then longest waiting. Tap a column to re-sort.</span>
+    <span class="spacer"></span>
+    <button type="button" class="chip-button" data-density-toggle aria-pressed="false">Compact rows</button>
+  </div>
+  <div class="table-wrap"><table data-sortable-table><thead><tr><th>Patient</th><th>Identifiers</th><th>Department</th><th>Urgency</th><th>Status</th><th class="numeric">Waiting</th><th data-no-sort>Actions</th></tr></thead><tbody>
+  {% for e in encounters %}<tr class="{{ e.created_at|wait_row_class }}">
     <td><strong>{{ e.patient.full_name }}</strong></td>
     <td>{{ e.patient.patient_number }}<small>{{ e.patient.phone|default:"No phone" }}</small></td>
     <td>{{ e.department }}</td><td><span class="status {{ e.urgency }}">{{ e.get_urgency_display }}</span></td><td>{{ e.get_status_display }}</td>
+    {# How long somebody has been sitting there is the reason this screen exists. #}
+    <td class="numeric" data-sort-value="{{ e.created_at|date:'U' }}"><span class="{{ e.created_at|wait_class }}">{{ e.created_at|timesince }}</span>{% if e.created_at|wait_note %}<small>{{ e.created_at|wait_note }}</small>{% endif %}</td>
     <td>{% if current_role == 'clinician' %}<div class="table-actions"><a href="{% url 'clinical_note' e.pk %}">Clinical note</a><a href="{% url 'prescription_create' e.pk %}">Prescription</a><a href="{% url 'service_order_create' e.pk %}">Request service</a><a href="{% url 'admission_create' e.pk %}">Admit</a></div>{% else %}<a href="{% url 'patient_detail' e.patient_id %}">View patient</a>{% endif %}</td>
   </tr>{% endfor %}
   </tbody></table></div>

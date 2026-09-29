@@ -1,0 +1,60 @@
+{% extends "base.html" %}{% block title %}Receive delivery{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <p class="breadcrumbs"><a href="{% url 'stock' %}">Stock</a> / <a href="{% url 'deliveries' %}">Deliveries</a> / Receive</p>
+    <h1>Receive {{ order.order_number }}</h1>
+    <p>{{ order.supplier.name }} · record what physically arrived, not what was ordered.</p>
+  </div>
+</div>
+
+<section class="panel">
+  <div class="panel-head"><div><p class="eyebrow">Outstanding on this order</p><h2>Ordered versus received so far</h2></div></div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Item</th><th class="numeric">Ordered</th><th class="numeric">Received so far</th><th class="numeric">Outstanding</th><th class="numeric">Quoted unit cost</th></tr></thead>
+      <tbody>
+      {% for line, received, outstanding in received_so_far %}
+      <tr>
+        <td><strong>{{ line.item.name }}</strong><small>{{ line.item.code }}</small></td>
+        <td class="numeric">{{ line.quantity_base_units|floatformat:"-3" }} {{ line.item.base_unit }}</td>
+        <td class="numeric">{{ received|floatformat:"-3" }}</td>
+        <td class="numeric"><strong>{{ outstanding|floatformat:"-3" }}</strong></td>
+        <td class="numeric">KES {{ line.quoted_unit_cost|floatformat:2 }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<form method="post" enctype="multipart/form-data" class="panel form-panel" data-unsaved-warning data-formset>{% csrf_token %}
+  <div class="panel-head"><div><p class="eyebrow">Supplier document</p><h2>Invoice or delivery note</h2></div></div>
+  <div class="callout">
+    {% include "hospital/_icon.html" with name="camera" %}
+    <strong>Photograph the invoice before you post the stock.</strong>
+    <p>The balance this delivery creates is checked against this document later. A receipt keyed in without it cannot be verified by anyone who was not standing at the counter.</p>
+  </div>
+  <div class="form-grid">{% include "hospital/_form_fields.html" %}</div>
+
+  <div class="section-divider">
+    <div><p class="eyebrow">Delivered goods</p><h2>Batches counted in</h2></div>
+    <button class="button secondary small" type="button" data-add-form>{% include "hospital/_icon.html" with name="plus" %} Add batch</button>
+  </div>
+  <p class="help-text">One row per batch. Two boxes of the same medicine with different expiry dates are two rows. Quantities are in the product base unit.</p>
+  {{ formset.management_form }}
+  {% if formset.non_form_errors %}<div class="message error">{{ formset.non_form_errors }}</div>{% endif %}
+  <div class="repeatable-list" data-form-list>{% for line_form in formset %}{% include "hospital/_formset_row.html" with line_form=line_form %}{% endfor %}</div>
+  <template data-form-template>{% include "hospital/_formset_row.html" with line_form=formset.empty_form %}</template>
+
+  <div class="callout warning-callout">
+    <strong>What posting does.</strong>
+    <p>Stock increases immediately by the quantities entered here, as receipt movements that cannot be edited or deleted. Quantity and price differences against the approved order are recorded and raised as exceptions rather than blocked, because the ledger must match the shelf. Expired batches are refused.</p>
+  </div>
+
+  <div class="form-actions">
+    <a class="button ghost" href="{% url 'deliveries' %}">Cancel</a>
+    <button class="button primary" type="submit">Post delivery to stock</button>
+  </div>
+</form>
+{% endblock %}
