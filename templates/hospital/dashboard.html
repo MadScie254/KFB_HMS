@@ -9,7 +9,7 @@
 
 {% if role == 'owner' %}
 <section class="kpi-grid" aria-label="Today’s key indicators">
-  <a href="{% url 'reports' %}" class="kpi"><span>Net billed charges</span><strong>KES {{ net_billed|floatformat:2 }}</strong><small>Posted today</small></a>
+  <a href="{% url 'reports' %}" class="kpi"><span>Net billed charges</span><strong>KES {{ net_billed|floatformat:2 }}</strong><small>Charges posted less credits approved today</small></a>
   <a href="{% url 'reports' %}" class="kpi"><span>Verified collections</span><strong>KES {{ verified_collections|floatformat:2 }}</strong><small>Cash + verified electronic</small></a>
   <a href="{% url 'reports' %}" class="kpi warning"><span>Unverified M-PESA</span><strong>KES {{ unverified_mpesa|floatformat:2 }}</strong><small>Requires reconciliation</small></a>
   <a href="{% url 'reports' %}" class="kpi"><span>Receivables</span><strong>KES {{ receivables|floatformat:2 }}</strong><small>Outstanding posted bills</small></a>

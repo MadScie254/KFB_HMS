@@ -147,6 +147,19 @@ def invoiced_total(invoices):
     return InvoiceLine.objects.filter(invoice__in=invoices).aggregate(v=Sum("line_total"))["v"] or Decimal("0.00")
 
 
+def net_billed_since(start):
+    """Charges posted less credits approved during the same period."""
+    charges = InvoiceLine.objects.filter(invoice__posted_at__gte=start).exclude(
+        invoice__status=Invoice.Status.DRAFT,
+    ).aggregate(v=Sum("line_total"))["v"] or Decimal("0.00")
+    credits = CreditNote.objects.filter(
+        status=CreditNote.Status.APPROVED,
+        reviewed_at__gte=start,
+        invoice__posted_at__isnull=False,
+    ).aggregate(v=Sum("amount"))["v"] or Decimal("0.00")
+    return charges - credits
+
+
 def outstanding_receivables():
     """Posted-but-unsettled value: billed − approved credits − settled allocations.
 
@@ -304,9 +317,8 @@ def dashboard(request):
         })
     if role == Role.OWNER:
         valid_payments = Payment.objects.filter(status=Payment.Status.VALID, received_at__gte=start)
-        posted = Invoice.objects.filter(posted_at__gte=start).exclude(status=Invoice.Status.DRAFT)
         context.update({
-            "net_billed": invoiced_total(posted),
+            "net_billed": net_billed_since(start),
             "verified_collections": verified_collections_since(start),
             "unverified_mpesa": valid_payments.filter(method=Payment.Method.MPESA, verification_status=Payment.Verification.UNVERIFIED).aggregate(v=Sum("amount"))["v"] or Decimal("0.00"),
             "receivables": outstanding_receivables(),
@@ -1059,7 +1071,7 @@ def _report_context(days_value):
     payments = Payment.objects.filter(received_at__gte=start, status=Payment.Status.VALID)
     return {
         "days": days,
-        "net_billed": invoiced_total(invoices),
+        "net_billed": net_billed_since(start),
         "verified_collections": verified_collections_since(start),
         "unverified_mpesa": payments.filter(method=Payment.Method.MPESA, verification_status=Payment.Verification.UNVERIFIED).aggregate(v=Sum("amount"))["v"] or Decimal("0.00"),
         "receivables": outstanding_receivables(),

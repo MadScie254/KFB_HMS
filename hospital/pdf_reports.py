@@ -140,7 +140,7 @@ def build_financial_report_pdf(*, context, hospital_name, generated_by):
     ]
 
     kpis = [
-        ("NET BILLED CHARGES", _money(context["net_billed"]), "Posted lines in period"),
+        ("NET BILLED CHARGES", _money(context["net_billed"]), "Posted charges less approved credits in period"),
         ("VERIFIED COLLECTIONS", _money(context["verified_collections"]), "Cash and verified M-PESA"),
         ("UNVERIFIED M-PESA", _money(context["unverified_mpesa"]), "Excluded from verified collections"),
         ("RECEIVABLES", _money(context["receivables"]), "Current outstanding balance"),

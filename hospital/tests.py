@@ -407,6 +407,27 @@ class WorkflowTests(HospitalFixtureMixin, TestCase):
             )
         self.assertEqual(order.invoice.balance, Decimal("40"))
 
+    def test_net_billed_uses_credit_approval_date_on_dashboard_and_report(self):
+        current = self.prepare(20)
+        current_credit = CreditNote.objects.create(
+            invoice=current.invoice, amount=20, reason="Current correction", requested_by=self.reception,
+        )
+        approve_credit_note(actor=self.reviewer, credit_note_id=current_credit.pk, approve=True)
+
+        older = self.prepare(10)
+        Invoice.objects.filter(pk=older.invoice_id).update(posted_at=timezone.now() - timedelta(days=30))
+        older_credit = CreditNote.objects.create(
+            invoice=older.invoice, amount=10, reason="Earlier charge correction", requested_by=self.reception,
+        )
+        approve_credit_note(actor=self.reviewer, credit_note_id=older_credit.pk, approve=True)
+
+        self.client.force_login(self.owner)
+        dashboard = self.client.get(reverse("dashboard"))
+        report = self.client.get(reverse("reports"), {"days": "7"})
+        self.assertEqual(dashboard.context["net_billed"], Decimal("70"))
+        self.assertEqual(report.context["net_billed"], Decimal("70"))
+        self.assertContains(report, "Charges posted less credits approved in period")
+
     def test_bilateral_case_accrues_one_case_fee(self):
         case = EyeCase.objects.create(
             patient=self.patient, proposed_procedure="Unspecified eye procedure", eye="both",
