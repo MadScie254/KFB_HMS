@@ -394,7 +394,7 @@ def patient_attachment_download(request, pk):
     return response
 
 
-@role_required(Role.RECEPTION, Role.OWNER)
+@role_required(Role.OWNER, Role.CLINICIAN, Role.NURSE)
 def patient_access_pdf(request, pk):
     patient = get_object_or_404(Patient.objects.prefetch_related("encounters__clinical_notes__author"), pk=pk)
     pdf = build_patient_access_pdf(

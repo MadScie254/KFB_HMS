@@ -1361,6 +1361,23 @@ class EnhancedWorkflowTests(HospitalFixtureMixin, TestCase):
         self.assertIn(self.patient.patient_number, response["Content-Disposition"])
         self.assertTrue(response.content.startswith(b"%PDF"))
 
+    def test_reception_cannot_export_clinical_notes_through_patient_pdf(self):
+        encounter = Encounter.objects.create(patient=self.patient, started_by=self.reception)
+        ClinicalNote.objects.create(
+            encounter=encounter, author=self.clinician, status=ClinicalNote.Status.SIGNED,
+            assessment="Sensitive assessment", plan="Sensitive plan", signed_at=timezone.now(),
+        )
+        url = reverse("patient_access_pdf", kwargs={"pk": self.patient.pk})
+        self.client.login(username=self.reception.username, password=self.password)
+        self.assertEqual(self.client.get(url).status_code, 403)
+        self.assertNotContains(
+            self.client.get(reverse("patient_detail", kwargs={"pk": self.patient.pk})),
+            "Access-record PDF",
+        )
+        self.client.logout()
+        self.client.login(username=self.clinician.username, password=self.password)
+        self.assertEqual(self.client.get(url).status_code, 200)
+
     def test_reviewer_can_verify_mpesa_from_reports(self):
         order = self.prepare(1)
         payment = record_payment(
