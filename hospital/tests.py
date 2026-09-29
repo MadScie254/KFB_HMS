@@ -33,7 +33,9 @@ from .analytics import (
     supplier_price_history,
 )
 from .models import (
+    Admission,
     AuditEvent,
+    Bed,
     CashShift,
     CatalogueItem,
     ClinicalAttachment,
@@ -63,6 +65,7 @@ from .models import (
     StockMovement,
     StockWriteOff,
     Supplier,
+    Ward,
 )
 from .permissions import ROLE_NAVIGATION, user_role
 from .services import (
@@ -70,7 +73,9 @@ from .services import (
     approve_credit_note,
     approve_purchase_order,
     check_delivery,
+    close_encounter,
     complete_eye_case,
+    discharge_admission,
     dispense_order,
     issue_to_department,
     open_stock_count,
@@ -481,6 +486,67 @@ class WorkflowTests(HospitalFixtureMixin, TestCase):
             approve_purchase_order(actor=self.reviewer, order_id=order.pk)
         order.refresh_from_db()
         self.assertEqual(order.status, "received")
+
+    def test_encounter_closure_clears_queue_without_erasing_debt(self):
+        encounter = Encounter.objects.create(patient=self.patient, started_by=self.reception)
+        invoice = Invoice.objects.create(
+            patient=self.patient, encounter=encounter, status=Invoice.Status.POSTED,
+            posted_at=timezone.now(), created_by=self.reception,
+        )
+        InvoiceLine.objects.create(
+            invoice=invoice, item=self.product, description="Visit charge",
+            department="Outpatient", quantity=1, unit_price=100,
+        )
+        with self.assertRaisesMessage(ValidationError, "Only a clinician"):
+            close_encounter(actor=self.reception, encounter_id=encounter.pk, reason="Done")
+        self.client.force_login(self.clinician)
+        self.assertContains(self.client.get(reverse("queue")), self.patient.full_name)
+        response = self.client.post(
+            reverse("encounter_close", kwargs={"encounter_id": encounter.pk}),
+            {"reason": "Care completed"}, follow=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        encounter.refresh_from_db()
+        self.assertEqual(encounter.status, Encounter.Status.CLOSED)
+        self.assertEqual(encounter.closed_by, self.clinician)
+        self.assertNotContains(response, self.patient.full_name)
+        self.assertEqual(invoice.balance, Decimal("100"))
+        closed_at = encounter.closed_at
+        close_encounter(actor=self.clinician, encounter_id=encounter.pk, reason="Repeated request")
+        encounter.refresh_from_db()
+        self.assertEqual(encounter.closed_at, closed_at)
+        self.assertEqual(AuditEvent.objects.filter(action="encounter.closed", entity_id=str(encounter.pk)).count(), 1)
+
+    def test_clinical_discharge_frees_bed_and_keeps_finance_separate(self):
+        ward = Ward.objects.create(name="Test ward")
+        bed = Bed.objects.create(ward=ward, label="Bed 1")
+        encounter = Encounter.objects.create(patient=self.patient, started_by=self.reception)
+        admission = Admission.objects.create(
+            patient=self.patient, encounter=encounter, bed=bed, admitted_by=self.clinician,
+        )
+        with self.assertRaisesMessage(ValidationError, "Only a clinician"):
+            discharge_admission(actor=self.reception, admission_id=admission.pk, summary="Stable")
+        self.client.force_login(self.clinician)
+        self.assertNotContains(self.client.get(reverse("queue")), self.patient.full_name)
+        self.assertContains(self.client.get(reverse("wards")), "Discharge clinically")
+        response = self.client.post(
+            reverse("admission_discharge", kwargs={"pk": admission.pk}),
+            {"summary": "Stable for home care"}, follow=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        admission.refresh_from_db()
+        encounter.refresh_from_db()
+        self.assertEqual(admission.clinical_status, "discharged")
+        self.assertEqual(admission.financial_status, "open")
+        self.assertEqual(admission.discharged_by, self.clinician)
+        self.assertEqual(encounter.status, Encounter.Status.CLOSED)
+        self.assertContains(response, "Available")
+        self.assertNotContains(response, "Discharge clinically")
+        discharged_at = admission.discharged_at
+        discharge_admission(actor=self.clinician, admission_id=admission.pk, summary="Repeated request")
+        admission.refresh_from_db()
+        self.assertEqual(admission.discharged_at, discharged_at)
+        self.assertEqual(AuditEvent.objects.filter(action="admission.discharged", entity_id=str(admission.pk)).count(), 1)
 
     def test_signed_note_cannot_be_signed_twice(self):
         encounter = Encounter.objects.create(patient=self.patient, started_by=self.reception)

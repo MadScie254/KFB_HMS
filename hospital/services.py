@@ -7,6 +7,7 @@ from django.db.models import F, Sum
 from django.utils import timezone
 
 from .models import (
+    Admission,
     AuditEvent,
     CashShift,
     CatalogueItem,
@@ -14,6 +15,7 @@ from .models import (
     CreditNote,
     DepartmentIssue,
     DepartmentIssueLine,
+    Encounter,
     ExceptionRecord,
     EyeCase,
     GoodsReceipt,
@@ -135,6 +137,49 @@ def active_price(item):
 def models_q_effective(now):
     from django.db.models import Q
     return Q(effective_to__isnull=True) | Q(effective_to__gt=now)
+
+
+@transaction.atomic
+def close_encounter(*, actor, encounter_id, reason, request=None):
+    if user_role(actor) not in {Role.CLINICIAN, Role.OWNER}:
+        raise ValidationError("Only a clinician or owner may close an encounter.")
+    encounter = Encounter.objects.select_for_update().get(pk=encounter_id)
+    if encounter.status == Encounter.Status.CLOSED:
+        return encounter
+    if Admission.objects.filter(encounter=encounter, discharged_at__isnull=True).exists():
+        raise ValidationError("Discharge the active admission before closing this encounter.")
+    reason = reason.strip()
+    if not reason:
+        raise ValidationError("Record why the clinical encounter is being closed.")
+    encounter.status = Encounter.Status.CLOSED
+    encounter.closed_at = timezone.now()
+    encounter.closed_by = actor
+    encounter.closure_reason = reason
+    encounter.save(update_fields=["status", "closed_at", "closed_by", "closure_reason", "updated_at"])
+    audit(actor, "encounter.closed", encounter, reason=reason, request=request)
+    return encounter
+
+
+@transaction.atomic
+def discharge_admission(*, actor, admission_id, summary, request=None):
+    if user_role(actor) not in {Role.CLINICIAN, Role.OWNER}:
+        raise ValidationError("Only a clinician or owner may discharge an admission.")
+    encounter_id = Admission.objects.values_list("encounter_id", flat=True).get(pk=admission_id)
+    Encounter.objects.select_for_update().get(pk=encounter_id)
+    admission = Admission.objects.select_for_update().get(pk=admission_id)
+    if admission.discharged_at is not None:
+        return admission
+    summary = summary.strip()
+    if not summary:
+        raise ValidationError("Record a clinical discharge summary.")
+    admission.discharge_summary = summary
+    admission.discharged_at = timezone.now()
+    admission.discharged_by = actor
+    admission.clinical_status = "discharged"
+    admission.save(update_fields=["discharge_summary", "discharged_at", "discharged_by", "clinical_status", "updated_at"])
+    audit(actor, "admission.discharged", admission, reason=summary, request=request)
+    close_encounter(actor=actor, encounter_id=encounter_id, reason=f"Discharged: {summary}", request=request)
+    return admission
 
 
 @transaction.atomic

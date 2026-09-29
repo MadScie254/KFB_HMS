@@ -1,3 +1,33 @@
 {% extends "base.html" %}{% block title %}Wards{% endblock %}
-{% block content %}<div class="page-heading"><div><p class="breadcrumbs"><a href="{% url 'dashboard' %}">Home</a> / Wards</p><h1>Ward board</h1><p>Clinical discharge and financial settlement are tracked separately.</p></div></div><div class="ward-grid">{% for ward in wards %}<section class="panel"><div class="panel-head"><h2>{{ ward.name }}</h2><span>{{ ward.beds.count }} configured beds</span></div><div class="bed-grid">{% for bed in ward.beds.all %}<div class="bed {% if bed.admissions.all %}occupied{% endif %}"><span>{{ bed.label }}</span>{% for admission in bed.admissions.all %}{% if not admission.discharged_at %}<strong>{{ admission.patient.full_name }}</strong><small>{{ admission.clinical_status|title }} · Finance {{ admission.financial_status }}</small>{% endif %}{% empty %}<small>Available</small>{% endfor %}</div>{% endfor %}</div></section>{% empty %}<section class="panel empty"><strong>No wards or beds configured.</strong><p>Production setup must configure the real 35–40 bed register; no inventory is invented.</p></section>{% endfor %}</div>{% endblock %}
-
+{% block content %}
+<div class="page-heading">
+  <div><p class="breadcrumbs"><a href="{% url 'dashboard' %}">Home</a> / Wards</p><h1>Ward board</h1><p>Clinical discharge frees a bed. Financial balances remain open until separately settled.</p></div>
+</div>
+<div class="ward-grid">
+  {% for ward in wards %}
+  <section class="panel">
+    <div class="panel-head"><h2>{{ ward.name }}</h2><span>{{ ward.beds.count }} configured beds</span></div>
+    <div class="bed-grid">
+      {% for bed in ward.beds.all %}
+      <div class="bed {% if bed.active_admissions %}occupied{% endif %}">
+        <span>{{ bed.label }}</span>
+        {% for admission in bed.active_admissions %}
+        <strong>{{ admission.patient.full_name }}</strong>
+        <small>{{ admission.clinical_status|title }} · Finance {{ admission.financial_status }}</small>
+        {% if current_role == 'clinician' or current_role == 'owner' %}
+        <form method="post" action="{% url 'admission_discharge' admission.pk %}" class="form-stack" data-confirm="Clinically discharge this patient and free the bed?">{% csrf_token %}
+          <label for="discharge-{{ admission.pk }}">Discharge summary</label>
+          <textarea class="field-control" id="discharge-{{ admission.pk }}" name="summary" rows="2" required></textarea>
+          <button class="button secondary small" type="submit">Discharge clinically</button>
+        </form>
+        {% endif %}
+        {% empty %}<small>Available</small>
+        {% endfor %}
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+  {% empty %}<section class="panel empty"><strong>No wards or beds configured.</strong><p>Production setup must configure the real 35–40 bed register; no inventory is invented.</p></section>
+  {% endfor %}
+</div>
+{% endblock %}

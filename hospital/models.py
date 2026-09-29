@@ -185,6 +185,8 @@ class Encounter(ReferenceNumberMixin, TimeStampedModel):
     started_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="encounters_started")
     assigned_clinician = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="assigned_encounters")
     closed_at = models.DateTimeField(null=True, blank=True)
+    closed_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="encounters_closed")
+    closure_reason = models.TextField(blank=True)
 
     class Meta:
         ordering = ["-created_at"]
@@ -650,6 +652,7 @@ class Admission(TimeStampedModel):
     clinical_status = models.CharField(max_length=18, default="admitted", choices=[("admitted", "Admitted"), ("discharged", "Clinically discharged")])
     financial_status = models.CharField(max_length=18, default="open", choices=[("open", "Balance open"), ("settled", "Settled")])
     admitted_by = models.ForeignKey(User, on_delete=models.PROTECT)
+    discharged_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="admissions_discharged")
     discharge_summary = models.TextField(blank=True)
 
     class Meta:

@@ -15,7 +15,7 @@ from django.contrib.auth.views import LoginView
 from django.core.exceptions import ValidationError
 from django.core.paginator import Paginator
 from django.db import IntegrityError, connection, transaction
-from django.db.models import Case, Count, DecimalField, IntegerField, Max, Q, Sum, Value, When
+from django.db.models import Case, Count, DecimalField, IntegerField, Max, Prefetch, Q, Sum, Value, When
 from django.http import FileResponse, Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
@@ -106,7 +106,9 @@ from .services import (
     approve_purchase_order,
     audit,
     check_delivery,
+    close_encounter,
     complete_eye_case,
+    discharge_admission,
     dispense_order,
     issue_to_department,
     open_stock_count,
@@ -299,11 +301,11 @@ def dashboard(request):
     start = timezone.make_aware(timezone.datetime.combine(today, timezone.datetime.min.time()))
     context = {
         "role": role,
-        "open_encounters": Encounter.objects.exclude(status=Encounter.Status.CLOSED).count(),
+        "open_encounters": open_clinical_encounters().count(),
         "today_patients": Patient.objects.filter(created_at__gte=start).count(),
         "open_orders": PharmacyOrder.objects.exclude(status__in=[PharmacyOrder.Status.DISPENSED, PharmacyOrder.Status.CANCELLED]).count(),
         "exceptions": ExceptionRecord.objects.exclude(status=ExceptionRecord.Status.RESOLVED).order_by("-created_at")[:6],
-        "queue": Encounter.objects.exclude(status=Encounter.Status.CLOSED).select_related("patient").order_by("created_at")[:8],
+        "queue": open_clinical_encounters().select_related("patient").order_by("created_at")[:8],
         "my_shift": CashShift.objects.filter(cashier=request.user, status=CashShift.Status.OPEN).first(),
     }
     if role in {Role.PHARMACY, Role.PROCUREMENT, Role.OWNER}:
@@ -485,15 +487,35 @@ TRIAGE_RANK = Case(
 )
 
 
+def open_clinical_encounters():
+    active_admissions = Admission.objects.filter(discharged_at__isnull=True).values("encounter_id")
+    return Encounter.objects.exclude(status=Encounter.Status.CLOSED).exclude(pk__in=active_admissions)
+
+
 @role_required(Role.OWNER, Role.RECEPTION, Role.CLINICIAN, Role.NURSE, Role.LAB)
 def queue(request):
     encounters = (
-        Encounter.objects.exclude(status=Encounter.Status.CLOSED)
+        open_clinical_encounters()
         .select_related("patient", "assigned_clinician")
         .annotate(triage_rank=TRIAGE_RANK)
         .order_by("triage_rank", "created_at")
     )
     return render(request, "hospital/queue.html", {"encounters": encounters})
+
+
+@role_required(Role.OWNER, Role.CLINICIAN)
+def encounter_close(request, encounter_id):
+    if request.method != "POST":
+        raise Http404
+    try:
+        encounter = close_encounter(
+            actor=request.user, encounter_id=encounter_id,
+            reason=request.POST.get("reason", ""), request=request,
+        )
+        messages.success(request, f"Encounter {encounter.encounter_number} closed. Any outstanding balance remains visible to reception.")
+    except ValidationError as exc:
+        messages.error(request, _validation_message(exc))
+    return redirect("queue")
 
 
 @role_required(Role.OWNER, Role.CLINICIAN)
@@ -1199,8 +1221,13 @@ def service_order_update(request, pk):
 
 @role_required(Role.CLINICIAN, Role.NURSE, Role.OWNER)
 def wards(request):
-    wards_qs = Ward.objects.prefetch_related("beds__admissions__patient").filter(active=True)
-    return render(request, "hospital/wards.html", {"wards": wards_qs, "admissions": Admission.objects.filter(discharged_at__isnull=True).select_related("patient", "bed__ward")})
+    active_admissions = Prefetch(
+        "beds__admissions",
+        queryset=Admission.objects.filter(discharged_at__isnull=True).select_related("patient"),
+        to_attr="active_admissions",
+    )
+    wards_qs = Ward.objects.filter(active=True).prefetch_related("beds", active_admissions)
+    return render(request, "hospital/wards.html", {"wards": wards_qs})
 
 
 @role_required(Role.OWNER, Role.CLINICIAN)
@@ -1217,6 +1244,21 @@ def admission_create(request, encounter_id):
         messages.success(request, f"{encounter.patient.full_name} admitted to {admission.bed.ward.name}, {admission.bed.label}.")
         return redirect("wards")
     return render(request, "hospital/admission_form.html", {"form": form, "encounter": encounter})
+
+
+@role_required(Role.OWNER, Role.CLINICIAN)
+def admission_discharge(request, pk):
+    if request.method != "POST":
+        raise Http404
+    try:
+        admission = discharge_admission(
+            actor=request.user, admission_id=pk,
+            summary=request.POST.get("summary", ""), request=request,
+        )
+        messages.success(request, f"{admission.patient.full_name} clinically discharged. The bed is available; any outstanding balance stays open.")
+    except ValidationError as exc:
+        messages.error(request, _validation_message(exc))
+    return redirect("wards")
 
 
 @role_required(Role.EYE, Role.CLINICIAN, Role.OWNER)
