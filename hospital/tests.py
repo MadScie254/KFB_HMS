@@ -4,10 +4,13 @@ import shutil
 import subprocess
 import tempfile
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Barrier
+from unittest import skipUnless
 from unittest.mock import patch
 
 from django.conf import settings
@@ -16,6 +19,7 @@ from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.db import close_old_connections, connection, connections
 from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -260,6 +264,28 @@ class WorkflowTests(HospitalFixtureMixin, TestCase):
         self.assertEqual(note.status, CreditNote.Status.APPROVED)
         self.assertEqual(self.batch.quantity_on_hand, Decimal("200"), "Financial credit must not return stock")
 
+    def test_two_credits_cannot_exceed_one_invoice_balance(self):
+        order = self.prepare(20)
+        first = CreditNote.objects.create(invoice=order.invoice, amount=60, reason="First", requested_by=self.reception)
+        second = CreditNote.objects.create(invoice=order.invoice, amount=60, reason="Second", requested_by=self.reception)
+        approve_credit_note(actor=self.reviewer, credit_note_id=first.pk, approve=True)
+        with self.assertRaisesMessage(ValidationError, "exceeds the current invoice balance"):
+            approve_credit_note(actor=self.reviewer, credit_note_id=second.pk, approve=True)
+        second.refresh_from_db()
+        self.assertEqual(second.status, CreditNote.Status.PENDING)
+        self.assertEqual(order.invoice.balance, Decimal("40"))
+
+    def test_payment_after_credit_cannot_exceed_reduced_balance(self):
+        order = self.prepare(20)
+        note = CreditNote.objects.create(invoice=order.invoice, amount=60, reason="Correction", requested_by=self.reception)
+        approve_credit_note(actor=self.reviewer, credit_note_id=note.pk, approve=True)
+        with self.assertRaisesMessage(ValidationError, "exceeds the outstanding balance"):
+            record_payment(
+                actor=self.reception, invoice_id=order.invoice_id, amount=60,
+                method=Payment.Method.CASH, reference="", idempotency_key="post-credit-overpay",
+            )
+        self.assertEqual(order.invoice.balance, Decimal("40"))
+
     def test_bilateral_case_accrues_one_case_fee(self):
         case = EyeCase.objects.create(patient=self.patient, proposed_procedure="Unspecified eye procedure", eye="both", readiness="ready", package_price=24000)
         complete_eye_case(actor=self.clinician, case_id=case.pk)
@@ -356,6 +382,58 @@ class WorkflowTests(HospitalFixtureMixin, TestCase):
         prescription.items.get().refresh_from_db()
         self.assertEqual(prescription.items.get().dispensed_quantity, Decimal("3"))
         self.assertEqual(self.batch.quantity_on_hand, Decimal("197"))
+
+
+@skipUnless(connection.vendor == "postgresql", "Row-lock races require PostgreSQL")
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
+class InvoiceBalanceRaceTests(HospitalFixtureMixin, TransactionTestCase):
+    def run_race(self, first, second):
+        start = Barrier(2)
+
+        def run(action):
+            close_old_connections()
+            try:
+                start.wait(timeout=10)
+                try:
+                    action()
+                    return "applied"
+                except ValidationError:
+                    return "rejected"
+            finally:
+                connections.close_all()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(run, (first, second)))
+        self.assertCountEqual(results, ["applied", "rejected"])
+
+    def test_two_credit_approvals_race_for_one_balance(self):
+        order = self.prepare(20)
+        notes = [
+            CreditNote.objects.create(invoice=order.invoice, amount=60, reason=f"Correction {index}", requested_by=self.reception)
+            for index in range(2)
+        ]
+        self.run_race(
+            lambda: approve_credit_note(actor=self.reviewer, credit_note_id=notes[0].pk, approve=True),
+            lambda: approve_credit_note(actor=self.reviewer, credit_note_id=notes[1].pk, approve=True),
+        )
+        self.assertEqual(order.invoice.balance, Decimal("40"))
+        self.assertEqual(CreditNote.objects.filter(invoice=order.invoice, status=CreditNote.Status.APPROVED).count(), 1)
+
+    def test_credit_approval_and_payment_race_for_one_balance(self):
+        order = self.prepare(20)
+        note = CreditNote.objects.create(invoice=order.invoice, amount=60, reason="Correction", requested_by=self.reception)
+        self.run_race(
+            lambda: approve_credit_note(actor=self.reviewer, credit_note_id=note.pk, approve=True),
+            lambda: record_payment(
+                actor=self.reception, invoice_id=order.invoice_id, amount=60,
+                method=Payment.Method.CASH, reference="", idempotency_key="raced-cash-payment",
+            ),
+        )
+        self.assertEqual(order.invoice.balance, Decimal("40"))
+        self.assertEqual(
+            CreditNote.objects.filter(invoice=order.invoice, status=CreditNote.Status.APPROVED).count()
+            + PaymentAllocation.objects.filter(invoice=order.invoice).count(), 1,
+        )
 
 
 @override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])

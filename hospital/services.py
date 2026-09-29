@@ -308,18 +308,24 @@ def dispense_order(*, actor, order_id, idempotency_key, request=None):
 def approve_credit_note(*, actor, credit_note_id, approve, request=None):
     if user_role(actor) not in {Role.REVIEWER, Role.OWNER}:
         raise ValidationError("Only a delegated reviewer may review a credit note.")
-    note = CreditNote.objects.select_for_update().select_related("invoice").get(pk=credit_note_id)
+    # Payment takes the invoice lock first. Credit reviews must use the same
+    # lock order so every balance check sees the preceding committed change.
+    invoice_id = CreditNote.objects.values_list("invoice_id", flat=True).get(pk=credit_note_id)
+    invoice = Invoice.objects.select_for_update().get(pk=invoice_id)
+    note = CreditNote.objects.select_for_update().get(pk=credit_note_id)
+    if note.invoice_id != invoice.pk:
+        raise ValidationError("The credit note's invoice changed during review. Please retry.")
     if note.requested_by_id == actor.id:
         raise ValidationError("You cannot approve your own request.")
     if note.status != CreditNote.Status.PENDING:
         raise ValidationError("This request has already been reviewed.")
-    if note.amount > note.invoice.balance:
+    if approve and note.amount > invoice.balance:
         raise ValidationError("Credit exceeds the current invoice balance.")
     note.status = CreditNote.Status.APPROVED if approve else CreditNote.Status.REJECTED
     note.reviewed_by = actor
     note.reviewed_at = timezone.now()
     note.save(update_fields=["status", "reviewed_by", "reviewed_at", "updated_at"])
-    note.invoice.refresh_status()
+    invoice.refresh_status()
     audit(actor, f"credit_note.{note.status}", note, reason=note.reason, request=request)
     return note
 
