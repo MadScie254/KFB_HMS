@@ -125,7 +125,7 @@ class EncounterForm(StyledFormMixin, forms.ModelForm):
 
 
 class ClinicalNoteForm(StyledFormMixin, forms.ModelForm):
-    expected_version = forms.IntegerField(widget=forms.HiddenInput(), required=False)
+    expected_revision = forms.IntegerField(widget=forms.HiddenInput(), min_value=0)
 
     class Meta:
         model = ClinicalNote

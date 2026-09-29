@@ -563,6 +563,46 @@ class RegressionTests(HospitalFixtureMixin, TestCase):
     Each test fails against the pre-audit code; see docs/AUDIT_2026-09-18.md.
     """
 
+    def test_stale_clinical_draft_cannot_overwrite_or_sign(self):
+        encounter = Encounter.objects.create(patient=self.patient, started_by=self.reception)
+        url = reverse("clinical_note", kwargs={"encounter_id": encounter.pk})
+        self.client.force_login(self.clinician)
+        self.assertEqual(self.client.get(url).context["form"].initial["expected_revision"], 0)
+        first = self.client.post(url, {"expected_revision": "0", "assessment": "Initial", "action": "save"})
+        self.assertEqual(first.status_code, 302)
+        note = ClinicalNote.objects.get(encounter=encounter)
+        self.assertEqual(note.revision, 1)
+
+        stale_new_tab = self.client.post(url, {
+            "expected_revision": "0", "assessment": "Stale new tab", "action": "save",
+        })
+        self.assertContains(stale_new_tab, "changed in another tab")
+        note.refresh_from_db()
+        self.assertEqual(note.assessment, "Initial")
+
+        tab_revision = self.client.get(url).context["form"].initial["expected_revision"]
+        self.assertEqual(tab_revision, 1)
+        self.assertEqual(self.client.post(url, {
+            "expected_revision": str(tab_revision), "assessment": "Saved from first tab", "action": "save",
+        }).status_code, 302)
+        stale_sign = self.client.post(url, {
+            "expected_revision": str(tab_revision), "assessment": "Text from second tab", "action": "sign",
+        })
+        self.assertContains(stale_sign, "changed in another tab")
+        self.assertContains(stale_sign, "Text from second tab")
+        note.refresh_from_db()
+        self.assertEqual(note.assessment, "Saved from first tab")
+        self.assertEqual(note.revision, 2)
+        self.assertEqual(note.status, ClinicalNote.Status.DRAFT)
+
+        signed = self.client.post(url, {
+            "expected_revision": "2", "assessment": "Final signed text", "action": "sign",
+        })
+        self.assertEqual(signed.status_code, 302)
+        note.refresh_from_db()
+        self.assertEqual(note.status, ClinicalNote.Status.SIGNED)
+        self.assertEqual(note.revision, 3)
+
     # C1 — the lock screen was a no-op: the middleware read resolver_match
     # before URL resolution, and unlocked_required was applied to no view.
     def test_locked_session_cannot_reach_clinical_screens(self):

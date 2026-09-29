@@ -488,7 +488,7 @@ def queue(request):
 def clinical_note(request, encounter_id):
     encounter = get_object_or_404(Encounter.objects.select_related("patient"), pk=encounter_id)
     draft = ClinicalNote.objects.filter(encounter=encounter, author=request.user, status=ClinicalNote.Status.DRAFT).first()
-    form = ClinicalNoteForm(request.POST or None, instance=draft, initial={"expected_version": draft.version if draft else 0})
+    form = ClinicalNoteForm(request.POST or None, instance=draft, initial={"expected_revision": draft.revision if draft else 0})
     if request.method == "POST" and form.is_valid():
         with transaction.atomic():
             # Serialise note numbering on the encounter. Two tabs can no longer
@@ -499,8 +499,8 @@ def clinical_note(request, encounter_id):
                 author=request.user,
                 status=ClinicalNote.Status.DRAFT,
             ).first()
-            expected_version = form.cleaned_data.get("expected_version") or 0
-            if current_draft and expected_version not in {0, current_draft.version}:
+            expected_revision = form.cleaned_data["expected_revision"]
+            if expected_revision != (current_draft.revision if current_draft else 0):
                 form.add_error(None, "This note changed in another tab. Reload before saving again.")
             else:
                 locked_form = ClinicalNoteForm(request.POST, instance=current_draft)
@@ -515,6 +515,8 @@ def clinical_note(request, encounter_id):
                             ).aggregate(v=Max("version"))["v"]
                             or 0
                         ) + 1
+                    else:
+                        note.revision = current_draft.revision + 1
                     note.save()
                     if request.POST.get("action") == "sign":
                         note.sign()

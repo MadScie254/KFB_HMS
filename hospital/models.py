@@ -215,6 +215,7 @@ class ClinicalNote(TimeStampedModel):
     encounter = models.ForeignKey(Encounter, on_delete=models.PROTECT, related_name="clinical_notes")
     author = models.ForeignKey(User, on_delete=models.PROTECT, related_name="clinical_notes")
     version = models.PositiveIntegerField(default=1)
+    revision = models.PositiveIntegerField(default=1)
     status = models.CharField(max_length=12, choices=Status.choices, default=Status.DRAFT)
     complaints = models.TextField(blank=True)
     history = models.TextField(blank=True)
