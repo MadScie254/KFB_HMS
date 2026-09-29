@@ -214,8 +214,8 @@ def stock_position(expiry_window_days=DEFAULT_EXPIRY_WINDOW_DAYS):
 def stock_activity(days=7):
     """What moved in the period, and what the movement was worth.
 
-    Cost of goods dispensed prices each outward movement at the purchase cost of
-    the batch it came from, so it reconciles to the same rows the balances do.
+    Each movement keeps its unit cost at posting, so later deliveries at a new
+    price do not rewrite historical cost of goods or shrinkage.
     """
     start = timezone.now() - timedelta(days=days)
     movements = StockMovement.objects.filter(event_at__gte=start).select_related("batch__item")
@@ -229,7 +229,7 @@ def stock_activity(days=7):
     movers = {}
 
     for movement in movements:
-        cost = movement.batch.purchase_cost_per_base_unit
+        cost = movement.unit_cost_at_event
         delta = movement.quantity_delta
         if movement.movement_type == StockMovement.MovementType.RECEIPT:
             received_units += delta
@@ -357,7 +357,7 @@ def shrinkage(days=90):
     by_item = {}
 
     for movement in movements:
-        cost = movement.batch.purchase_cost_per_base_unit
+        cost = movement.unit_cost_at_event
         value = (abs(movement.quantity_delta) * cost).quantize(Decimal("0.01"))
         if movement.reference_type == "StockWriteOff":
             written_off_value += value

@@ -867,6 +867,53 @@ class StockControlTests(HospitalFixtureMixin, TestCase):
         self.assertEqual(movement.movement_type, StockMovement.MovementType.RECEIPT)
         self.assertEqual(movement.quantity_delta, Decimal("100.000"))
 
+    def test_repeat_batch_receipts_use_weighted_average_and_preserve_dispense_cost(self):
+        first_order = self.approved_order(unit_cost=Decimal("3.00"))
+        first = self.receive(
+            first_order, reference="COST-001", amount=Decimal("300"),
+            lines=[self.delivery_line(first_order, batch="B-001", unit_cost=Decimal("3.00"))],
+        )
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.purchase_cost_per_base_unit, Decimal("2.333333"))
+
+        second_order = self.approved_order(unit_cost=Decimal("5.00"))
+        second = self.receive(
+            second_order, reference="COST-002", amount=Decimal("500"),
+            lines=[self.delivery_line(second_order, batch="B-001", unit_cost=Decimal("5.00"))],
+        )
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.purchase_cost_per_base_unit, Decimal("3.000000"))
+        self.assertEqual(stock_position()["stock_value_cost"], Decimal("1200.00"))
+        self.assertEqual(first.lines.get().actual_unit_cost, Decimal("3.00"))
+        self.assertEqual(second.lines.get().actual_unit_cost, Decimal("5.00"))
+
+        basket = self.prepare(50)
+        record_payment(
+            actor=self.reception, invoice_id=basket.invoice_id, amount=250,
+            method=Payment.Method.CASH, reference="", idempotency_key="weighted-cost-payment",
+        )
+        dispense_order(actor=self.pharmacist, order_id=basket.pk, idempotency_key="weighted-cost-dispense")
+        movement = StockMovement.objects.get(
+            reference_type="PharmacyOrder", reference_id=str(basket.pk),
+        )
+        self.assertEqual(movement.unit_cost_at_event, Decimal("3.000000"))
+        self.assertEqual(stock_position()["stock_value_cost"], Decimal("1050.00"))
+        activity = stock_activity(7)
+        self.assertEqual(activity["cost_of_goods_dispensed"], Decimal("150.00"))
+        self.assertEqual(activity["product_gross_margin"], Decimal("100.00"))
+
+        later_order = self.approved_order(quantity=Decimal("50"), unit_cost=Decimal("7.00"))
+        self.receive(
+            later_order, reference="COST-003", amount=Decimal("350"),
+            lines=[self.delivery_line(
+                later_order, quantity=Decimal("50"), batch="B-001", unit_cost=Decimal("7.00"),
+            )],
+        )
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.purchase_cost_per_base_unit, Decimal("3.500000"))
+        self.assertEqual(stock_position()["stock_value_cost"], Decimal("1400.00"))
+        self.assertEqual(stock_activity(7)["cost_of_goods_dispensed"], Decimal("150.00"))
+
     def test_delivery_without_an_invoice_photograph_is_refused(self):
         order = self.approved_order()
         with self.assertRaisesMessage(ValidationError, "photograph"):

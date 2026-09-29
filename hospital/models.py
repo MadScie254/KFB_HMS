@@ -10,6 +10,7 @@ from django.db.models import Q, Sum
 from django.utils import timezone
 
 MONEY = {"max_digits": 14, "decimal_places": 2, "default": Decimal("0.00")}
+STOCK_COST = {"max_digits": 18, "decimal_places": 6, "default": Decimal("0.000000")}
 QUANTITY = {"max_digits": 14, "decimal_places": 3, "default": Decimal("0.000")}
 
 
@@ -284,7 +285,8 @@ class StockBatch(TimeStampedModel):
     item = models.ForeignKey(CatalogueItem, on_delete=models.PROTECT, related_name="batches", limit_choices_to={"kind": CatalogueItem.Kind.PRODUCT})
     batch_number = models.CharField(max_length=80)
     expiry_date = models.DateField(null=True, blank=True)
-    purchase_cost_per_base_unit = models.DecimalField(**MONEY)
+    # Moving weighted-average cost of the stock currently held.
+    purchase_cost_per_base_unit = models.DecimalField(**STOCK_COST)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.ACTIVE)
 
     class Meta:
@@ -336,6 +338,8 @@ class StockMovement(models.Model):
     batch = models.ForeignKey(StockBatch, on_delete=models.PROTECT, related_name="movements")
     movement_type = models.CharField(max_length=16, choices=MovementType.choices)
     quantity_delta = models.DecimalField(max_digits=14, decimal_places=3)
+    # Snapshot cost; later receipts may change the batch average.
+    unit_cost_at_event = models.DecimalField(max_digits=18, decimal_places=6)
     from_location = models.CharField(max_length=80, blank=True)
     to_location = models.CharField(max_length=80, blank=True)
     reference_type = models.CharField(max_length=40)
@@ -358,6 +362,13 @@ class StockMovement(models.Model):
             models.Index(fields=["event_at"]),
             models.Index(fields=["reference_type", "reference_id"]),
         ]
+
+    def save(self, *args, **kwargs):
+        if self._state.adding and self.unit_cost_at_event is None:
+            self.unit_cost_at_event = StockBatch.objects.values_list(
+                "purchase_cost_per_base_unit", flat=True,
+            ).get(pk=self.batch_id)
+        return super().save(*args, **kwargs)
 
 
 class Invoice(ReferenceNumberMixin, TimeStampedModel):

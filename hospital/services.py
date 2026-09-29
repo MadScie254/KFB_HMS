@@ -41,6 +41,7 @@ from .permissions import user_role
 NEAR_EXPIRY_DAYS = 90
 COST_VARIANCE_FRACTION = Decimal("0.10")
 INVOICE_TOLERANCE = Decimal("1.00")
+STOCK_COST_PRECISION = Decimal("0.000001")
 
 
 # Nulls sort first on SQLite and last on PostgreSQL. Left to the database, a
@@ -540,10 +541,19 @@ def receive_delivery(
                 f"Batch {batch_number} of {order_line.item.name} is already recorded with expiry "
                 f"{batch.expiry_date or 'not recorded'}. Two different expiry dates cannot share one batch number."
             )
+        batch = StockBatch.objects.select_for_update().get(pk=batch.pk)
+        on_hand = batch.quantity_on_hand
+        previous_cost = batch.purchase_cost_per_base_unit
+        batch.purchase_cost_per_base_unit = (
+            ((on_hand * previous_cost + quantity * unit_cost) / (on_hand + quantity))
+            if on_hand > 0 else unit_cost
+        ).quantize(STOCK_COST_PRECISION)
+        batch.save(update_fields=["purchase_cost_per_base_unit", "updated_at"])
         StockMovement.objects.create(
             batch=batch,
             movement_type=StockMovement.MovementType.RECEIPT,
             quantity_delta=quantity,
+            unit_cost_at_event=unit_cost,
             from_location=order.supplier.name[:80],
             to_location="Pharmacy",
             reference_type="GoodsReceipt",
