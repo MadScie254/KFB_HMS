@@ -42,12 +42,13 @@
     <div class="panel-head"><div><p class="eyebrow">Start here</p><h2>Open a count sheet</h2></div></div>
     {% if can_open %}
     <form method="post" action="{% url 'stock_count_open' %}" class="form-stack">{% csrf_token %}
+      <p class="help-text">Counting location: Pharmacy. Ward stock is tracked through custody records.</p>
       <div class="form-grid one-column">{% include "hospital/_form_fields.html" with form=open_form %}</div>
       <button class="button primary full" type="submit">{% include "hospital/_icon.html" with name="clipboard" %} Freeze the sheet now</button>
     </form>
     <div class="callout">
       <strong>What freezing does.</strong>
-      <p>Every batch is written onto the sheet with the balance the ledger holds at this exact moment. Sales that happen while you count do not change what your count is judged against.</p>
+      <p>Every batch is written onto the sheet with its ledger balance at this exact moment. Pause stock movements while counting; if stock moves before submission, start a new sheet.</p>
     </div>
     {% else %}
     <div class="empty compact">

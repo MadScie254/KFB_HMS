@@ -929,7 +929,7 @@ def stock_count_open(request):
         raise Http404
     form = StockCountOpenForm(request.POST)
     if not form.is_valid():
-        messages.error(request, "Enter a counting location before freezing a sheet.")
+        messages.error(request, "Only Pharmacy stock can be counted against this ledger.")
         return redirect("stock_counts")
     try:
         count = open_stock_count(

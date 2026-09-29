@@ -785,6 +785,22 @@ class StockControlTests(HospitalFixtureMixin, TestCase):
         review_stock_count(actor=self.reviewer, count_id=count.pk, approve=True)
         self.assertEqual(self.batch.quantity_on_hand, Decimal("192"))
 
+    def test_non_pharmacy_count_cannot_change_pharmacy_stock(self):
+        with self.assertRaisesMessage(ValidationError, "Only Pharmacy stock"):
+            open_stock_count(actor=self.pharmacist, location="Maternity")
+        self.assertFalse(StockCount.objects.exists())
+
+        # A sheet created before this restriction must not post a ward variance.
+        count = open_stock_count(actor=self.pharmacist)
+        line = count.lines.get(batch=self.batch)
+        submit_stock_count(actor=self.pharmacist, count_id=count.pk, counted={line.pk: Decimal("50")})
+        count.location = "Maternity"
+        count.save(update_fields=["location"])
+        with self.assertRaisesMessage(ValidationError, "no separate ledger balance"):
+            review_stock_count(actor=self.reviewer, count_id=count.pk, approve=True)
+        self.assertEqual(self.batch.quantity_on_hand, Decimal("200"))
+        self.assertFalse(StockMovement.objects.filter(reference_type="StockCount").exists())
+
 
 @override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
 class StockScreenTests(HospitalFixtureMixin, TestCase):
@@ -905,6 +921,14 @@ class StockScreenTests(HospitalFixtureMixin, TestCase):
         count.refresh_from_db()
         self.assertEqual(count.status, StockCount.Status.APPROVED)
         self.assertEqual(self.batch.quantity_on_hand, Decimal("197"))
+
+    def test_stock_count_screen_rejects_a_ward_location(self):
+        self.client.login(username=self.pharmacist.username, password=self.password)
+        response = self.client.post(
+            reverse("stock_count_open"), {"location": "Maternity", "blind_count": "on"}, follow=True,
+        )
+        self.assertContains(response, "Only Pharmacy stock")
+        self.assertFalse(StockCount.objects.exists())
 
     def test_owner_report_carries_the_stock_position(self):
         self.client.login(username=self.owner.username, password=self.password)

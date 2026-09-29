@@ -576,6 +576,8 @@ def open_stock_count(*, actor, location="Pharmacy", blind_count=True, notes="", 
     """
     if user_role(actor) not in {Role.PHARMACY, Role.PROCUREMENT}:
         raise ValidationError("Only pharmacy or procurement staff may open a stock count.")
+    if location != "Pharmacy":
+        raise ValidationError("Only Pharmacy stock can be counted against this ledger.")
     cutoff = timezone.now()
     count = StockCount.objects.create(
         location=location,
@@ -635,6 +637,8 @@ def submit_stock_count(*, actor, count_id, counted, reasons=None, request=None):
         raise ValidationError("Only the person who opened this count may submit it.")
     if count.status != StockCount.Status.FROZEN:
         raise ValidationError("This count has already been submitted.")
+    if count.location != "Pharmacy":
+        raise ValidationError("Only Pharmacy stock can be counted against this ledger.")
     submitted_at = timezone.now()
     if _stock_moved_during_count(count, submitted_at):
         raise ValidationError("Stock moved after this sheet was frozen. Start a new count against a fresh ledger snapshot.")
@@ -669,6 +673,8 @@ def review_stock_count(*, actor, count_id, approve, review_notes="", request=Non
         raise ValidationError("A stock count cannot be reviewed by the person who counted it.")
     if count.status != StockCount.Status.SUBMITTED:
         raise ValidationError("Only a submitted count can be reviewed.")
+    if approve and count.location != "Pharmacy":
+        raise ValidationError("This location has no separate ledger balance. Reject the sheet without posting adjustments.")
     if approve and _stock_moved_during_count(count, count.submitted_at or count.updated_at):
         raise ValidationError("Stock moved during this count. Reject the stale sheet and start a new count.")
 

@@ -418,7 +418,9 @@ class DeliveryCheckForm(StyledFormMixin, forms.Form):
 
 
 class StockCountOpenForm(StyledFormMixin, forms.Form):
-    location = forms.CharField(max_length=80, initial="Pharmacy", label="Counting location")
+    location = forms.ChoiceField(
+        choices=[("Pharmacy", "Pharmacy")], initial="Pharmacy", widget=forms.HiddenInput,
+    )
     blind_count = forms.BooleanField(
         required=False, initial=True, label="Blind count",
         help_text="Hide expected quantities while counting so the shelf is counted, not confirmed.",
