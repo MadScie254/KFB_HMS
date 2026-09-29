@@ -395,7 +395,18 @@ class Invoice(ReferenceNumberMixin, TimeStampedModel):
 
     @property
     def paid_amount(self):
-        return self.allocations.filter(payment__status=Payment.Status.VALID).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+        return self.allocations.filter(payment__status=Payment.Status.VALID).filter(
+            Q(payment__method=Payment.Method.CASH)
+            | Q(payment__verification_status__in=[Payment.Verification.MANUAL, Payment.Verification.PROVIDER])
+        ).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+
+    @property
+    def pending_amount(self):
+        return self.allocations.filter(
+            payment__status=Payment.Status.VALID,
+            payment__method=Payment.Method.MPESA,
+            payment__verification_status=Payment.Verification.UNVERIFIED,
+        ).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
 
     @property
     def balance(self):
@@ -440,6 +451,7 @@ class Payment(ReferenceNumberMixin, TimeStampedModel):
         PROVIDER = "provider", "Provider confirmed"
     class Status(models.TextChoices):
         VALID = "valid", "Valid"
+        REJECTED = "rejected", "Rejected claim"
         REVERSED = "reversed", "Reversed"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -452,6 +464,9 @@ class Payment(ReferenceNumberMixin, TimeStampedModel):
     shift = models.ForeignKey("CashShift", null=True, blank=True, on_delete=models.PROTECT, related_name="payments")
     received_by = models.ForeignKey(User, on_delete=models.PROTECT)
     received_at = models.DateTimeField(default=timezone.now)
+    reviewed_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="payments_reviewed")
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_notes = models.TextField(blank=True)
     idempotency_key = models.CharField(max_length=100, unique=True)
 
     class Meta:

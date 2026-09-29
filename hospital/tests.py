@@ -77,6 +77,7 @@ from .services import (
     receive_delivery,
     record_payment,
     request_write_off,
+    review_mpesa,
     review_stock_count,
     review_write_off,
     set_batch_disposition,
@@ -253,6 +254,89 @@ class WorkflowTests(HospitalFixtureMixin, TestCase):
         order2 = self.prepare(1)
         with self.assertRaises(ValidationError):
             record_payment(actor=self.reception, invoice_id=order2.invoice_id, amount=5, method="mpesa", reference="QAA123", idempotency_key="mpesa-2")
+
+    def test_unverified_mpesa_does_not_settle_invoice_until_review(self):
+        order = self.prepare(20)
+        payment = record_payment(
+            actor=self.reception, invoice_id=order.invoice_id, amount=100,
+            method=Payment.Method.MPESA, reference="PENDING-100", idempotency_key="pending-100",
+        )
+        order.invoice.refresh_from_db()
+        order.refresh_from_db()
+        self.assertEqual(order.invoice.paid_amount, Decimal("0"))
+        self.assertEqual(order.invoice.pending_amount, Decimal("100"))
+        self.assertEqual(order.invoice.balance, Decimal("100"))
+        self.assertEqual(order.invoice.status, Invoice.Status.POSTED)
+        self.assertEqual(order.status, PharmacyOrder.Status.PREPARED)
+        self.client.force_login(self.reception)
+        self.assertContains(self.client.get(reverse("receipt", kwargs={"pk": payment.pk})), "PENDING PAYMENT CLAIM")
+        self.client.force_login(self.owner)
+        report = self.client.get(reverse("reports"))
+        self.assertEqual(report.context["receivables"], Decimal("100"))
+        self.assertEqual(report.context["unverified_mpesa"], Decimal("100"))
+        self.assertEqual(report.context["verified_collections"], Decimal("0"))
+
+        review_mpesa(actor=self.reviewer, payment_id=payment.pk, approve=True, provider_confirmed=True)
+        order.invoice.refresh_from_db()
+        order.refresh_from_db()
+        self.assertEqual(order.invoice.paid_amount, Decimal("100"))
+        self.assertEqual(order.invoice.pending_amount, Decimal("0"))
+        self.assertEqual(order.invoice.balance, Decimal("0"))
+        self.assertEqual(order.invoice.status, Invoice.Status.PAID)
+        self.assertEqual(order.status, PharmacyOrder.Status.CLEARED)
+
+    def test_rejected_mpesa_remains_visible_without_settling_invoice(self):
+        order = self.prepare(20)
+        payment = record_payment(
+            actor=self.reception, invoice_id=order.invoice_id, amount=100,
+            method=Payment.Method.MPESA, reference="INVALID-100", idempotency_key="invalid-100",
+        )
+        with self.assertRaisesMessage(ValidationError, "Record why"):
+            review_mpesa(actor=self.reviewer, payment_id=payment.pk, approve=False)
+        review_mpesa(
+            actor=self.reviewer, payment_id=payment.pk, approve=False,
+            review_notes="Reference absent from provider statement",
+        )
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.REJECTED)
+        self.assertEqual(payment.reviewed_by, self.reviewer)
+        self.assertEqual(order.invoice.balance, Decimal("100"))
+        self.assertEqual(order.invoice.pending_amount, Decimal("0"))
+        self.client.force_login(self.reception)
+        self.assertContains(self.client.get(reverse("receipt", kwargs={"pk": payment.pk})), "REJECTED PAYMENT CLAIM")
+        self.assertTrue(ExceptionRecord.objects.filter(
+            category="unverified_mpesa", status=ExceptionRecord.Status.RESOLVED,
+        ).exists())
+        with self.assertRaisesMessage(ValidationError, "already been reviewed"):
+            review_mpesa(actor=self.reviewer, payment_id=payment.pk, approve=True)
+
+    def test_pending_mpesa_cannot_overpay_after_cash_settlement(self):
+        order = self.prepare(20)
+        payment = record_payment(
+            actor=self.reception, invoice_id=order.invoice_id, amount=100,
+            method=Payment.Method.MPESA, reference="RACED-100", idempotency_key="raced-100",
+        )
+        record_payment(
+            actor=self.reception, invoice_id=order.invoice_id, amount=100,
+            method=Payment.Method.CASH, reference="", idempotency_key="cash-after-pending",
+        )
+        with self.assertRaisesMessage(ValidationError, "Verification would exceed"):
+            review_mpesa(actor=self.reviewer, payment_id=payment.pk, approve=True)
+        self.assertEqual(order.invoice.balance, Decimal("0"))
+        self.assertEqual(order.invoice.paid_amount, Decimal("100"))
+        review_mpesa(actor=self.reviewer, payment_id=payment.pk, approve=False, review_notes="Paid in cash instead")
+
+    def test_mpesa_collection_is_reported_when_verified(self):
+        order = self.prepare(20)
+        payment = record_payment(
+            actor=self.reception, invoice_id=order.invoice_id, amount=100,
+            method=Payment.Method.MPESA, reference="OLDER-CLAIM", idempotency_key="older-claim",
+        )
+        Payment.objects.filter(pk=payment.pk).update(received_at=timezone.now() - timedelta(days=30))
+        review_mpesa(actor=self.reviewer, payment_id=payment.pk, approve=True)
+        self.client.force_login(self.owner)
+        report = self.client.get(reverse("reports"), {"days": "7"})
+        self.assertEqual(report.context["verified_collections"], Decimal("100"))
 
     def test_refund_credit_requires_independent_reviewer(self):
         order = self.prepare(2)
@@ -1613,12 +1697,30 @@ class EnhancedWorkflowTests(HospitalFixtureMixin, TestCase):
             method="mpesa", reference="VERIFY-001", idempotency_key="verify-ui",
         )
         self.client.login(username=self.reviewer.username, password=self.password)
-        response = self.client.post(reverse("payment_verify", kwargs={"pk": payment.pk}))
+        response = self.client.post(reverse("payment_verify", kwargs={"pk": payment.pk}), {"decision": "verify"})
         self.assertRedirects(response, reverse("reports"))
         payment.refresh_from_db()
         order.refresh_from_db()
         self.assertEqual(payment.verification_status, Payment.Verification.MANUAL)
         self.assertEqual(order.status, PharmacyOrder.Status.CLEARED)
+
+    def test_reviewer_can_reject_invalid_mpesa_from_reports(self):
+        order = self.prepare(1)
+        payment = record_payment(
+            actor=self.reception, invoice_id=order.invoice_id, amount=5,
+            method="mpesa", reference="INVALID-UI", idempotency_key="invalid-ui",
+        )
+        self.client.login(username=self.reviewer.username, password=self.password)
+        response = self.client.post(
+            reverse("payment_verify", kwargs={"pk": payment.pk}),
+            {"decision": "reject", "review_notes": "No matching provider transaction"},
+        )
+        self.assertRedirects(response, reverse("reports"))
+        payment.refresh_from_db()
+        order.refresh_from_db()
+        self.assertEqual(payment.status, Payment.Status.REJECTED)
+        self.assertEqual(order.status, PharmacyOrder.Status.PREPARED)
+        self.assertEqual(order.invoice.balance, Decimal("5"))
 
     def test_credit_note_request_and_review_have_complete_ui_flow(self):
         order = self.prepare(2)

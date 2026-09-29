@@ -114,11 +114,11 @@ from .services import (
     receive_delivery,
     record_payment,
     request_write_off,
+    review_mpesa,
     review_stock_count,
     review_write_off,
     set_batch_disposition,
     submit_stock_count,
-    verify_mpesa,
 )
 
 ZERO_MONEY = Value(Decimal("0.00"), output_field=DecimalField(max_digits=14, decimal_places=2))
@@ -148,20 +148,35 @@ def invoiced_total(invoices):
 
 
 def outstanding_receivables():
-    """Posted-but-unsettled value: billed − approved credits − valid allocations.
+    """Posted-but-unsettled value: billed − approved credits − settled allocations.
 
     Three aggregates regardless of ledger size, in place of two queries per
     open invoice.
     """
-    open_invoices = Invoice.objects.exclude(status__in=[Invoice.Status.DRAFT, Invoice.Status.PAID])
+    open_invoices = Invoice.objects.exclude(status=Invoice.Status.DRAFT)
     billed = invoiced_total(open_invoices)
     credited = CreditNote.objects.filter(
         invoice__in=open_invoices, status=CreditNote.Status.APPROVED
     ).aggregate(v=Sum("amount"))["v"] or Decimal("0.00")
     paid = PaymentAllocation.objects.filter(
         invoice__in=open_invoices, payment__status=Payment.Status.VALID
+    ).filter(
+        Q(payment__method=Payment.Method.CASH)
+        | Q(payment__verification_status__in=[Payment.Verification.MANUAL, Payment.Verification.PROVIDER])
     ).aggregate(v=Sum("amount"))["v"] or Decimal("0.00")
     return billed - credited - paid
+
+
+def verified_collections_since(start):
+    """Count cash when received and M-PESA when independently verified."""
+    return Payment.objects.filter(status=Payment.Status.VALID).filter(
+        Q(method=Payment.Method.CASH, received_at__gte=start)
+        | Q(
+            method=Payment.Method.MPESA,
+            verification_status__in=[Payment.Verification.MANUAL, Payment.Verification.PROVIDER],
+            reviewed_at__gte=start,
+        )
+    ).aggregate(v=Sum("amount"))["v"] or Decimal("0.00")
 
 
 # What each role is allowed to find. Search must never become a way around the
@@ -292,7 +307,7 @@ def dashboard(request):
         posted = Invoice.objects.filter(posted_at__gte=start).exclude(status=Invoice.Status.DRAFT)
         context.update({
             "net_billed": invoiced_total(posted),
-            "verified_collections": valid_payments.filter(Q(method=Payment.Method.CASH) | Q(verification_status__in=[Payment.Verification.MANUAL, Payment.Verification.PROVIDER])).aggregate(v=Sum("amount"))["v"] or Decimal("0.00"),
+            "verified_collections": verified_collections_since(start),
             "unverified_mpesa": valid_payments.filter(method=Payment.Method.MPESA, verification_status=Payment.Verification.UNVERIFIED).aggregate(v=Sum("amount"))["v"] or Decimal("0.00"),
             "receivables": outstanding_receivables(),
             "occupied_beds": Admission.objects.filter(discharged_at__isnull=True).count(),
@@ -643,7 +658,10 @@ def invoice_payment(request, pk):
                 idempotency_key=key,
                 request=request,
             )
-            messages.success(request, f"Payment recorded. Receipt {payment.receipt_number}.")
+            if payment.method == Payment.Method.MPESA:
+                messages.info(request, f"M-PESA claim {payment.receipt_number} recorded pending independent verification. The invoice remains unpaid until then.")
+            else:
+                messages.success(request, f"Payment recorded. Receipt {payment.receipt_number}.")
             return redirect("receipt", pk=payment.pk)
         except ValidationError as exc:
             form.add_error(None, _validation_message(exc))
@@ -1038,7 +1056,7 @@ def _report_context(days_value):
     return {
         "days": days,
         "net_billed": invoiced_total(invoices),
-        "verified_collections": payments.filter(Q(method=Payment.Method.CASH) | Q(verification_status__in=[Payment.Verification.MANUAL, Payment.Verification.PROVIDER])).aggregate(v=Sum("amount"))["v"] or Decimal("0.00"),
+        "verified_collections": verified_collections_since(start),
         "unverified_mpesa": payments.filter(method=Payment.Method.MPESA, verification_status=Payment.Verification.UNVERIFIED).aggregate(v=Sum("amount"))["v"] or Decimal("0.00"),
         "receivables": outstanding_receivables(),
         "department_activity": Encounter.objects.filter(created_at__gte=start).values("department").annotate(total=Count("id")).order_by("-total"),
@@ -1072,17 +1090,16 @@ def payment_verify(request, pk):
     if request.method != "POST":
         raise Http404
     try:
-        payment = verify_mpesa(
+        approve = request.POST.get("decision") == "verify"
+        payment = review_mpesa(
             actor=request.user,
             payment_id=pk,
+            approve=approve,
             provider_confirmed=request.POST.get("provider_confirmed") == "1",
+            review_notes=request.POST.get("review_notes", ""),
             request=request,
         )
-        ExceptionRecord.objects.filter(
-            category="unverified_mpesa",
-            summary__icontains=payment.reference,
-        ).update(status=ExceptionRecord.Status.RESOLVED, resolved_at=timezone.now(), resolution="Payment verified through the reviewer workflow.")
-        messages.success(request, f"M-PESA {payment.reference} verified independently.")
+        messages.success(request, f"M-PESA {payment.reference} {'verified' if approve else 'rejected'} independently.")
     except ValidationError as exc:
         messages.error(request, _validation_message(exc))
     return redirect("reports")

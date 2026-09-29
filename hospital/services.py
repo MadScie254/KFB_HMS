@@ -60,7 +60,7 @@ def raise_exception(category, summary, evidence, severity="warning", dedupe_on=N
     of something already marked resolved reopens it rather than vanishing.
     """
     summary = str(summary)[:255]
-    key = hashlib.sha256(":".join(str(part) for part in (dedupe_on or (category, summary))).encode()).hexdigest()[:64]
+    key = _exception_key(dedupe_on or (category, summary))
     now = timezone.now()
     try:
         with transaction.atomic():
@@ -87,6 +87,10 @@ def raise_exception(category, summary, evidence, severity="warning", dedupe_on=N
         fields += ["status", "resolved_at"]
     record.save(update_fields=fields)
     return record
+
+
+def _exception_key(parts):
+    return hashlib.sha256(":".join(str(part) for part in parts).encode()).hexdigest()[:64]
 
 
 def setting_decimal(key, default):
@@ -203,6 +207,8 @@ def record_payment(*, actor, invoice_id, amount, method, reference, idempotency_
         if existing:
             return existing
         raise ValidationError("That payment reference has already been recorded.") from exc
+    # An unverified M-PESA allocation reserves its invoice association for
+    # review, but Invoice.paid_amount does not treat it as settled money.
     PaymentAllocation.objects.create(payment=payment, invoice=invoice, amount=amount, allocated_by=actor)
     invoice.refresh_status()
     order = getattr(invoice, "pharmacy_order", None)
@@ -221,23 +227,57 @@ def record_payment(*, actor, invoice_id, amount, method, reference, idempotency_
 
 
 @transaction.atomic
-def verify_mpesa(*, actor, payment_id, provider_confirmed=False, request=None):
+def review_mpesa(*, actor, payment_id, approve, provider_confirmed=False, review_notes="", request=None):
     if user_role(actor) not in {Role.REVIEWER, Role.OWNER}:
         raise ValidationError("An authorised independent reviewer must verify M-PESA.")
+    invoice_ids = list(
+        PaymentAllocation.objects.filter(payment_id=payment_id)
+        .order_by("invoice_id").values_list("invoice_id", flat=True)
+    )
+    invoices = {
+        invoice.pk: invoice for invoice in
+        Invoice.objects.select_for_update().filter(pk__in=invoice_ids).order_by("pk")
+    }
     payment = Payment.objects.select_for_update().get(pk=payment_id)
     if payment.method != Payment.Method.MPESA:
         raise ValidationError("This payment is not M-PESA.")
     if payment.received_by_id == actor.id:
         raise ValidationError("The person who recorded a payment cannot verify it.")
-    payment.verification_status = Payment.Verification.PROVIDER if provider_confirmed else Payment.Verification.MANUAL
-    payment.save(update_fields=["verification_status", "updated_at"])
-    for allocation in payment.allocations.select_related("invoice"):
-        invoice = allocation.invoice
+    if payment.status != Payment.Status.VALID or payment.verification_status != Payment.Verification.UNVERIFIED:
+        raise ValidationError("This M-PESA claim has already been reviewed.")
+    allocations = list(payment.allocations.all())
+    if not allocations or {row.invoice_id for row in allocations} != set(invoices):
+        raise ValidationError("The payment's invoice allocation changed during review. Please retry.")
+    review_notes = review_notes.strip()
+    if not approve and not review_notes:
+        raise ValidationError("Record why this M-PESA claim was rejected.")
+    if approve:
+        for allocation in allocations:
+            if allocation.amount > invoices[allocation.invoice_id].balance:
+                raise ValidationError("Verification would exceed the current invoice balance. Reject the claim or resolve the other settlement first.")
+        payment.verification_status = Payment.Verification.PROVIDER if provider_confirmed else Payment.Verification.MANUAL
+    else:
+        payment.status = Payment.Status.REJECTED
+    payment.reviewed_by = actor
+    payment.reviewed_at = timezone.now()
+    payment.review_notes = review_notes
+    payment.save(update_fields=["status", "verification_status", "reviewed_by", "reviewed_at", "review_notes", "updated_at"])
+    for invoice in invoices.values():
         invoice.refresh_status()
-        if hasattr(invoice, "pharmacy_order") and invoice.balance <= 0:
+        if approve and hasattr(invoice, "pharmacy_order") and invoice.balance <= 0:
             invoice.pharmacy_order.status = PharmacyOrder.Status.CLEARED
             invoice.pharmacy_order.save(update_fields=["status", "updated_at"])
-    audit(actor, "payment.verified", payment, after={"verification": payment.verification_status}, request=request)
+    ExceptionRecord.objects.filter(
+        dedupe_key=_exception_key(("unverified_mpesa", payment.pk)),
+    ).update(
+        status=ExceptionRecord.Status.RESOLVED,
+        resolved_at=timezone.now(),
+        resolution="M-PESA claim verified." if approve else f"M-PESA claim rejected: {review_notes}"[:255],
+    )
+    audit(
+        actor, "payment.verified" if approve else "payment.rejected", payment,
+        reason=review_notes, after={"verification": payment.verification_status, "status": payment.status}, request=request,
+    )
     return payment
 
 
