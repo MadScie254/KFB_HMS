@@ -255,6 +255,42 @@ class WorkflowTests(HospitalFixtureMixin, TestCase):
         with self.assertRaises(ValidationError):
             record_payment(actor=self.reception, invoice_id=order2.invoice_id, amount=5, method="mpesa", reference="QAA123", idempotency_key="mpesa-2")
 
+    def test_exact_payment_retry_after_full_settlement_returns_original_receipt(self):
+        order = self.prepare(20)
+        first = record_payment(
+            actor=self.reception, invoice_id=order.invoice_id, amount=100,
+            method=Payment.Method.CASH, reference="", idempotency_key="settled-once",
+        )
+        retry = record_payment(
+            actor=self.reception, invoice_id=order.invoice_id, amount=Decimal("100.00"),
+            method=Payment.Method.CASH, reference="", idempotency_key="settled-once",
+        )
+        self.assertEqual(retry.pk, first.pk)
+        self.assertEqual(Payment.objects.filter(idempotency_key="settled-once").count(), 1)
+        self.assertEqual(order.invoice.balance, Decimal("0"))
+
+    def test_payment_request_key_cannot_be_reused_for_another_payment(self):
+        first_order = self.prepare(20)
+        second_order = self.prepare(20)
+        record_payment(
+            actor=self.reception, invoice_id=first_order.invoice_id, amount=50,
+            method=Payment.Method.MPESA, reference="KEY-ORIGINAL", idempotency_key="shared-key",
+        )
+        variants = (
+            (second_order.invoice_id, 50, Payment.Method.MPESA, "KEY-ORIGINAL"),
+            (first_order.invoice_id, 40, Payment.Method.MPESA, "KEY-ORIGINAL"),
+            (first_order.invoice_id, 50, Payment.Method.CASH, "KEY-ORIGINAL"),
+            (first_order.invoice_id, 50, Payment.Method.MPESA, "KEY-CHANGED"),
+        )
+        for invoice_id, amount, method, reference in variants:
+            with self.subTest(invoice_id=invoice_id, amount=amount, method=method, reference=reference):
+                with self.assertRaisesMessage(ValidationError, "already used for a different payment"):
+                    record_payment(
+                        actor=self.reception, invoice_id=invoice_id, amount=amount,
+                        method=method, reference=reference, idempotency_key="shared-key",
+                    )
+        self.assertEqual(Payment.objects.filter(idempotency_key="shared-key").count(), 1)
+
     def test_unverified_mpesa_does_not_settle_invoice_until_review(self):
         order = self.prepare(20)
         payment = record_payment(

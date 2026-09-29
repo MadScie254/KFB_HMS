@@ -658,7 +658,9 @@ def invoice_payment(request, pk):
                 idempotency_key=key,
                 request=request,
             )
-            if payment.method == Payment.Method.MPESA:
+            if payment.status != Payment.Status.VALID:
+                messages.warning(request, f"Payment claim {payment.receipt_number} was already {payment.get_status_display().lower()}. Start a new payment request if needed.")
+            elif payment.method == Payment.Method.MPESA and payment.verification_status == Payment.Verification.UNVERIFIED:
                 messages.info(request, f"M-PESA claim {payment.receipt_number} recorded pending independent verification. The invoice remains unpaid until then.")
             else:
                 messages.success(request, f"Payment recorded. Receipt {payment.receipt_number}.")

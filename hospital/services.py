@@ -179,8 +179,18 @@ def prepare_pharmacy_order(*, actor, customer_name, patient, items, encounter=No
 def record_payment(*, actor, invoice_id, amount, method, reference, idempotency_key, request=None):
     if user_role(actor) != Role.RECEPTION:
         raise ValidationError("Only reception/cashier staff may collect payments.")
+    amount = Decimal(str(amount))
+    reference = (reference or "").strip().upper()
+    idempotency_key = str(idempotency_key or "").strip()
+    if not idempotency_key:
+        raise ValidationError("A payment request key is required.")
     invoice = Invoice.objects.select_for_update().get(pk=invoice_id)
-    amount = Decimal(amount)
+    existing = Payment.objects.filter(idempotency_key=idempotency_key).first()
+    if existing:
+        return _matching_payment_retry(
+            existing, actor=actor, invoice_id=invoice_id, amount=amount,
+            method=method, reference=reference,
+        )
     if amount <= 0:
         raise ValidationError("Payment must be greater than zero.")
     if amount > invoice.balance:
@@ -196,7 +206,7 @@ def record_payment(*, actor, invoice_id, amount, method, reference, idempotency_
             payment = Payment.objects.create(
                 amount=amount,
                 method=method,
-                reference=reference.strip().upper(),
+                reference=reference,
                 verification_status=verification,
                 shift=shift,
                 received_by=actor,
@@ -205,7 +215,10 @@ def record_payment(*, actor, invoice_id, amount, method, reference, idempotency_
     except IntegrityError as exc:
         existing = Payment.objects.filter(idempotency_key=idempotency_key).first()
         if existing:
-            return existing
+            return _matching_payment_retry(
+                existing, actor=actor, invoice_id=invoice_id, amount=amount,
+                method=method, reference=reference,
+            )
         raise ValidationError("That payment reference has already been recorded.") from exc
     # An unverified M-PESA allocation reserves its invoice association for
     # review, but Invoice.paid_amount does not treat it as settled money.
@@ -224,6 +237,19 @@ def record_payment(*, actor, invoice_id, amount, method, reference, idempotency_
             dedupe_on=("unverified_mpesa", payment.pk),
         )
     return payment
+
+
+def _matching_payment_retry(existing, *, actor, invoice_id, amount, method, reference):
+    allocations = list(existing.allocations.values_list("invoice_id", "amount"))
+    if (
+        existing.received_by_id != actor.pk
+        or existing.amount != amount
+        or existing.method != method
+        or existing.reference != reference
+        or allocations != [(invoice_id, amount)]
+    ):
+        raise ValidationError("This payment request key was already used for a different payment.")
+    return existing
 
 
 @transaction.atomic
