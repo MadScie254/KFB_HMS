@@ -303,6 +303,23 @@ class WorkflowTests(HospitalFixtureMixin, TestCase):
         self.client.post(reverse("csv_import"), {"commit_job": job.pk})
         self.assertEqual(CatalogueItem.objects.filter(code="CSV-001").count(), 1)
 
+    def test_product_csv_duplicate_code_fails_dry_run(self):
+        self.client.login(username=self.owner.username, password=self.password)
+        csv_bytes = (
+            b"code,name,department,base_unit,sale_unit,units_per_sale_unit,sale_price,reorder_level,prescription_required\n"
+            b"CSV-DUP,First,Pharmacy,tablet,box,100,7.50,20,false\n"
+            b"CSV-DUP,Second,Pharmacy,tablet,box,100,7.50,20,false\n"
+        )
+        response = self.client.post(reverse("csv_import"), {
+            "import_kind": "products",
+            "csv_file": SimpleUploadedFile("duplicate-products.csv", csv_bytes, content_type="text/csv"),
+        })
+        self.assertEqual(response.status_code, 200)
+        job = ImportJob.objects.get(filename="duplicate-products.csv")
+        self.assertEqual(job.error_count, 1)
+        self.assertIn("duplicated in this file", job.report["errors"][0]["error"])
+        self.assertFalse(CatalogueItem.objects.filter(code="CSV-DUP").exists())
+
     def test_service_result_requires_content_before_release(self):
         encounter = Encounter.objects.create(patient=self.patient, started_by=self.reception)
         service = CatalogueItem.objects.create(code="LAB-T", name="Lab test", kind="service", department="Laboratory", base_unit="service", sale_unit="service", units_per_sale_unit=1)
@@ -1565,6 +1582,64 @@ class EnhancedWorkflowTests(HospitalFixtureMixin, TestCase):
         self.client.post(reverse("csv_import"), {"commit_job": job.pk})
         self.client.post(reverse("csv_import"), {"commit_job": job.pk})
         self.assertEqual(Patient.objects.filter(external_reference="LEGACY-44").count(), 1)
+
+    def test_stale_patient_import_does_not_duplicate_external_reference(self):
+        self.client.login(username=self.owner.username, password=self.password)
+        csv_bytes = (
+            b"external_reference,first_name,last_name,date_of_birth,estimated_age_years,sex,phone,guardian_name,guardian_phone\n"
+            b"STALE-44,Mary,Wafula,1995-03-02,,F,0700000011,,\n"
+        )
+        self.client.post(reverse("csv_import"), {
+            "import_kind": "patients",
+            "csv_file": SimpleUploadedFile("stale-patients.csv", csv_bytes, content_type="text/csv"),
+        })
+        job = ImportJob.objects.get(filename="stale-patients.csv")
+        Patient.objects.create(
+            external_reference="STALE-44", first_name="Existing", last_name="Patient",
+            estimated_age_years=30, registered_by=self.reception,
+        )
+        response = self.client.post(reverse("csv_import"), {"commit_job": job.pk}, follow=True)
+        self.assertContains(response, "dry run is out of date")
+        self.assertEqual(Patient.objects.filter(external_reference="STALE-44").count(), 1)
+        job.refresh_from_db()
+        self.assertEqual(job.status, "validated")
+
+    def test_same_file_gets_independent_fresh_dry_runs(self):
+        second_owner = self.make_user("owner-two", Role.OWNER)
+        csv_bytes = (
+            b"external_reference,first_name,last_name,date_of_birth,estimated_age_years,sex,phone,guardian_name,guardian_phone\n"
+            b"SHARED-44,Mary,Wafula,1995-03-02,,F,0700000011,,\n"
+        )
+        for owner in (self.owner, second_owner):
+            self.client.force_login(owner)
+            self.client.post(reverse("csv_import"), {
+                "import_kind": "patients",
+                "csv_file": SimpleUploadedFile("shared-patients.csv", csv_bytes, content_type="text/csv"),
+            })
+        jobs = list(ImportJob.objects.filter(filename="shared-patients.csv"))
+        self.assertEqual(len(jobs), 2)
+        self.assertEqual({job.created_by_id for job in jobs}, {self.owner.id, second_owner.id})
+        self.assertNotEqual(jobs[0].idempotency_key, jobs[1].idempotency_key)
+
+    def test_stale_receivable_import_does_not_duplicate_invoice(self):
+        self.patient.external_reference = "LEGACY-PATIENT"
+        self.patient.save(update_fields=["external_reference", "updated_at"])
+        self.client.login(username=self.owner.username, password=self.password)
+        csv_bytes = (
+            b"external_patient_reference,external_invoice_reference,original_invoice_date,description,department,outstanding_amount,review_reference\n"
+            b"LEGACY-PATIENT,STALE-INV-1,2026-01-01,Opening balance,Outpatient,1000.00,REVIEW-1\n"
+        )
+        self.client.post(reverse("csv_import"), {
+            "import_kind": "opening_receivables",
+            "csv_file": SimpleUploadedFile("stale-receivables.csv", csv_bytes, content_type="text/csv"),
+        })
+        job = ImportJob.objects.get(filename="stale-receivables.csv")
+        Invoice.objects.create(
+            external_reference="STALE-INV-1", patient=self.patient, created_by=self.owner,
+        )
+        response = self.client.post(reverse("csv_import"), {"commit_job": job.pk}, follow=True)
+        self.assertContains(response, "dry run is out of date")
+        self.assertEqual(Invoice.objects.filter(external_reference="STALE-INV-1").count(), 1)
 
     def test_opening_stock_import_creates_witnessed_ledger_entry(self):
         self.client.login(username=self.owner.username, password=self.password)

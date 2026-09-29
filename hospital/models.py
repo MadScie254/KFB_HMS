@@ -138,6 +138,12 @@ class Patient(ReferenceNumberMixin, TimeStampedModel):
 
     class Meta:
         ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["external_reference"], condition=~Q(external_reference=""),
+                name="unique_patient_external_reference",
+            ),
+        ]
         indexes = [
             models.Index(fields=["last_name", "first_name"]),
             models.Index(fields=["phone"]),
@@ -373,6 +379,14 @@ class Invoice(ReferenceNumberMixin, TimeStampedModel):
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.DRAFT)
     posted_at = models.DateTimeField(null=True, blank=True)
     created_by = models.ForeignKey(User, on_delete=models.PROTECT)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["external_reference"], condition=~Q(external_reference=""),
+                name="unique_invoice_external_reference",
+            ),
+        ]
 
     @property
     def total(self):

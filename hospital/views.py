@@ -14,7 +14,7 @@ from django.contrib.auth.decorators import login_required
 from django.contrib.auth.views import LoginView
 from django.core.exceptions import ValidationError
 from django.core.paginator import Paginator
-from django.db import connection, transaction
+from django.db import IntegrityError, connection, transaction
 from django.db.models import Case, Count, DecimalField, IntegerField, Max, Q, Sum, Value, When
 from django.http import FileResponse, Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -1276,7 +1276,7 @@ def _validate_product_csv(uploaded):
     required = {"code", "name", "department", "base_unit", "sale_unit", "units_per_sale_unit", "sale_price", "reorder_level", "prescription_required"}
     if not reader.fieldnames or not required.issubset(set(reader.fieldnames)):
         raise ValidationError(f"CSV must contain: {', '.join(sorted(required))}.")
-    rows, errors = [], []
+    rows, errors, seen = [], [], set()
     for index, row in enumerate(reader, start=2):
         if index > 5001:
             errors.append({"row": index, "error": "Maximum 5,000 rows per import."})
@@ -1295,6 +1295,9 @@ def _validate_product_csv(uploaded):
                 raise ValueError("Conversion and sale price must be greater than zero")
             if CatalogueItem.objects.filter(code=parsed["code"]).exists():
                 raise ValueError("Code already exists; imports never overwrite prices silently")
+            if parsed["code"] in seen:
+                raise ValueError("Code is duplicated in this file")
+            seen.add(parsed["code"])
             rows.append(parsed)
         except Exception as exc:
             errors.append({"row": index, "code": row.get("code", ""), "error": str(exc)})
@@ -1503,24 +1506,88 @@ def _commit_import_job(job, actor):
         raise ValidationError("Unsupported import type.")
 
 
+def _check_import_job_current(job):
+    """A dry run is a preview, not a reservation of database references."""
+    rows = job.report.get("rows", [])
+    if not rows:
+        raise ValidationError("The dry run has no valid rows to commit.")
+
+    errors = []
+    if job.kind == "products":
+        codes = [row["code"] for row in rows]
+        existing = set(CatalogueItem.objects.filter(code__in=codes).values_list("code", flat=True))
+        for number, code in enumerate(codes, start=2):
+            if code in existing:
+                errors.append(f"Row {number}: product code {code} now exists.")
+    elif job.kind == "patients":
+        references = [row["external_reference"] for row in rows]
+        existing = set(Patient.objects.filter(external_reference__in=references).values_list("external_reference", flat=True))
+        for number, reference in enumerate(references, start=2):
+            if reference in existing:
+                errors.append(f"Row {number}: patient reference {reference} now exists.")
+    elif job.kind == "opening_stock":
+        codes = {row["product_code"] for row in rows}
+        items = dict(CatalogueItem.objects.filter(code__in=codes, kind=CatalogueItem.Kind.PRODUCT).values_list("code", "pk"))
+        existing = set(StockBatch.objects.filter(
+            item_id__in=items.values(), batch_number__in={row["batch_number"] for row in rows}
+        ).values_list("item_id", "batch_number"))
+        for number, row in enumerate(rows, start=2):
+            item_id = items.get(row["product_code"])
+            if item_id is None:
+                errors.append(f"Row {number}: product {row['product_code']} is no longer available.")
+            elif (item_id, row["batch_number"]) in existing:
+                errors.append(f"Row {number}: batch {row['batch_number']} now exists for {row['product_code']}.")
+    elif job.kind == "opening_receivables":
+        patient_refs = {row["external_patient_reference"] for row in rows}
+        existing_patients = set(Patient.objects.filter(
+            external_reference__in=patient_refs
+        ).values_list("external_reference", flat=True))
+        invoice_refs = {row["external_invoice_reference"] for row in rows}
+        existing_invoices = set(Invoice.objects.filter(
+            external_reference__in=invoice_refs
+        ).values_list("external_reference", flat=True))
+        for number, row in enumerate(rows, start=2):
+            if row["external_patient_reference"] not in existing_patients:
+                errors.append(f"Row {number}: patient {row['external_patient_reference']} is no longer available.")
+            if row["external_invoice_reference"] in existing_invoices:
+                errors.append(f"Row {number}: invoice reference {row['external_invoice_reference']} now exists.")
+    else:
+        raise ValidationError("Unsupported import type.")
+
+    if errors:
+        remainder = f" {len(errors) - 5} more row(s) have conflicts." if len(errors) > 5 else ""
+        raise ValidationError("The dry run is out of date. " + " ".join(errors[:5]) + remainder + " Upload again to review current data.")
+
+
 @role_required(Role.OWNER, Role.PROCUREMENT)
 def csv_import(request):
     form = CsvImportForm(request.POST or None, request.FILES or None)
     preview_job = None
     if request.method == "POST" and request.POST.get("commit_job"):
-        job = get_object_or_404(ImportJob, pk=request.POST["commit_job"], created_by=request.user)
-        if job.status == "committed" or ImportJob.objects.filter(idempotency_key=job.idempotency_key, status="committed").exclude(pk=job.pk).exists():
-            messages.info(request, "This import was already committed; no duplicate records were created.")
+        try:
+            with transaction.atomic():
+                job = get_object_or_404(
+                    ImportJob.objects.select_for_update(), pk=request.POST["commit_job"], created_by=request.user
+                )
+                if job.status == "committed":
+                    messages.info(request, "This import was already committed; no duplicate records were created.")
+                    return redirect("csv_import")
+                if not job.dry_run or job.status != "validated" or job.error_count:
+                    raise ValidationError("Only a successful dry run can be committed.")
+                if user_role(request.user) == Role.PROCUREMENT and job.kind not in {"products", "opening_stock"}:
+                    raise ValidationError("Only the owner may import patient or receivable records.")
+                _check_import_job_current(job)
+                _commit_import_job(job, request.user)
+                job.status = "committed"
+                job.dry_run = False
+                job.save(update_fields=["status", "dry_run", "updated_at"])
+                audit(request.user, "import.committed", job, after={"rows": len(job.report.get("rows", []))}, request=request)
+        except ValidationError as exc:
+            messages.error(request, _validation_message(exc))
             return redirect("csv_import")
-        if not job.dry_run or job.status != "validated" or job.error_count:
-            messages.error(request, "Only a successful dry run can be committed.")
+        except IntegrityError:
+            messages.error(request, "Import data changed during commit. No rows were saved; upload again to review current data.")
             return redirect("csv_import")
-        with transaction.atomic():
-            _commit_import_job(job, request.user)
-            job.status = "committed"
-            job.dry_run = False
-            job.save(update_fields=["status", "dry_run", "updated_at"])
-            audit(request.user, "import.committed", job, after={"rows": len(job.report.get("rows", []))}, request=request)
         messages.success(request, f"Imported {job.row_count} {job.kind.replace('_', ' ')} row(s).")
         return redirect("csv_import")
     if request.method == "POST" and form.is_valid():
@@ -1535,12 +1602,13 @@ def csv_import(request):
                 "opening_receivables": _validate_opening_receivables_csv,
             }
             digest, rows, errors = validators[kind](form.cleaned_data["csv_file"])
-            preview_job, created = ImportJob.objects.get_or_create(
-                idempotency_key=f"{kind}:{digest}",
-                defaults={"kind": kind, "filename": form.cleaned_data["csv_file"].name, "status": "validated" if not errors else "failed", "dry_run": True, "row_count": len(rows), "error_count": len(errors), "report": {"rows": rows, "errors": errors}, "created_by": request.user},
+            preview_job = ImportJob.objects.create(
+                idempotency_key=f"{kind}:{digest[:32]}:{uuid.uuid4().hex[:16]}",
+                kind=kind, filename=form.cleaned_data["csv_file"].name,
+                status="validated" if not errors else "failed", dry_run=True,
+                row_count=len(rows), error_count=len(errors),
+                report={"rows": rows, "errors": errors}, created_by=request.user,
             )
-            if not created:
-                messages.info(request, "This exact file was already uploaded; showing its existing report.")
             audit(request.user, "import.dry_run", preview_job, after={"rows": len(rows), "errors": len(errors)}, request=request)
         except ValidationError as exc:
             form.add_error("csv_file", _validation_message(exc))
