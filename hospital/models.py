@@ -9,6 +9,8 @@ from django.db import IntegrityError, models, transaction
 from django.db.models import Q, Sum
 from django.utils import timezone
 
+from .setting_validation import NUMERIC_SETTING_RULES, validated_setting_decimal
+
 MONEY = {"max_digits": 14, "decimal_places": 2, "default": Decimal("0.00")}
 STOCK_COST = {"max_digits": 18, "decimal_places": 6, "default": Decimal("0.000000")}
 QUANTITY = {"max_digits": 14, "decimal_places": 3, "default": Decimal("0.000")}
@@ -106,6 +108,18 @@ class Setting(TimeStampedModel):
     description = models.CharField(max_length=255, blank=True)
     production_confirmed = models.BooleanField(default=False)
     updated_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT)
+
+    def clean(self):
+        super().clean()
+        if self.key in NUMERIC_SETTING_RULES:
+            try:
+                validated_setting_decimal(self.key, self.value)
+            except ValidationError as exc:
+                raise ValidationError({"value": exc.messages}) from exc
+
+    def save(self, *args, **kwargs):
+        self.clean()
+        return super().save(*args, **kwargs)
 
     def __str__(self):
         return self.key

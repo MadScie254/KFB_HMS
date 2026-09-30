@@ -195,13 +195,37 @@ class ReadinessTests(TestCase):
 
     def test_every_required_setting_needs_value_and_confirmation(self):
         self.assertEqual(len(ReadinessCommand.operational_setting_issues()), len(REQUIRED_SETTING_KEYS))
+        numeric_values = {
+            "near_expiry_days": "90",
+            "purchase_cost_variance_fraction": "0.10",
+            "supplier_invoice_tolerance": "1.00",
+            "stock_variance_review_value": "500.00",
+        }
         Setting.objects.bulk_create([
-            Setting(key=key, value="confirmed", production_confirmed=True)
+            Setting(key=key, value=numeric_values.get(key, "confirmed"), production_confirmed=True)
             for key in REQUIRED_SETTING_KEYS
         ])
         self.assertEqual(ReadinessCommand.operational_setting_issues(), [])
         Setting.objects.filter(key="near_expiry_days").update(production_confirmed=False)
         self.assertIn("near_expiry_days", " ".join(ReadinessCommand.operational_setting_issues()))
+
+    def test_numeric_settings_reject_invalid_values_and_readiness_reports_legacy_rows(self):
+        invalid = {
+            "near_expiry_days": ("", "not-a-number", "NaN", "Infinity", "-1", "3651", "1.5"),
+            "purchase_cost_variance_fraction": ("NaN", "Infinity", "-0.1", "1.1"),
+            "supplier_invoice_tolerance": ("NaN", "Infinity", "-1", "100001"),
+            "stock_variance_review_value": ("NaN", "Infinity", "-1", "1000001"),
+        }
+        for key, values in invalid.items():
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    with self.assertRaisesMessage(ValidationError, key):
+                        Setting.objects.create(key=key, value=value)
+            Setting.objects.create(key=key, value="0", production_confirmed=True)
+        Setting.objects.filter(key="near_expiry_days").update(value="NaN")
+        self.assertIn("Invalid operational setting: Setting near_expiry_days", " ".join(
+            ReadinessCommand.operational_setting_issues()
+        ))
 
     def test_partial_static_manifest_is_not_readiness(self):
         with TemporaryDirectory() as output:
@@ -1630,6 +1654,23 @@ class StockControlTests(HospitalFixtureMixin, TestCase):
             self.receive(order, lines=[line])
         self.assertFalse(GoodsReceipt.objects.exists())
 
+    def test_invalid_stored_thresholds_block_receiving_without_partial_post(self):
+        order = self.approved_order()
+        thresholds = {
+            "near_expiry_days": ("90", "NaN"),
+            "purchase_cost_variance_fraction": ("0.10", "-1"),
+            "supplier_invoice_tolerance": ("1.00", "Infinity"),
+        }
+        for key, (valid, _) in thresholds.items():
+            Setting.objects.create(key=key, value=valid)
+        for key, (valid, invalid) in thresholds.items():
+            with self.subTest(key=key):
+                Setting.objects.filter(key=key).update(value=invalid)
+                with self.assertRaisesMessage(ValidationError, key):
+                    self.receive(order)
+                self.assertFalse(GoodsReceipt.objects.exists())
+                Setting.objects.filter(key=key).update(value=valid)
+
     def test_partial_delivery_leaves_the_order_open(self):
         order = self.approved_order(quantity=Decimal("100"))
         self.receive(order, amount=Decimal("80.00"), lines=[self.delivery_line(order, quantity=Decimal("40"))])
@@ -2003,6 +2044,22 @@ class StockScreenTests(HospitalFixtureMixin, TestCase):
         count.refresh_from_db()
         self.assertEqual(count.status, StockCount.Status.APPROVED)
         self.assertEqual(self.batch.quantity_on_hand, Decimal("197"))
+
+    def test_invalid_variance_threshold_blocks_count_approval(self):
+        count = open_stock_count(actor=self.pharmacist, location="Pharmacy", blind_count=True)
+        line = count.lines.get(batch=self.batch)
+        submit_stock_count(
+            actor=self.pharmacist, count_id=count.pk,
+            counted={line.pk: Decimal("194")}, reasons={line.pk: "Damaged stock"},
+        )
+        Setting.objects.create(key="stock_variance_review_value", value="500")
+        Setting.objects.filter(key="stock_variance_review_value").update(value="NaN")
+        with self.assertRaisesMessage(ValidationError, "stock_variance_review_value"):
+            review_stock_count(actor=self.reviewer, count_id=count.pk, approve=True)
+        count.refresh_from_db()
+        self.assertEqual(count.status, StockCount.Status.SUBMITTED)
+        self.assertFalse(StockMovement.objects.filter(reference_type="StockCount", reference_id=str(count.pk)).exists())
+        self.assertEqual(self.batch.quantity_on_hand, Decimal("200"))
 
     def test_invalid_count_preserves_every_typed_line_and_reason(self):
         StockBatch.objects.create(

@@ -41,6 +41,7 @@ from .models import (
     SupplierChangeRequest,
 )
 from .permissions import user_role
+from .setting_validation import validated_setting_decimal
 
 # Defaults for thresholds an implementer is expected to review. They are read
 # through Setting so a site can change them without a code change, and they are
@@ -102,18 +103,11 @@ def _exception_key(parts):
 
 
 def setting_decimal(key, default):
-    """Read a numeric Setting, falling back to the documented default.
-
-    A site that has not configured a threshold gets the default rather than a
-    crash or a silently disabled control.
-    """
+    """Use a default only when the key is absent; reject invalid saved values."""
     row = Setting.objects.filter(key=key).first()
-    if not row or not row.value.strip():
+    if not row:
         return default
-    try:
-        return Decimal(row.value.strip())
-    except (ArithmeticError, ValueError):
-        return default
+    return validated_setting_decimal(key, row.value)
 
 
 def audit(actor, action, entity, *, reason="", before=None, after=None, request=None):
@@ -1087,6 +1081,7 @@ def review_stock_count(*, actor, count_id, approve, review_notes="", request=Non
         raise ValidationError("Stock moved during this count. Reject the stale sheet and start a new count.")
 
     posted = 0
+    variance_threshold = setting_decimal("stock_variance_review_value", Decimal("500.00")) if approve else None
     if approve:
         for line in count.lines.select_related("batch__item").select_for_update():
             variance = line.variance
@@ -1105,7 +1100,7 @@ def review_stock_count(*, actor, count_id, approve, review_notes="", request=Non
                 entered_by=actor,
             )
             posted += 1
-            if abs(line.variance_value) > setting_decimal("stock_variance_review_value", Decimal("500.00")):
+            if abs(line.variance_value) > variance_threshold:
                 raise_exception(
                     "stock_discrepancy",
                     f"Approved stock adjustment for {line.batch.item.name} batch {line.batch.batch_number}",

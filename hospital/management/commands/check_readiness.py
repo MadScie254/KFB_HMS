@@ -4,9 +4,11 @@ import re
 from pathlib import Path
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.core.management.base import BaseCommand, CommandError
 
 from hospital.models import Setting
+from hospital.setting_validation import NUMERIC_SETTING_RULES, validated_setting_decimal
 
 REQUIRED_SETTING_KEYS = frozenset({
     "official_receipt_header", "delegated_approver", "eye_package_right",
@@ -60,6 +62,11 @@ class Command(BaseCommand):
                 issues.append(f"Required operational setting missing: {key}")
             elif not rows[key][0].strip() or not rows[key][1]:
                 issues.append(f"Operational setting needs a value and confirmation: {key}")
+            elif key in NUMERIC_SETTING_RULES:
+                try:
+                    validated_setting_decimal(key, rows[key][0])
+                except ValidationError as exc:
+                    issues.append(f"Invalid operational setting: {exc.messages[0]}")
         return issues
 
     def handle(self, *args, **options):
