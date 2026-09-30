@@ -513,7 +513,7 @@ def pay_refund(*, actor, refund_id, request=None):
 
 
 @transaction.atomic
-def review_mpesa(*, actor, payment_id, approve, provider_confirmed=False, review_notes="", request=None):
+def review_mpesa(*, actor, payment_id, approve, review_notes="", request=None):
     if user_role(actor) not in {Role.REVIEWER, Role.OWNER}:
         raise ValidationError("An authorised independent reviewer must verify M-PESA.")
     invoice_ids = list(
@@ -535,13 +535,16 @@ def review_mpesa(*, actor, payment_id, approve, provider_confirmed=False, review
     if not allocations or {row.invoice_id for row in allocations} != set(invoices):
         raise ValidationError("The payment's invoice allocation changed during review. Please retry.")
     review_notes = review_notes.strip()
-    if not approve and not review_notes:
-        raise ValidationError("Record why this M-PESA claim was rejected.")
+    if not review_notes:
+        raise ValidationError(
+            "Record the evidence checked for this M-PESA claim." if approve
+            else "Record why this M-PESA claim was rejected."
+        )
     if approve:
         for allocation in allocations:
             if allocation.amount > invoices[allocation.invoice_id].balance:
                 raise ValidationError("Verification would exceed the current invoice balance. Reject the claim or resolve the other settlement first.")
-        payment.verification_status = Payment.Verification.PROVIDER if provider_confirmed else Payment.Verification.MANUAL
+        payment.verification_status = Payment.Verification.MANUAL
     else:
         payment.status = Payment.Status.REJECTED
     payment.reviewed_by = actor

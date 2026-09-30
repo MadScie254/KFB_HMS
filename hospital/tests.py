@@ -579,7 +579,10 @@ class WorkflowTests(HospitalFixtureMixin, TestCase):
         self.assertEqual(report.context["unverified_mpesa"], Decimal("100"))
         self.assertEqual(report.context["verified_collections"], Decimal("0"))
 
-        review_mpesa(actor=self.reviewer, payment_id=payment.pk, approve=True, provider_confirmed=True)
+        review_mpesa(
+            actor=self.reviewer, payment_id=payment.pk, approve=True,
+            review_notes="Matched to the hospital M-PESA statement.",
+        )
         order.invoice.refresh_from_db()
         order.refresh_from_db()
         self.assertEqual(order.invoice.paid_amount, Decimal("100"))
@@ -587,6 +590,8 @@ class WorkflowTests(HospitalFixtureMixin, TestCase):
         self.assertEqual(order.invoice.balance, Decimal("0"))
         self.assertEqual(order.invoice.status, Invoice.Status.PAID)
         self.assertEqual(order.status, PharmacyOrder.Status.CLEARED)
+        payment.refresh_from_db()
+        self.assertEqual(payment.verification_status, Payment.Verification.MANUAL)
 
     def test_rejected_mpesa_remains_visible_without_settling_invoice(self):
         order = self.prepare(20)
@@ -611,7 +616,10 @@ class WorkflowTests(HospitalFixtureMixin, TestCase):
             category="unverified_mpesa", status=ExceptionRecord.Status.RESOLVED,
         ).exists())
         with self.assertRaisesMessage(ValidationError, "already been reviewed"):
-            review_mpesa(actor=self.reviewer, payment_id=payment.pk, approve=True)
+            review_mpesa(
+                actor=self.reviewer, payment_id=payment.pk, approve=True,
+                review_notes="Matched to the hospital M-PESA statement.",
+            )
 
     def test_pending_mpesa_cannot_overpay_after_cash_settlement(self):
         order = self.prepare(20)
@@ -624,7 +632,10 @@ class WorkflowTests(HospitalFixtureMixin, TestCase):
             method=Payment.Method.CASH, reference="", idempotency_key="cash-after-pending",
         )
         with self.assertRaisesMessage(ValidationError, "Verification would exceed"):
-            review_mpesa(actor=self.reviewer, payment_id=payment.pk, approve=True)
+            review_mpesa(
+                actor=self.reviewer, payment_id=payment.pk, approve=True,
+                review_notes="Matched to the hospital M-PESA statement.",
+            )
         self.assertEqual(order.invoice.balance, Decimal("0"))
         self.assertEqual(order.invoice.paid_amount, Decimal("100"))
         review_mpesa(actor=self.reviewer, payment_id=payment.pk, approve=False, review_notes="Paid in cash instead")
@@ -636,7 +647,10 @@ class WorkflowTests(HospitalFixtureMixin, TestCase):
             method=Payment.Method.MPESA, reference="OLDER-CLAIM", idempotency_key="older-claim",
         )
         Payment.objects.filter(pk=payment.pk).update(received_at=timezone.now() - timedelta(days=30))
-        review_mpesa(actor=self.reviewer, payment_id=payment.pk, approve=True)
+        review_mpesa(
+            actor=self.reviewer, payment_id=payment.pk, approve=True,
+            review_notes="Matched to the hospital M-PESA statement.",
+        )
         self.client.force_login(self.owner)
         report = self.client.get(reverse("reports"), {"days": "7"})
         self.assertEqual(report.context["verified_collections"], Decimal("100"))
@@ -2522,11 +2536,20 @@ class EnhancedWorkflowTests(HospitalFixtureMixin, TestCase):
             method="mpesa", reference="VERIFY-001", idempotency_key="verify-ui",
         )
         self.client.login(username=self.reviewer.username, password=self.password)
-        response = self.client.post(reverse("payment_verify", kwargs={"pk": payment.pk}), {"decision": "verify"})
+        self.assertNotContains(self.client.get(reverse("reports")), 'name="provider_confirmed"')
+        url = reverse("payment_verify", kwargs={"pk": payment.pk})
+        self.client.post(url, {"decision": "verify", "provider_confirmed": "1"})
+        payment.refresh_from_db()
+        self.assertEqual(payment.verification_status, Payment.Verification.UNVERIFIED)
+        response = self.client.post(url, {
+            "decision": "verify", "provider_confirmed": "1",
+            "review_notes": "Matched to the hospital M-PESA statement.",
+        })
         self.assertRedirects(response, reverse("reports"))
         payment.refresh_from_db()
         order.refresh_from_db()
         self.assertEqual(payment.verification_status, Payment.Verification.MANUAL)
+        self.assertEqual(payment.review_notes, "Matched to the hospital M-PESA statement.")
         self.assertEqual(order.status, PharmacyOrder.Status.CLEARED)
 
     def test_reviewer_can_reject_invalid_mpesa_from_reports(self):

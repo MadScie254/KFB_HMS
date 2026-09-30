@@ -1294,7 +1294,6 @@ def payment_verify(request, pk):
             actor=request.user,
             payment_id=pk,
             approve=approve,
-            provider_confirmed=request.POST.get("provider_confirmed") == "1",
             review_notes=request.POST.get("review_notes", ""),
             request=request,
         )
