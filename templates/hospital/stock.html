@@ -109,7 +109,7 @@
           <td class="numeric"><strong>{{ row.on_hand|floatformat:"-3" }}</strong> {{ row.item.base_unit }}</td>
           <td class="numeric">{{ row.sellable_on_hand|floatformat:"-3" }}</td>
           <td>{{ row.reorder_level|floatformat:"-3" }} {{ row.item.base_unit }}</td>
-          <td>{% if row.earliest_expiry %}{{ row.earliest_expiry|date:"j M Y" }}{% else %}Not recorded{% endif %}</td>
+          <td data-sort-value="{% if row.earliest_expiry %}{{ row.earliest_expiry|date:'Ymd' }}{% endif %}">{% if row.earliest_expiry %}{{ row.earliest_expiry|date:"j M Y" }}{% else %}Not recorded{% endif %}</td>
           <td class="numeric">KES {{ row.cost_value|floatformat:2 }}</td>
           <td class="numeric">{% if row.priced %}KES {{ row.retail_value|floatformat:2 }}{% else %}<span class="status warning">No price</span>{% endif %}</td>
           <td>
@@ -158,7 +158,7 @@
         <tbody>
         {% for movement in movements %}
         <tr>
-          <td>{{ movement.event_at|date:"j M Y, H:i" }}{% if movement.entered_at|date:"j M Y" != movement.event_at|date:"j M Y" %}<small>Entered {{ movement.entered_at|date:"j M, H:i" }}</small>{% endif %}</td>
+          <td data-sort-value="{{ movement.event_at|date:'U' }}">{{ movement.event_at|date:"j M Y, H:i" }}{% if movement.entered_at|date:"j M Y" != movement.event_at|date:"j M Y" %}<small>Entered {{ movement.entered_at|date:"j M, H:i" }}</small>{% endif %}</td>
           <td><strong>{{ movement.batch.item.name }}</strong><small>{{ movement.batch.batch_number }}</small></td>
           <td><span class="status movement-{{ movement.movement_type }}">{{ movement.get_movement_type_display }}</span></td>
           <td class="numeric"><span class="quantity {% if movement.quantity_delta < 0 %}negative{% endif %}">{{ movement.quantity_delta|floatformat:"-3" }}</span></td>
@@ -169,7 +169,7 @@
         </tbody>
       </table>
     </div>
-    {% include "hospital/_pagination.html" %}
+    {% include "hospital/_pagination.html" with sort_is_page_only=True %}
     {% else %}
     <div class="empty"><strong>No movements recorded.</strong><p>Receipts, sales and approved adjustments will appear here.</p></div>
     {% endif %}

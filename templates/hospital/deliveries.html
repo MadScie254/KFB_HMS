@@ -86,7 +86,7 @@
       <tr>
         <td><a href="{% url 'goods_receipt_detail' receipt.pk %}"><strong>{{ receipt.receipt_number }}</strong><small>{{ receipt.purchase_order.order_number }}</small></a></td>
         <td>{{ receipt.purchase_order.supplier.name }}<small>{{ receipt.supplier_invoice_reference }}</small></td>
-        <td>{{ receipt.delivered_at|date:"j M Y" }}<small>{{ receipt.lines.all|length }} line{{ receipt.lines.all|length|pluralize }}</small></td>
+        <td data-sort-value="{{ receipt.delivered_at|date:'U' }}">{{ receipt.delivered_at|date:"j M Y" }}<small>{{ receipt.lines.all|length }} line{{ receipt.lines.all|length|pluralize }}</small></td>
         <td class="numeric">KES {{ receipt.received_value|floatformat:2 }}</td>
         <td class="numeric">KES {{ receipt.invoice_amount|floatformat:2 }}{% if receipt.invoice_variance %}<small>Difference KES {{ receipt.invoice_variance|floatformat:2 }}</small>{% endif %}</td>
         <td>{% if receipt.invoice_photo %}<a href="{% url 'goods_receipt_invoice' receipt.pk %}">{% include "hospital/_icon.html" with name="camera" %} View invoice</a>{% else %}<span class="status warning">No photo</span>{% endif %}</td>
@@ -99,7 +99,7 @@
   {% if receipts.has_other_pages %}
   <nav class="pagination" aria-label="Delivery history pages">
     {% if receipts.has_previous %}<a class="button ghost small" href="?history_page={{ receipts.previous_page_number }}&amp;check_page={{ awaiting_check.number }}">Previous</a>{% endif %}
-    <span>Page {{ receipts.number }} of {{ receipts.paginator.num_pages }}</span>
+    <span>Page {{ receipts.number }} of {{ receipts.paginator.num_pages }} · Column sorting applies to this page only.</span>
     {% if receipts.has_next %}<a class="button ghost small" href="?history_page={{ receipts.next_page_number }}&amp;check_page={{ awaiting_check.number }}">Next</a>{% endif %}
   </nav>
   {% endif %}
