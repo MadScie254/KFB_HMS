@@ -50,7 +50,9 @@
   document.querySelectorAll('[data-unsaved-warning]').forEach((form) => {
     let dirty = false;
     form.addEventListener('input', () => { dirty = true; });
-    form.addEventListener('submit', () => { dirty = false; });
+    form.addEventListener('submit', (event) => {
+      if (!event.defaultPrevented) dirty = false;
+    });
     window.addEventListener('beforeunload', (event) => {
       if (!dirty) return;
       event.preventDefault();
@@ -60,6 +62,7 @@
 
   document.querySelectorAll('form').forEach((form) => {
     form.addEventListener('submit', (event) => {
+      if (event.defaultPrevented) return;
       const button = event.submitter || form.querySelector('button[type="submit"]');
       // Defer disabling until after the browser has captured the submitter's
       // name/value (for example action=sign or decision=approve).
@@ -362,12 +365,14 @@
 
   /* ---- Confirmation for what cannot be undone ---------------------------- */
   document.querySelectorAll('[data-confirm]').forEach((form) => {
+    let replayingConfirmedSubmit = false;
     form.addEventListener('submit', (event) => {
-      if (form.dataset.confirmed === 'yes') return;
+      if (replayingConfirmedSubmit) return;
       event.preventDefault();
       if (window.confirm(form.dataset.confirm)) {
-        form.dataset.confirmed = 'yes';
-        form.requestSubmit(event.submitter || undefined);
+        replayingConfirmedSubmit = true;
+        try { form.requestSubmit(event.submitter || undefined); }
+        finally { replayingConfirmedSubmit = false; }
       }
     }, true);
   });
