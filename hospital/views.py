@@ -106,16 +106,19 @@ from .services import (
     approve_purchase_order,
     audit,
     check_delivery,
+    close_cash_shift,
     close_encounter,
     complete_eye_case,
     discharge_admission,
     dispense_order,
     issue_to_department,
+    open_cash_shift,
     open_stock_count,
     prepare_pharmacy_order,
     receive_delivery,
     record_payment,
     request_write_off,
+    review_cash_shift,
     review_mpesa,
     review_stock_count,
     review_write_off,
@@ -761,23 +764,32 @@ def shift_manage(request):
     shift = CashShift.objects.filter(cashier=request.user, status=CashShift.Status.OPEN).first()
     form = ShiftCloseForm(request.POST or None, instance=shift) if shift else ShiftOpenForm(request.POST or None)
     if request.method == "POST" and form.is_valid():
-        if shift:
-            closing = form.save(commit=False)
-            closing.closed_at = timezone.now()
-            closing.status = CashShift.Status.CLOSED
-            closing.save()
-            if closing.variance != 0:
-                ExceptionRecord.objects.create(category="cash_variance", summary=f"{closing.label}: KES {closing.variance:,.2f} variance", evidence=closing.variance_reason)
-            audit(request.user, "shift.closed", closing, after={"expected": str(closing.expected_cash), "actual": str(closing.actual_cash), "variance": str(closing.variance)}, request=request)
-            messages.success(request, "Shift closed and submitted for independent review.")
-        else:
-            opening = form.save(commit=False)
-            opening.cashier = request.user
-            opening.save()
-            audit(request.user, "shift.opened", opening, after={"float": str(opening.opening_float)}, request=request)
-            messages.success(request, "Shift opened.")
-        return redirect("dashboard")
+        try:
+            if shift:
+                close_cash_shift(actor=request.user, request=request, **form.cleaned_data)
+                messages.success(request, "Shift closed and submitted for independent review.")
+            else:
+                open_cash_shift(actor=request.user, request=request, **form.cleaned_data)
+                messages.success(request, "Shift opened.")
+            return redirect("dashboard")
+        except ValidationError as exc:
+            form.add_error(None, _validation_message(exc))
+            if shift:
+                shift.refresh_from_db()
     return render(request, "hospital/shift_form.html", {"form": form, "shift": shift})
+
+
+@role_required(Role.OWNER, Role.REVIEWER)
+def shift_review(request):
+    if request.method == "POST":
+        try:
+            review_cash_shift(actor=request.user, shift_id=request.POST.get("shift_id"), request=request)
+            messages.success(request, "Shift independently reviewed.")
+        except (ValidationError, CashShift.DoesNotExist, ValueError) as exc:
+            messages.error(request, _validation_message(exc))
+        return redirect("shift_review")
+    shifts = CashShift.objects.filter(status=CashShift.Status.CLOSED).exclude(cashier=request.user).select_related("cashier").order_by("-closed_at")[:100]
+    return render(request, "hospital/shift_review.html", {"shifts": shifts})
 
 
 STOCK_VIEWS = {

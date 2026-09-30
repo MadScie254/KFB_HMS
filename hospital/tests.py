@@ -73,16 +73,19 @@ from .services import (
     approve_credit_note,
     approve_purchase_order,
     check_delivery,
+    close_cash_shift,
     close_encounter,
     complete_eye_case,
     discharge_admission,
     dispense_order,
     issue_to_department,
+    open_cash_shift,
     open_stock_count,
     prepare_pharmacy_order,
     receive_delivery,
     record_payment,
     request_write_off,
+    review_cash_shift,
     review_mpesa,
     review_stock_count,
     review_write_off,
@@ -254,6 +257,40 @@ class WorkflowTests(HospitalFixtureMixin, TestCase):
         self.shift.save()
         self.assertEqual(self.shift.expected_cash, Decimal("2500"))
         self.assertEqual(self.shift.variance, Decimal("-200"))
+
+    def test_shift_opening_is_unique_and_review_is_independent(self):
+        with self.assertRaisesMessage(ValidationError, "already have an open shift"):
+            open_cash_shift(actor=self.reception, label="Duplicate", opening_float=Decimal("100"))
+        self.assertEqual(CashShift.objects.filter(cashier=self.reception, status=CashShift.Status.OPEN).count(), 1)
+        closed = close_cash_shift(
+            actor=self.reception, actual_cash=Decimal("1000"),
+            transfers_in=Decimal("0"), transfers_out=Decimal("0"), variance_reason="",
+        )
+        self.assertEqual(closed.status, CashShift.Status.CLOSED)
+        owner_shift = CashShift.objects.create(
+            cashier=self.owner, label="Owner", opening_float=Decimal("0"),
+            closed_at=timezone.now(), status=CashShift.Status.CLOSED,
+        )
+        with self.assertRaisesMessage(ValidationError, "cannot review your own shift"):
+            review_cash_shift(actor=self.owner, shift_id=owner_shift.pk)
+        review_cash_shift(actor=self.reviewer, shift_id=closed.pk)
+        closed.refresh_from_db()
+        self.assertEqual(closed.status, CashShift.Status.REVIEWED)
+        self.assertEqual(closed.reviewer, self.reviewer)
+        self.assertIsNotNone(closed.reviewed_at)
+        with self.assertRaisesMessage(ValidationError, "Only a closed shift"):
+            review_cash_shift(actor=self.reviewer, shift_id=closed.pk)
+
+    def test_shift_close_does_not_accept_unrecorded_cash_refunds(self):
+        self.client.force_login(self.reception)
+        response = self.client.post(reverse("shift_manage"), {
+            "actual_cash": "1000.00", "transfers_in": "0", "transfers_out": "0",
+            "cash_refunds": "9999.00", "variance_reason": "",
+        })
+        self.assertEqual(response.status_code, 302)
+        self.shift.refresh_from_db()
+        self.assertEqual(self.shift.status, CashShift.Status.CLOSED)
+        self.assertEqual(self.shift.cash_refunds, Decimal("0.00"))
 
     def test_duplicate_mpesa_reference_is_rejected(self):
         order1 = self.prepare(1)

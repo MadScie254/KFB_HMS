@@ -183,7 +183,7 @@ class ShiftOpenForm(StyledFormMixin, forms.ModelForm):
 class ShiftCloseForm(StyledFormMixin, forms.ModelForm):
     class Meta:
         model = CashShift
-        fields = ["actual_cash", "transfers_in", "transfers_out", "cash_refunds", "variance_reason"]
+        fields = ["actual_cash", "transfers_in", "transfers_out", "variance_reason"]
         widgets = {"variance_reason": forms.Textarea(attrs={"rows": 2})}
 
 

@@ -1,0 +1,9 @@
+{% extends "base.html" %}{% block title %}Shift reviews{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Independent cash control</p><h1>Shift reviews</h1><p>Check the recorded cash, transfers, refunds and variance before acknowledging a closed shift.</p></div></div>
+<section class="panel"><div class="panel-head"><h2>Awaiting review</h2><span>{{ shifts|length }} shown</span></div>
+{% if shifts %}<div class="table-wrap"><table><thead><tr><th>Cashier / shift</th><th>Closed</th><th>Expected</th><th>Actual</th><th>Variance</th><th>Explanation</th><th>Action</th></tr></thead><tbody>
+{% for shift in shifts %}<tr><td>{{ shift.cashier.get_full_name|default:shift.cashier.username }} / {{ shift.label }}</td><td>{{ shift.closed_at|date:"j M Y, H:i" }}</td><td>KES {{ shift.expected_cash|floatformat:2 }}</td><td>KES {{ shift.actual_cash|floatformat:2 }}</td><td>KES {{ shift.variance|floatformat:2 }}</td><td>{{ shift.variance_reason|default:"—" }}</td><td><form method="post">{% csrf_token %}<input type="hidden" name="shift_id" value="{{ shift.pk }}"><button class="button secondary" type="submit">Mark reviewed</button></form></td></tr>{% endfor %}
+</tbody></table></div>{% else %}<div class="empty compact"><strong>No closed shifts awaiting your review.</strong></div>{% endif %}
+</section>
+{% endblock %}

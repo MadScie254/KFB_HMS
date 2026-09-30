@@ -28,6 +28,7 @@ urlpatterns = [
     path("invoices/<uuid:pk>/credit-notes/new/", views.credit_note_create, name="credit_note_create"),
     path("receipts/<uuid:pk>/", views.receipt, name="receipt"),
     path("shifts/", views.shift_manage, name="shift_manage"),
+    path("shifts/review/", views.shift_review, name="shift_review"),
     path("stock/", views.stock_view, name="stock"),
     path("stock/deliveries/", views.deliveries, name="deliveries"),
     path("stock/deliveries/orders/<int:pk>/receive/", views.goods_receipt_create, name="goods_receipt_create"),

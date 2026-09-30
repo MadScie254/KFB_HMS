@@ -368,6 +368,66 @@ def _matching_payment_retry(existing, *, actor, invoice_id, amount, method, refe
 
 
 @transaction.atomic
+def open_cash_shift(*, actor, label, opening_float, request=None):
+    if user_role(actor) not in {Role.RECEPTION, Role.OWNER}:
+        raise ValidationError("Only a cashier may open a shift.")
+    if not label.strip() or opening_float < 0:
+        raise ValidationError("Enter a shift label and a nonnegative opening float.")
+    try:
+        with transaction.atomic():
+            shift = CashShift.objects.create(cashier=actor, label=label.strip(), opening_float=opening_float)
+    except IntegrityError as exc:
+        raise ValidationError("You already have an open shift.") from exc
+    audit(actor, "shift.opened", shift, after={"float": str(shift.opening_float)}, request=request)
+    return shift
+
+
+@transaction.atomic
+def close_cash_shift(*, actor, actual_cash, transfers_in, transfers_out, variance_reason, request=None):
+    shift = CashShift.objects.select_for_update().filter(cashier=actor, status=CashShift.Status.OPEN).first()
+    if not shift:
+        raise ValidationError("There is no open shift to close.")
+    if min(actual_cash, transfers_in, transfers_out) < 0:
+        raise ValidationError("Cash counts and transfers cannot be negative.")
+    shift.actual_cash = actual_cash
+    shift.transfers_in = transfers_in
+    shift.transfers_out = transfers_out
+    shift.variance_reason = variance_reason.strip()
+    shift.closed_at = timezone.now()
+    shift.status = CashShift.Status.CLOSED
+    if shift.variance and not shift.variance_reason:
+        raise ValidationError("Explain the cash variance before submitting the shift.")
+    shift.save(update_fields=[
+        "actual_cash", "transfers_in", "transfers_out", "variance_reason", "closed_at", "status", "updated_at",
+    ])
+    if shift.variance:
+        raise_exception("cash_variance", f"{shift.label}: KES {shift.variance:,.2f} variance", shift.variance_reason)
+    audit(actor, "shift.closed", shift, after={
+        "expected": str(shift.expected_cash), "actual": str(shift.actual_cash), "variance": str(shift.variance),
+    }, request=request)
+    return shift
+
+
+@transaction.atomic
+def review_cash_shift(*, actor, shift_id, request=None):
+    if user_role(actor) not in {Role.OWNER, Role.REVIEWER}:
+        raise ValidationError("Only an authorised reviewer may review a shift.")
+    shift = CashShift.objects.select_for_update().get(pk=shift_id)
+    if shift.cashier_id == actor.pk:
+        raise ValidationError("You cannot review your own shift.")
+    if shift.status != CashShift.Status.CLOSED:
+        raise ValidationError("Only a closed shift can be reviewed.")
+    shift.status = CashShift.Status.REVIEWED
+    shift.reviewer = actor
+    shift.reviewed_at = timezone.now()
+    shift.save(update_fields=["status", "reviewer", "reviewed_at", "updated_at"])
+    audit(actor, "shift.reviewed", shift, after={
+        "expected": str(shift.expected_cash), "actual": str(shift.actual_cash), "variance": str(shift.variance),
+    }, request=request)
+    return shift
+
+
+@transaction.atomic
 def review_mpesa(*, actor, payment_id, approve, provider_confirmed=False, review_notes="", request=None):
     if user_role(actor) not in {Role.REVIEWER, Role.OWNER}:
         raise ValidationError("An authorised independent reviewer must verify M-PESA.")

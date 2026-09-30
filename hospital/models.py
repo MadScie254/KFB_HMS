@@ -563,6 +563,12 @@ class CashShift(TimeStampedModel):
     variance_reason = models.TextField(blank=True)
     status = models.CharField(max_length=12, choices=Status.choices, default=Status.OPEN)
     reviewer = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="shifts_reviewed")
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(
+            fields=["cashier"], condition=Q(status="open"), name="unique_open_shift_per_cashier",
+        )]
 
     @property
     def cash_receipts(self):
