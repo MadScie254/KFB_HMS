@@ -7,6 +7,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+from django import forms
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import authenticate, login
@@ -1112,26 +1113,28 @@ def stock_count_detail(request, pk):
     count = get_object_or_404(
         StockCount.objects.select_related("counted_by__staff_profile", "reviewed_by__staff_profile"), pk=pk
     )
-    lines = count.lines.select_related("batch__item").order_by("batch__item__name", "batch__expiry_date")
+    lines = list(count.lines.select_related("batch__item").order_by("batch__item__name", "batch__expiry_date"))
+    form_error = ""
     if request.method == "POST":
         counted = {}
         reasons = {}
+        quantity_field = forms.DecimalField(max_digits=14, decimal_places=3, min_value=Decimal("0"))
         for line in lines:
-            raw = request.POST.get(f"counted-{line.pk}", "").strip()
-            if raw == "":
-                messages.error(request, "Enter a counted quantity for every line, including the ones that are zero.")
-                break
+            line.submitted_counted = request.POST.get(f"counted-{line.pk}", "")
+            line.submitted_reason = request.POST.get(f"reason-{line.pk}", "")
+            reasons[line.pk] = line.submitted_reason.strip()
             try:
-                counted[line.pk] = Decimal(raw)
-            except (ArithmeticError, ValueError):
-                messages.error(request, f"{line.batch.item.name} batch {line.batch.batch_number}: enter a number.")
-                break
-            reasons[line.pk] = request.POST.get(f"reason-{line.pk}", "").strip()
+                counted[line.pk] = quantity_field.clean(line.submitted_counted)
+            except ValidationError as exc:
+                line.count_error = _validation_message(exc)
+        if any(getattr(line, "count_error", "") for line in lines):
+            form_error = "Correct the marked counts. Your other entries are still here."
         else:
             try:
                 submit_stock_count(actor=request.user, count_id=count.pk, counted=counted, reasons=reasons, request=request)
             except ValidationError as exc:
-                messages.error(request, _validation_message(exc))
+                form_error = _validation_message(exc)
+                count.refresh_from_db()
             else:
                 messages.success(request, f"{count.reference} submitted. A delegated reviewer must approve before any adjustment is posted.")
                 return redirect("stock_count_detail", pk=count.pk)
@@ -1148,6 +1151,7 @@ def stock_count_detail(request, pk):
             and count.counted_by_id != request.user.id
         ),
         "show_expected": not count.blind_count or count.status != StockCount.Status.FROZEN,
+        "form_error": form_error,
     })
 
 

@@ -1752,6 +1752,45 @@ class StockScreenTests(HospitalFixtureMixin, TestCase):
         self.assertEqual(count.status, StockCount.Status.APPROVED)
         self.assertEqual(self.batch.quantity_on_hand, Decimal("197"))
 
+    def test_invalid_count_preserves_every_typed_line_and_reason(self):
+        StockBatch.objects.create(
+            item=self.product, batch_number="SECOND-COUNT-BATCH",
+            purchase_cost_per_base_unit=Decimal("2.00"),
+        )
+        count = open_stock_count(actor=self.pharmacist, blind_count=True)
+        lines = list(count.lines.order_by("pk"))
+        self.assertEqual(len(lines), 2)
+        url = reverse("stock_count_detail", args=[count.pk])
+        self.client.force_login(self.pharmacist)
+        response = self.client.post(url, {
+            f"counted-{lines[0].pk}": "111.000", f"reason-{lines[0].pk}": "Counted shelf",
+            f"counted-{lines[1].pk}": "", f"reason-{lines[1].pk}": "Need recount",
+        })
+        self.assertEqual(response.status_code, 200)
+        by_pk = {line.pk: line for line in response.context["lines"]}
+        self.assertEqual(by_pk[lines[0].pk].submitted_counted, "111.000")
+        self.assertEqual(by_pk[lines[0].pk].submitted_reason, "Counted shelf")
+        self.assertEqual(by_pk[lines[1].pk].submitted_reason, "Need recount")
+        self.assertTrue(by_pk[lines[1].pk].count_error)
+        self.assertContains(response, 'value="111.000"')
+        self.assertContains(response, 'value="Need recount"')
+        count.refresh_from_db()
+        self.assertEqual(count.status, StockCount.Status.FROZEN)
+        self.assertEqual(count.lines.get(pk=lines[0].pk).counted_quantity, Decimal("0.000"))
+
+        StockMovement.objects.create(
+            batch=self.batch, movement_type=StockMovement.MovementType.RECEIPT,
+            quantity_delta=1, to_location="Pharmacy", reference_type="Test",
+            reference_id="stale", idempotency_key="stale-count-test", entered_by=self.pharmacist,
+        )
+        response = self.client.post(url, {
+            f"counted-{lines[0].pk}": "111", f"reason-{lines[0].pk}": "Counted shelf",
+            f"counted-{lines[1].pk}": "0", f"reason-{lines[1].pk}": "Empty",
+        })
+        self.assertContains(response, "Stock moved after this sheet")
+        self.assertContains(response, 'value="111"')
+        self.assertContains(response, 'value="Empty"')
+
     def test_stock_count_screen_rejects_a_ward_location(self):
         self.client.login(username=self.pharmacist.username, password=self.password)
         response = self.client.post(

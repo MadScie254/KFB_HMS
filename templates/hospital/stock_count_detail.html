@@ -18,6 +18,7 @@
     <span>{{ lines|length }} batch{{ lines|length|pluralize:"es" }}</span>
   </div>
   <p class="help-text">Pause stock movements while counting. If stock moves before submission, start a new sheet. Enter a number for every line, including zero where the shelf is empty. {% if count.blind_count %}Expected quantities are hidden until the sheet is submitted.{% endif %}</p>
+  {% if form_error %}<div class="message error" role="alert">{{ form_error }}</div>{% endif %}
   <div class="table-wrap">
     <table>
       <thead><tr><th>Product</th><th>Batch</th><th>Expiry</th>{% if show_expected %}<th class="numeric">Expected</th>{% endif %}<th class="numeric">Counted</th><th>Reason for any difference</th></tr></thead>
@@ -30,11 +31,12 @@
         {% if show_expected %}<td class="numeric">{{ line.expected_quantity|floatformat:"-3" }}</td>{% endif %}
         <td class="numeric">
           <label class="visually-hidden" for="counted-{{ line.pk }}">Counted quantity for {{ line.batch.item.name }} batch {{ line.batch.batch_number }}</label>
-          <input class="field-control" id="counted-{{ line.pk }}" name="counted-{{ line.pk }}" type="number" step="0.001" min="0" inputmode="decimal" required>
+          <input class="field-control" id="counted-{{ line.pk }}" name="counted-{{ line.pk }}" type="number" step="0.001" min="0" inputmode="decimal" value="{{ line.submitted_counted|default_if_none:'' }}" {% if line.count_error %}aria-invalid="true" aria-describedby="counted-error-{{ line.pk }}"{% endif %} required>
+          {% if line.count_error %}<small class="field-error" id="counted-error-{{ line.pk }}">{{ line.count_error }}</small>{% endif %}
         </td>
         <td>
           <label class="visually-hidden" for="reason-{{ line.pk }}">Reason for {{ line.batch.item.name }} batch {{ line.batch.batch_number }}</label>
-          <input class="field-control" id="reason-{{ line.pk }}" name="reason-{{ line.pk }}" type="text" maxlength="255" placeholder="Damage, breakage, miscount…">
+          <input class="field-control" id="reason-{{ line.pk }}" name="reason-{{ line.pk }}" type="text" maxlength="255" value="{{ line.submitted_reason|default_if_none:'' }}" placeholder="Damage, breakage, miscount…">
         </td>
       </tr>
       {% endfor %}
