@@ -54,6 +54,7 @@ from .models import (
     ExceptionRecord,
     EyeCase,
     GoodsReceipt,
+    GoodsReceiptLine,
     ImportJob,
     Invoice,
     InvoiceLine,
@@ -3266,6 +3267,75 @@ class InvoiceListPerformanceTests(HospitalFixtureMixin, TestCase):
         self.assertEqual((annotated.total, annotated.paid_amount, annotated.balance), (
             Decimal("100.00"), Decimal("25.00"), Decimal("65.00"),
         ))
+
+
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
+class StockActivityPerformanceTests(HospitalFixtureMixin, TestCase):
+    def test_period_summary_query_count_stays_flat_with_movement_history(self):
+        with CaptureQueriesContext(connection) as small_queries:
+            stock_activity(7)
+        StockMovement.objects.bulk_create([
+            StockMovement(
+                batch=self.batch, movement_type=StockMovement.MovementType.RECEIPT,
+                quantity_delta=1, unit_cost_at_event=Decimal("0.123456"),
+                to_location="Pharmacy", reference_type="Volume", reference_id=str(index),
+                idempotency_key=f"activity-volume-{index}", entered_by=self.pharmacist,
+            ) for index in range(999)
+        ])
+        with CaptureQueriesContext(connection) as many_queries:
+            summary = stock_activity(7)
+        self.assertEqual(summary["movement_count"], 1000)
+        self.assertEqual(summary["received_value"], Decimal("519.88"))
+        self.assertLessEqual(len(many_queries) - len(small_queries), 1)
+
+
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
+class SupplierHistoryPerformanceTests(HospitalFixtureMixin, TestCase):
+    def test_database_selects_only_top_price_changes_before_loading_details(self):
+        supplier = Supplier.objects.create(name="Price volume supplier")
+        order = PurchaseOrder.objects.create(
+            supplier=supplier, requested_by=self.procurement,
+        )
+        products = CatalogueItem.objects.bulk_create([
+            CatalogueItem(
+                code=f"PRICE-{index:02}", name=f"Price product {index:02}",
+                kind=CatalogueItem.Kind.PRODUCT, department="Pharmacy",
+                base_unit="item", sale_unit="item", units_per_sale_unit=1,
+                reorder_level=1,
+            ) for index in range(1, 14)
+        ])
+        order_lines = PurchaseOrderLine.objects.bulk_create([
+            PurchaseOrderLine(
+                order=order, item=item, quantity_base_units=2,
+                quoted_unit_cost=Decimal("1.00"),
+            ) for item in products
+        ])
+        earlier = GoodsReceipt.objects.create(
+            purchase_order=order, supplier_invoice_reference="PRICE-EARLY",
+            invoice_amount=Decimal("13.00"), received_by=self.procurement,
+            delivered_at=timezone.now() - timedelta(days=2),
+        )
+        later = GoodsReceipt.objects.create(
+            purchase_order=order, supplier_invoice_reference="PRICE-LATE",
+            invoice_amount=Decimal("13.00"), received_by=self.procurement,
+            delivered_at=timezone.now() - timedelta(days=1),
+        )
+        GoodsReceiptLine.objects.bulk_create([
+            GoodsReceiptLine(
+                receipt=receipt, order_line=line, quantity_received=1,
+                batch_number=f"{receipt.pk}-{index}",
+                actual_unit_cost=Decimal("1.00") if receipt == earlier
+                else Decimal("1.00") + Decimal(index) / 100,
+            )
+            for index, line in enumerate(order_lines, start=1)
+            for receipt in (earlier, later)
+        ])
+        with CaptureQueriesContext(connection) as queries:
+            history = supplier_price_history(365, limit=5)
+        self.assertEqual(len(history["rows"]), 5)
+        self.assertEqual(history["rows"][0]["item"].code, "PRICE-13")
+        self.assertEqual(history["rows"][0]["percent_change"], Decimal("13.00"))
+        self.assertTrue(any("LIMIT 5" in query["sql"].upper() for query in queries))
 
 
 @override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])

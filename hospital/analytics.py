@@ -11,8 +11,22 @@ that quietly understates the position.
 from datetime import timedelta
 from decimal import Decimal
 
-from django.db.models import DecimalField, F, OuterRef, Q, Subquery, Sum, Value
-from django.db.models.functions import Coalesce
+from django.db.models import (
+    Case,
+    Count,
+    DecimalField,
+    ExpressionWrapper,
+    F,
+    Max,
+    Min,
+    OuterRef,
+    Q,
+    Subquery,
+    Sum,
+    Value,
+    When,
+)
+from django.db.models.functions import Abs, Coalesce, Round
 from django.utils import timezone
 
 from .models import (
@@ -253,35 +267,42 @@ def stock_activity(days=7):
     price do not rewrite historical cost of goods or shrinkage.
     """
     start = timezone.now() - timedelta(days=days)
-    movements = StockMovement.objects.filter(event_at__gte=start).select_related("batch__item")
-
-    received_units = Decimal("0.000")
-    received_value = Decimal("0.00")
-    dispensed_units = Decimal("0.000")
-    cost_of_goods = Decimal("0.00")
-    adjustment_units = Decimal("0.000")
-    adjustment_value = Decimal("0.00")
-    movers = {}
-
-    for movement in movements:
-        cost = movement.unit_cost_at_event
-        delta = movement.quantity_delta
-        if movement.movement_type == StockMovement.MovementType.RECEIPT:
-            received_units += delta
-            received_value += (delta * cost).quantize(Decimal("0.01"))
-        elif movement.movement_type in {
-            StockMovement.MovementType.DISPENSE,
-            StockMovement.MovementType.CONSUMPTION,
-        }:
-            out = -delta
-            dispensed_units += out
-            cost_of_goods += (out * cost).quantize(Decimal("0.01"))
-            bucket = movers.setdefault(movement.batch.item_id, {"item": movement.batch.item, "units": Decimal("0.000"), "cost": Decimal("0.00")})
-            bucket["units"] += out
-            bucket["cost"] += (out * cost).quantize(Decimal("0.01"))
-        elif movement.movement_type == StockMovement.MovementType.ADJUSTMENT:
-            adjustment_units += delta
-            adjustment_value += (delta * cost).quantize(Decimal("0.01"))
+    movements = StockMovement.objects.filter(event_at__gte=start)
+    receipts = Q(movement_type=StockMovement.MovementType.RECEIPT)
+    dispenses = Q(movement_type__in=[
+        StockMovement.MovementType.DISPENSE, StockMovement.MovementType.CONSUMPTION,
+    ])
+    adjustments = Q(movement_type=StockMovement.MovementType.ADJUSTMENT)
+    quantity = F("quantity_delta")
+    # The ledger stores six-decimal unit costs. Round each movement to cents
+    # before summing so its displayed value does not depend on row count.
+    line_value = Round(
+        ExpressionWrapper(
+            quantity * F("unit_cost_at_event"),
+            output_field=DecimalField(max_digits=28, decimal_places=9),
+        ),
+        precision=2, output_field=DecimalField(max_digits=18, decimal_places=2),
+    )
+    totals = movements.aggregate(
+        received_units=Coalesce(Sum(quantity, filter=receipts), ZERO_QUANTITY),
+        received_value=Coalesce(Sum(line_value, filter=receipts), ZERO_MONEY),
+        dispensed_units=Coalesce(-Sum(quantity, filter=dispenses), ZERO_QUANTITY),
+        cost_of_goods=Coalesce(-Sum(line_value, filter=dispenses), ZERO_MONEY),
+        adjustment_units=Coalesce(Sum(quantity, filter=adjustments), ZERO_QUANTITY),
+        adjustment_value=Coalesce(Sum(line_value, filter=adjustments), ZERO_MONEY),
+        movement_count=Count("pk"),
+    )
+    mover_totals = list(
+        movements.filter(dispenses)
+        .values("batch__item_id")
+        .annotate(units=-Sum(quantity), cost=-Sum(line_value))
+        .order_by("-units")[:8]
+    ) if totals["dispensed_units"] > 0 else []
+    mover_items = CatalogueItem.objects.in_bulk(row["batch__item_id"] for row in mover_totals)
+    top_movers = [
+        {"item": mover_items[row["batch__item_id"]], "units": row["units"], "cost": row["cost"]}
+        for row in mover_totals
+    ]
 
     sales_value = InvoiceLine.objects.filter(
         item__kind=CatalogueItem.Kind.PRODUCT,
@@ -290,25 +311,23 @@ def stock_activity(days=7):
         value=Coalesce(Sum("line_total"), ZERO_MONEY)
     )["value"]
 
-    top_movers = sorted(movers.values(), key=lambda row: row["units"], reverse=True)[:8]
-
     # A margin needs both halves. Billing a sale that was never dispensed leaves
     # cost at zero, which reads as a 100% margin — worse than no figure at all.
-    margin_available = dispensed_units > 0 and sales_value > 0
+    margin_available = totals["dispensed_units"] > 0 and sales_value > 0
 
     return {
         "days": days,
-        "received_units": received_units,
-        "received_value": received_value,
-        "dispensed_units": dispensed_units,
-        "cost_of_goods_dispensed": cost_of_goods,
-        "adjustment_units": adjustment_units,
-        "adjustment_value": adjustment_value,
+        "received_units": totals["received_units"],
+        "received_value": totals["received_value"],
+        "dispensed_units": totals["dispensed_units"],
+        "cost_of_goods_dispensed": totals["cost_of_goods"],
+        "adjustment_units": totals["adjustment_units"],
+        "adjustment_value": totals["adjustment_value"],
         "product_sales_value": sales_value,
         "margin_available": margin_available,
-        "product_gross_margin": (sales_value - cost_of_goods) if margin_available else None,
+        "product_gross_margin": (sales_value - totals["cost_of_goods"]) if margin_available else None,
         "top_movers": top_movers,
-        "movement_count": len(movements),
+        "movement_count": totals["movement_count"],
     }
 
 
@@ -437,50 +456,71 @@ def supplier_price_history(days=365, limit=12):
     makes the drift visible.
     """
     start = timezone.now() - timedelta(days=days)
-    lines = (
-        GoodsReceiptLine.objects
-        .filter(receipt__delivered_at__gte=start)
-        .select_related("receipt__purchase_order__supplier", "order_line__item")
-        .order_by("order_line__item__name", "receipt__delivered_at")
+    lines = GoodsReceiptLine.objects.filter(receipt__delivered_at__gte=start)
+    newest = lines.filter(order_line__item_id=OuterRef("order_line__item_id")).order_by(
+        "-receipt__delivered_at", "-pk"
     )
-    history = {}
-    for line in lines:
-        item = line.order_line.item
-        bucket = history.setdefault(item.pk, {"item": item, "entries": []})
-        bucket["entries"].append({
+    grouped = lines.order_by().values("order_line__item_id").annotate(
+        delivery_count=Count("pk"),
+        lowest=Min("actual_unit_cost"),
+        highest=Max("actual_unit_cost"),
+        latest_id=Subquery(newest.values("pk")[:1]),
+        previous_id=Subquery(newest.values("pk")[1:2]),
+        latest_cost=Subquery(newest.values("actual_unit_cost")[:1]),
+        previous_cost=Subquery(newest.values("actual_unit_cost")[1:2]),
+    ).annotate(
+        drift_score=Case(
+            When(previous_cost__gt=0, then=Abs(
+                (F("latest_cost") - F("previous_cost")) / F("previous_cost")
+            )),
+            default=Value(Decimal("0.00")),
+            output_field=DecimalField(max_digits=14, decimal_places=6),
+        )
+    ).order_by("-drift_score", "order_line__item_id")[:limit]
+    leaders = list(grouped)
+    line_ids = {
+        line_id for group in leaders for line_id in (group["latest_id"], group["previous_id"])
+        if line_id is not None
+    }
+    selected_lines = GoodsReceiptLine.objects.filter(pk__in=line_ids).select_related(
+        "receipt__purchase_order__supplier"
+    ).in_bulk()
+    items = CatalogueItem.objects.in_bulk(group["order_line__item_id"] for group in leaders)
+
+    def entry(line_id):
+        if line_id is None:
+            return None
+        line = selected_lines[line_id]
+        return {
             "delivered_at": line.receipt.delivered_at,
             "supplier": line.receipt.purchase_order.supplier.name,
             "unit_cost": line.actual_unit_cost,
             "quantity": line.quantity_received,
             "receipt": line.receipt,
-        })
+        }
 
     rows = []
-    for bucket in history.values():
-        entries = bucket["entries"]
-        latest = entries[-1]
-        previous = entries[-2] if len(entries) > 1 else None
+    for group in leaders:
+        latest = entry(group["latest_id"])
+        previous = entry(group["previous_id"])
         change = None
         percent = None
         if previous and previous["unit_cost"] > 0:
             change = (latest["unit_cost"] - previous["unit_cost"]).quantize(Decimal("0.01"))
             percent = (change / previous["unit_cost"] * 100).quantize(Decimal("0.01"))
-        costs = [entry["unit_cost"] for entry in entries]
         rows.append({
-            "item": bucket["item"],
-            "entries": entries,
-            "delivery_count": len(entries),
+            "item": items[group["order_line__item_id"]],
+            "delivery_count": group["delivery_count"],
             "latest": latest,
             "previous": previous,
             "change": change,
             "percent_change": percent,
-            "lowest": min(costs),
-            "highest": max(costs),
+            "lowest": group["lowest"],
+            "highest": group["highest"],
         })
-    rows.sort(key=lambda row: abs(row["percent_change"] or Decimal("0")), reverse=True)
     return {
         "days": days,
-        "rows": rows[:limit],
+        "rows": rows,
         "rising": [row for row in rows if row["percent_change"] and row["percent_change"] > 0],
     }
 
