@@ -24,6 +24,7 @@ from django.core.management import call_command
 from django.core.management.base import CommandError, OutputWrapper
 from django.db import DatabaseError, close_old_connections, connection, connections, transaction
 from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
 
@@ -34,6 +35,7 @@ from .analytics import (
     stock_activity,
     stock_position,
     supplier_price_history,
+    with_invoice_financials,
 )
 from .management.commands.check_readiness import REQUIRED_SETTING_KEYS
 from .management.commands.check_readiness import Command as ReadinessCommand
@@ -3161,6 +3163,109 @@ class SessionStatusTests(HospitalFixtureMixin, TestCase):
         self.assertEqual(response.json()["status"], "unavailable")
         Session.objects.filter(pk=self.client.session.session_key).delete()
         self.assertEqual(self.client.get(reverse("session_status")).status_code, 401)
+
+
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
+class InvoiceListPerformanceTests(HospitalFixtureMixin, TestCase):
+    def test_order_and_report_list_query_counts_do_not_grow_with_rows(self):
+        first = Invoice.objects.create(
+            patient=self.patient, created_by=self.reception,
+            status=Invoice.Status.POSTED, posted_at=timezone.now(),
+        )
+        InvoiceLine.objects.create(
+            invoice=first, item=self.product, description="Supply", department="Pharmacy",
+            quantity=1, unit_price=Decimal("5.00"),
+        )
+        PharmacyOrder.objects.create(
+            patient=self.patient, invoice=first, prepared_by=self.pharmacist,
+        )
+        self.client.force_login(self.pharmacist)
+        with CaptureQueriesContext(connection) as one_order_queries:
+            self.assertEqual(self.client.get(reverse("pharmacy_orders")).status_code, 200)
+        self.client.force_login(self.reviewer)
+        with CaptureQueriesContext(connection) as one_report_queries:
+            self.assertEqual(self.client.get(reverse("reports")).status_code, 200)
+
+        invoices = [
+            Invoice(
+                invoice_number=f"INV-VOLUME-{index:03}", patient=self.patient,
+                created_by=self.reception, status=Invoice.Status.POSTED, posted_at=timezone.now(),
+            ) for index in range(99)
+        ]
+        Invoice.objects.bulk_create(invoices)
+        InvoiceLine.objects.bulk_create([
+            InvoiceLine(
+                invoice=invoice, item=self.product, description="Supply", department="Pharmacy",
+                quantity=1, unit_price=Decimal("5.00"), line_total=Decimal("5.00"),
+            ) for invoice in invoices
+        ])
+        PharmacyOrder.objects.bulk_create([
+            PharmacyOrder(
+                order_number=f"RX-VOLUME-{index:03}", patient=self.patient,
+                invoice=invoice, prepared_by=self.pharmacist,
+            ) for index, invoice in enumerate(invoices)
+        ])
+        self.client.force_login(self.pharmacist)
+        with CaptureQueriesContext(connection) as many_order_queries:
+            orders_response = self.client.get(reverse("pharmacy_orders"))
+        self.assertEqual(orders_response.status_code, 200)
+        self.assertContains(orders_response, "RX-VOLUME-098")
+        self.assertLessEqual(len(many_order_queries) - len(one_order_queries), 2)
+        self.client.force_login(self.reviewer)
+        with CaptureQueriesContext(connection) as many_report_queries:
+            report_response = self.client.get(reverse("reports"))
+        self.assertEqual(report_response.status_code, 200)
+        self.assertLessEqual(len(many_report_queries) - len(one_report_queries), 2)
+
+    def test_annotated_totals_match_ledger_and_use_one_query_for_many_invoices(self):
+        invoice = Invoice.objects.create(
+            patient=self.patient, created_by=self.reception, status=Invoice.Status.POSTED,
+            posted_at=timezone.now(),
+        )
+        InvoiceLine.objects.create(
+            invoice=invoice, item=self.product, description="Supply", department="Pharmacy",
+            quantity=1, unit_price=Decimal("100.00"),
+        )
+        cash = Payment.objects.create(
+            amount=Decimal("30.00"), method=Payment.Method.CASH,
+            received_by=self.reception, idempotency_key="list-cash",
+        )
+        PaymentAllocation.objects.create(
+            invoice=invoice, payment=cash, amount=Decimal("30.00"), allocated_by=self.reception,
+        )
+        pending = Payment.objects.create(
+            amount=Decimal("20.00"), method=Payment.Method.MPESA,
+            reference="LIST-MPESA", verification_status=Payment.Verification.UNVERIFIED,
+            received_by=self.reception, idempotency_key="list-pending",
+        )
+        PaymentAllocation.objects.create(
+            invoice=invoice, payment=pending, amount=Decimal("20.00"), allocated_by=self.reception,
+        )
+        CreditNote.objects.create(
+            invoice=invoice, amount=Decimal("10.00"), reason="Correction",
+            status=CreditNote.Status.APPROVED, requested_by=self.reception,
+        )
+        Refund.objects.create(
+            payment=cash, invoice=invoice, amount=Decimal("5.00"), reason="Return",
+            status=Refund.Status.PAID, requested_by=self.reception,
+        )
+        self.assertEqual((invoice.total, invoice.paid_amount, invoice.balance), (
+            Decimal("100.00"), Decimal("25.00"), Decimal("65.00"),
+        ))
+        Invoice.objects.bulk_create([
+            Invoice(
+                invoice_number=f"INV-LIST-{index:03}", patient=self.patient,
+                created_by=self.reception, status=Invoice.Status.POSTED, posted_at=timezone.now(),
+            ) for index in range(100)
+        ])
+        with self.assertNumQueries(1):
+            listed = list(with_invoice_financials(Invoice.objects.all()))
+            figures = [(row.total, row.paid_amount, row.balance) for row in listed]
+        self.assertEqual(len(figures), 101)
+        annotated = next(row for row in listed if row.pk == invoice.pk)
+        self.assertEqual((annotated.total, annotated.paid_amount, annotated.balance), (
+            Decimal("100.00"), Decimal("25.00"), Decimal("65.00"),
+        ))
 
 
 @override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])

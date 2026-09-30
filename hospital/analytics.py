@@ -11,19 +11,23 @@ that quietly understates the position.
 from datetime import timedelta
 from decimal import Decimal
 
-from django.db.models import DecimalField, Q, Sum, Value
+from django.db.models import DecimalField, F, OuterRef, Q, Subquery, Sum, Value
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from .models import (
     CatalogueItem,
+    CreditNote,
     DepartmentIssue,
     DepartmentIssueLine,
     GoodsReceipt,
     GoodsReceiptLine,
     Invoice,
     InvoiceLine,
+    Payment,
+    PaymentAllocation,
     PriceVersion,
+    Refund,
     StockBatch,
     StockCount,
     StockMovement,
@@ -34,6 +38,37 @@ ZERO_MONEY = Value(Decimal("0.00"), output_field=DecimalField(max_digits=14, dec
 ZERO_QUANTITY = Value(Decimal("0.000"), output_field=DecimalField(max_digits=14, decimal_places=3))
 
 DEFAULT_EXPIRY_WINDOW_DAYS = 90
+
+
+def with_invoice_financials(invoices):
+    """Attach ledger-derived totals to a list without per-invoice queries."""
+    money = DecimalField(max_digits=14, decimal_places=2)
+    zero = Value(Decimal("0.00"), output_field=money)
+
+    def amount_for(rows, field):
+        grouped = rows.order_by().values("invoice_id").annotate(value=Sum(field)).values("value")[:1]
+        return Coalesce(Subquery(grouped, output_field=money), zero, output_field=money)
+
+    charges = amount_for(InvoiceLine.objects.filter(invoice_id=OuterRef("pk")), "line_total")
+    collections = amount_for(
+        PaymentAllocation.objects.filter(
+            invoice_id=OuterRef("pk"), payment__status=Payment.Status.VALID,
+        ).filter(
+            Q(payment__method=Payment.Method.CASH)
+            | Q(payment__verification_status__in=[Payment.Verification.MANUAL, Payment.Verification.PROVIDER])
+        ), "amount",
+    )
+    refunds = amount_for(
+        Refund.objects.filter(invoice_id=OuterRef("pk"), status=Refund.Status.PAID), "amount"
+    )
+    credits = amount_for(
+        CreditNote.objects.filter(invoice_id=OuterRef("pk"), status=CreditNote.Status.APPROVED), "amount"
+    )
+    return invoices.annotate(
+        _annotated_total=charges,
+        _annotated_paid=collections - refunds,
+        _annotated_credits=credits,
+    ).annotate(_annotated_balance=F("_annotated_total") - F("_annotated_paid") - F("_annotated_credits"))
 
 
 def active_price_map():

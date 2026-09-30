@@ -31,6 +31,7 @@ from .analytics import (
     stock_activity,
     stock_position,
     supplier_price_history,
+    with_invoice_financials,
 )
 from .forms import (
     AdmissionForm,
@@ -422,7 +423,7 @@ def patient_detail(request, pk):
     patient = get_object_or_404(Patient, pk=pk)
     role = user_role(request.user)
     audit(request.user, "patient.viewed", patient, request=request)
-    invoices = patient.invoices.all() if role in {Role.RECEPTION, Role.OWNER} else []
+    invoices = with_invoice_financials(patient.invoices.all()) if role in {Role.RECEPTION, Role.OWNER} else []
     notes = ClinicalNote.objects.filter(encounter__patient=patient).select_related("author", "parent_note") if role in {Role.CLINICIAN, Role.NURSE, Role.OWNER} else []
     attachments = patient.attachments.select_related("uploaded_by", "encounter") if role in {Role.CLINICIAN, Role.NURSE, Role.OWNER} else []
     return render(request, "hospital/patient_detail.html", {
@@ -689,7 +690,9 @@ def service_order_create(request, encounter_id):
 
 @role_required(Role.OWNER, Role.PHARMACY, Role.RECEPTION)
 def pharmacy_orders(request):
-    orders = PharmacyOrder.objects.select_related("patient", "invoice", "prepared_by").order_by("-created_at")[:100]
+    orders = PharmacyOrder.objects.select_related("patient", "prepared_by").prefetch_related(
+        Prefetch("invoice", queryset=with_invoice_financials(Invoice.objects.all()))
+    ).order_by("-created_at")[:100]
     pending_prescriptions = Prescription.objects.filter(status="active", pharmacyorder__isnull=True).select_related("encounter__patient", "prescriber").prefetch_related("items__product") if user_role(request.user) == Role.PHARMACY else []
     return render(request, "hospital/pharmacy_orders.html", {"orders": orders, "pending_prescriptions": pending_prescriptions})
 
@@ -1254,7 +1257,9 @@ def _report_context(days_value):
         "unverified_mpesa": payments.filter(method=Payment.Method.MPESA, verification_status=Payment.Verification.UNVERIFIED).aggregate(v=Sum("amount"))["v"] or Decimal("0.00"),
         "receivables": outstanding_receivables(),
         "department_activity": Encounter.objects.filter(created_at__gte=start).values("department").annotate(total=Count("id")).order_by("-total"),
-        "recent_invoices": invoices.select_related("patient").order_by("-posted_at")[:25],
+        "recent_invoices": with_invoice_financials(
+            invoices.select_related("patient").order_by("-posted_at")
+        )[:25],
         "stock": stock_position(),
         "stock_activity": stock_activity(days),
         "receiving": receiving_summary(days),

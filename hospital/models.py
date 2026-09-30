@@ -406,10 +406,14 @@ class Invoice(ReferenceNumberMixin, TimeStampedModel):
 
     @property
     def total(self):
+        if "_annotated_total" in self.__dict__:
+            return self._annotated_total
         return self.lines.aggregate(total=Sum("line_total"))["total"] or Decimal("0.00")
 
     @property
     def paid_amount(self):
+        if "_annotated_paid" in self.__dict__:
+            return self._annotated_paid
         received = self.allocations.filter(payment__status=Payment.Status.VALID).filter(
             Q(payment__method=Payment.Method.CASH)
             | Q(payment__verification_status__in=[Payment.Verification.MANUAL, Payment.Verification.PROVIDER])
@@ -427,6 +431,8 @@ class Invoice(ReferenceNumberMixin, TimeStampedModel):
 
     @property
     def balance(self):
+        if "_annotated_balance" in self.__dict__:
+            return self._annotated_balance
         credits = self.credit_notes.filter(status=CreditNote.Status.APPROVED).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
         return self.total - credits - self.paid_amount
 
