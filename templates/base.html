@@ -63,7 +63,7 @@
     <div class="workspace">
       <header class="topbar">
         <button class="menu-button icon-button" type="button" aria-label="Open navigation" aria-expanded="false" data-menu-toggle>{% include "hospital/_icon.html" with name="menu" %}</button>
-        <div class="connection"><span class="status-dot"></span><span data-connection-label>Server connected</span><small>Updated {% now "H:i" %}</small></div>
+        <div class="connection"><span class="status-dot"></span><span data-connection-label>Checking server</span><small>Page loaded {% now "H:i" %}</small></div>
         <div class="topbar-actions">
           <button type="button" class="icon-button" data-palette-open aria-label="Search everything" title="Search (press / or Ctrl+K)">{% include "hospital/_icon.html" with name="search" %}</button>
           <button type="button" class="icon-button" data-theme-toggle aria-pressed="false" aria-label="Switch between the light and dark theme">{% include "hospital/_icon.html" with name="moon" %}</button>
@@ -94,13 +94,13 @@
     </div>
   </div>
 
-  <div class="notice-bar notice-offline" data-offline-notice role="alert">
+  <div class="notice-bar notice-offline" data-offline-notice data-status-url="{% url 'session_status' %}" role="alert">
     {% include "hospital/_icon.html" with name="alert" %}
-    <span>No connection to the server. Anything you type now will not be saved until it returns.</span>
+    <span>Server unavailable. Changes on this page are not saved; keep the page open and try again when connected.</span>
   </div>
-  <div class="notice-bar notice-session" data-session-notice="{{ session_minutes_remaining|default:480 }}" role="alert">
+  <div class="notice-bar notice-session" data-session-expires-at="{{ session_expires_at }}" role="alert">
     {% include "hospital/_icon.html" with name="clock" %}
-    <span>Your session is about to end. Save your work.</span>
+    <span data-session-message>Your session is about to end. Save your work.</span>
     <button type="button" data-session-extend>Keep me signed in</button>
   </div>
   <button type="button" class="to-top" data-to-top aria-label="Back to top" title="Back to top">{% include "hospital/_icon.html" with name="arrow-up" %}</button>

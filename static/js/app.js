@@ -327,33 +327,111 @@
     });
   }
 
-  /* ---- Connection awareness ----------------------------------------------
-     A ward on an unreliable link should learn the server is unreachable
-     before somebody finishes typing a payment into a form that cannot post. */
+  /* ---- Verified server connection and session expiry -------------------- */
   const offlineBar = document.querySelector('[data-offline-notice]');
   const dot = document.querySelector('.status-dot');
   const connectionLabel = document.querySelector('[data-connection-label]');
-  const setOnline = (online) => {
-    if (offlineBar) offlineBar.classList.toggle('is-shown', !online);
-    if (dot) dot.classList.toggle('is-offline', !online);
-    if (connectionLabel) connectionLabel.textContent = online ? 'Server connected' : 'No connection';
+  const sessionNotice = document.querySelector('[data-session-expires-at]');
+  const sessionMessage = sessionNotice?.querySelector('[data-session-message]');
+  const extendButton = sessionNotice?.querySelector('[data-session-extend]');
+  const statusUrl = offlineBar?.dataset.statusUrl;
+  let expiresAt = Date.parse(sessionNotice?.dataset.sessionExpiresAt || '');
+  let extensionFailed = false;
+  let latestCheck = 0;
+  const setConnection = (state) => {
+    const unavailable = state === 'offline' || state === 'unreachable';
+    offlineBar?.classList.toggle('is-shown', unavailable);
+    dot?.classList.toggle('is-offline', unavailable);
+    if (connectionLabel) connectionLabel.textContent = {
+      connected: 'Server connected', offline: 'Browser offline',
+      unreachable: 'Server unavailable', expired: 'Session expired',
+    }[state] || 'Checking server';
   };
-  window.addEventListener('online', () => setOnline(true));
-  window.addEventListener('offline', () => setOnline(false));
-  if (!navigator.onLine) setOnline(false);
-
-  /* ---- Session expiry ----------------------------------------------------
-     Eight hours is long enough to start a clinical note and lose it. */
-  const sessionNotice = document.querySelector('[data-session-notice]');
-  if (sessionNotice) {
-    const minutes = Number(sessionNotice.dataset.sessionNotice || '0');
-    if (minutes > 0) {
-      window.setTimeout(() => sessionNotice.classList.add('is-shown'), Math.max(minutes - 5, 1) * 60000);
-      sessionNotice.querySelector('[data-session-extend]')?.addEventListener('click', () => {
-        fetch(window.location.href, { method: 'HEAD', cache: 'no-store' })
-          .finally(() => sessionNotice.classList.remove('is-shown'));
+  const refreshSessionWarning = () => {
+    if (!sessionNotice || !Number.isFinite(expiresAt)) return;
+    const remaining = expiresAt - Date.now();
+    const expired = remaining <= 0;
+    const show = expired || remaining <= 5 * 60 * 1000 || extensionFailed;
+    sessionNotice.classList.toggle('is-shown', show);
+    if (sessionMessage) sessionMessage.textContent = extensionFailed
+      ? 'Session extension failed. Save your work and try again.'
+      : expired ? 'Your session has expired. Sign in again before saving.'
+        : 'Your session is about to end. Save your work.';
+    if (extendButton) extendButton.disabled = expired;
+  };
+  const updateExpiry = (value) => {
+    const parsed = Date.parse(value || '');
+    if (Number.isFinite(parsed)) expiresAt = parsed;
+    refreshSessionWarning();
+  };
+  const checkServer = async () => {
+    if (!statusUrl) return;
+    if (!navigator.onLine) { setConnection('offline'); return; }
+    const check = ++latestCheck;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 8000);
+    try {
+      const response = await fetch(statusUrl, {
+        credentials: 'same-origin', cache: 'no-store',
+        headers: { Accept: 'application/json' }, signal: controller.signal,
       });
+      if (check !== latestCheck) return;
+      if (response.status === 401) {
+        setConnection('expired');
+        expiresAt = Date.now();
+        refreshSessionWarning();
+        return;
+      }
+      if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) {
+        throw new Error('Server status unavailable');
+      }
+      const data = await response.json();
+      if (check !== latestCheck) return;
+      setConnection('connected');
+      updateExpiry(data.expires_at);
+    } catch {
+      if (check === latestCheck) setConnection(navigator.onLine ? 'unreachable' : 'offline');
+    } finally {
+      window.clearTimeout(timeout);
     }
+  };
+  if (statusUrl) {
+    checkServer();
+    window.addEventListener('online', checkServer);
+    window.addEventListener('offline', () => { latestCheck += 1; setConnection('offline'); });
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) checkServer();
+    });
+    window.setInterval(() => { if (!document.hidden) checkServer(); }, 60000);
+  }
+  if (sessionNotice) {
+    refreshSessionWarning();
+    window.setInterval(refreshSessionWarning, 30000);
+    extendButton?.addEventListener('click', async () => {
+      const csrf = document.querySelector('form[action$="/logout/"] input[name="csrfmiddlewaretoken"]')?.value;
+      extendButton.disabled = true;
+      try {
+        if (!csrf) throw new Error('Missing CSRF token');
+        const response = await fetch(statusUrl, {
+          method: 'POST', credentials: 'same-origin', cache: 'no-store',
+          headers: { 'X-CSRFToken': csrf, Accept: 'application/json' },
+        });
+        if (!response.ok || !response.headers.get('content-type')?.includes('application/json')) {
+          throw new Error('Session extension rejected');
+        }
+        const data = await response.json();
+        if (!data.expires_at) throw new Error('Missing session expiry');
+        extensionFailed = false;
+        updateExpiry(data.expires_at);
+        setConnection('connected');
+      } catch {
+        extensionFailed = true;
+        refreshSessionWarning();
+        setConnection(navigator.onLine ? 'unreachable' : 'offline');
+      } finally {
+        extendButton.disabled = expiresAt <= Date.now();
+      }
+    });
   }
 
   /* ---- Dismissible messages ---------------------------------------------- */

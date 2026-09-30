@@ -12,5 +12,5 @@ def application_context(request):
         "current_role": role,
         "allowed_navigation": ROLE_NAVIGATION.get(role, []),
         "now_local": timezone.localtime(),
+        "session_expires_at": request.session.get("_kfb_expires_at", "") if request.user.is_authenticated else "",
     }
-

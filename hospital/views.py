@@ -316,6 +316,28 @@ def health(request):
     return render(request, "hospital/health.html", {"database_ok": database_ok}, status=status)
 
 
+def session_status(request):
+    """Authenticated server check; only an explicit POST extends the session."""
+    if request.method not in {"GET", "POST"}:
+        return JsonResponse({"error": "Method not allowed"}, status=405)
+    if not request.user.is_authenticated:
+        return JsonResponse({"authenticated": False}, status=401)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+    except Exception:
+        return JsonResponse({"status": "unavailable"}, status=503)
+    if request.method == "POST":
+        request.session["_kfb_expires_at"] = (
+            timezone.now() + timedelta(seconds=settings.SESSION_COOKIE_AGE)
+        ).isoformat()
+    return JsonResponse({
+        "status": "ok", "authenticated": True,
+        "expires_at": request.session.get("_kfb_expires_at", ""),
+    })
+
+
 @login_required
 def dashboard(request):
     role = user_role(request.user)

@@ -1,6 +1,24 @@
+from datetime import timedelta
+
 from django.conf import settings
 from django.shortcuts import redirect
 from django.urls import reverse
+from django.utils import timezone
+from django.utils.deprecation import MiddlewareMixin
+
+
+class SessionActivityMiddleware(MiddlewareMixin):
+    """Extend sessions for real activity, never for background status checks."""
+
+    def process_view(self, request, view_func, view_args, view_kwargs):
+        match = request.resolver_match
+        if request.method == "HEAD" or (match and match.url_name == "session_status"):
+            return None
+        if request.user.is_authenticated:
+            request.session["_kfb_expires_at"] = (
+                timezone.now() + timedelta(seconds=settings.SESSION_COOKIE_AGE)
+            ).isoformat()
+        return None
 
 
 class ScreenLockMiddleware:
@@ -11,7 +29,7 @@ class ScreenLockMiddleware:
     guard silently passes for every request.
     """
 
-    EXEMPT_NAMES = {"login", "logout", "screen_unlock", "health"}
+    EXEMPT_NAMES = {"login", "logout", "screen_unlock", "health", "session_status"}
 
     def __init__(self, get_response):
         self.get_response = get_response

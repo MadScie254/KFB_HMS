@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 from django.conf import settings
 from django.contrib.auth.models import User
+from django.contrib.sessions.models import Session
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
@@ -3130,6 +3131,36 @@ class FunctionalQueryBudget(int):
 
     def __str__(self):
         return f"at most {int(self)}"
+
+
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
+class SessionStatusTests(HospitalFixtureMixin, TestCase):
+    def test_status_check_does_not_extend_session_but_post_does(self):
+        self.client.force_login(self.reception)
+        page = self.client.get(reverse("dashboard"))
+        expires_at = page.context["session_expires_at"]
+        self.assertTrue(expires_at)
+        session_key = self.client.session.session_key
+        saved_expiry = Session.objects.get(pk=session_key).expire_date
+        status = self.client.get(reverse("session_status"))
+        self.assertEqual(status.status_code, 200)
+        self.assertEqual(status.json()["expires_at"], expires_at)
+        self.assertEqual(Session.objects.get(pk=session_key).expire_date, saved_expiry)
+        extended = self.client.post(reverse("session_status"))
+        self.assertEqual(extended.status_code, 200)
+        self.assertGreater(extended.json()["expires_at"], expires_at)
+
+    def test_expired_session_and_unavailable_server_are_reported(self):
+        self.assertEqual(self.client.get(reverse("session_status")).status_code, 401)
+        self.client.force_login(self.reception)
+        self.client.get(reverse("dashboard"))
+        with patch("hospital.views.connection") as unavailable:
+            unavailable.cursor.side_effect = DatabaseError("database unavailable")
+            response = self.client.get(reverse("session_status"))
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["status"], "unavailable")
+        Session.objects.filter(pk=self.client.session.session_key).delete()
+        self.assertEqual(self.client.get(reverse("session_status")).status_code, 401)
 
 
 @override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
