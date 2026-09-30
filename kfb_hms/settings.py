@@ -136,10 +136,8 @@ STORAGES = {
         else "django.contrib.staticfiles.storage.StaticFilesStorage",
     },
 }
-# A missing manifest entry falls back to the plain name rather than raising in
-# the middle of rendering a page. collectstatic is still a deployment step; the
-# readiness check reports when it has not been run.
-WHITENOISE_MANIFEST_STRICT = False
+# Production must fail visibly if a collected asset is missing.
+WHITENOISE_MANIFEST_STRICT = not DEMO_MODE
 WHITENOISE_MAX_AGE = 60 * 60 * 24 * 365
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"

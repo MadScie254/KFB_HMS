@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import shutil
@@ -7,6 +8,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from decimal import Decimal
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Barrier
@@ -18,7 +20,7 @@ from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
-from django.core.management.base import CommandError
+from django.core.management.base import CommandError, OutputWrapper
 from django.db import close_old_connections, connection, connections
 from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
@@ -32,6 +34,8 @@ from .analytics import (
     stock_position,
     supplier_price_history,
 )
+from .management.commands.check_readiness import REQUIRED_SETTING_KEYS
+from .management.commands.check_readiness import Command as ReadinessCommand
 from .models import (
     Admission,
     AuditEvent,
@@ -111,6 +115,67 @@ PNG_BYTES = bytes.fromhex(
     "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
     "1f15c4890000000a49444154789c6360000002000100ffff03000006000557bfabd40000000049454e44ae426082"
 )
+class ReadinessTests(TestCase):
+    def test_demo_and_empty_operational_settings_fail_the_command(self):
+        output = StringIO()
+        with override_settings(DEMO_MODE=True):
+            with self.assertRaises(CommandError):
+                call_command("check_readiness", stdout=output)
+        self.assertIn("NEEDS ACTION  Environment is not demo", output.getvalue())
+        self.assertIn("Required operational setting missing", output.getvalue())
+
+    def test_every_required_setting_needs_value_and_confirmation(self):
+        self.assertEqual(len(ReadinessCommand.operational_setting_issues()), len(REQUIRED_SETTING_KEYS))
+        Setting.objects.bulk_create([
+            Setting(key=key, value="confirmed", production_confirmed=True)
+            for key in REQUIRED_SETTING_KEYS
+        ])
+        self.assertEqual(ReadinessCommand.operational_setting_issues(), [])
+        Setting.objects.filter(key="near_expiry_days").update(production_confirmed=False)
+        self.assertIn("near_expiry_days", " ".join(ReadinessCommand.operational_setting_issues()))
+
+    def test_partial_static_manifest_is_not_readiness(self):
+        with TemporaryDirectory() as output:
+            root = Path(output)
+            (root / "css").mkdir()
+            (root / "css" / "app.123.css").write_text("body{}", encoding="utf-8")
+            (root / "staticfiles.json").write_text(json.dumps({
+                "paths": {"css/app.css": "css/app.123.css", "js/app.js": "js/app.123.js"},
+            }), encoding="utf-8")
+            with override_settings(DEMO_MODE=False, STATIC_ROOT=root):
+                issues = ReadinessCommand.static_manifest_issues()
+            self.assertIn("Manifest asset missing: js/app.js", issues)
+            self.assertTrue(any("Template asset absent from manifest" in issue for issue in issues))
+
+    @override_settings(
+        DEMO_MODE=False, SECURE_SSL_REDIRECT=True, SESSION_COOKIE_SECURE=True,
+        CSRF_TRUSTED_ORIGINS=["https://hospital.example"], SECURE_HSTS_SECONDS=31536000,
+        MPESA_MODE="manual",
+    )
+    def test_each_production_prerequisite_can_fail_the_command(self):
+        command = ReadinessCommand()
+        command.stdout = OutputWrapper(StringIO())
+        with (
+            patch.dict(settings.DATABASES["default"], {"ENGINE": "django.db.backends.postgresql"}),
+            patch.dict(os.environ, {"KFB_BACKUP_ENCRYPTION_RECIPIENT": "age1test"}),
+            patch.object(ReadinessCommand, "static_manifest_issues", return_value=[]),
+            patch.object(ReadinessCommand, "operational_setting_issues", return_value=[]),
+        ):
+            command.handle()
+            for name, invalid in (
+                ("DEMO_MODE", True), ("SECURE_SSL_REDIRECT", False),
+                ("SESSION_COOKIE_SECURE", False), ("CSRF_TRUSTED_ORIGINS", []),
+                ("SECURE_HSTS_SECONDS", 0), ("MPESA_MODE", "live"),
+            ):
+                with self.subTest(name=name), override_settings(**{name: invalid}):
+                    with self.assertRaises(CommandError):
+                        command.handle()
+            with patch.dict(settings.DATABASES["default"], {"ENGINE": "django.db.backends.sqlite3"}):
+                with self.assertRaises(CommandError):
+                    command.handle()
+            with patch.dict(os.environ, {"KFB_BACKUP_ENCRYPTION_RECIPIENT": ""}):
+                with self.assertRaises(CommandError):
+                    command.handle()
 
 
 class BackupEncryptionTests(TransactionTestCase):
