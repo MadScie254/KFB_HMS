@@ -14,9 +14,9 @@ The codebase has a sound server-rendered structure, role checks on most routes, 
 
 **Affected:** `hospital/views.py:347-360,397-411`; `hospital/pdf_reports.py:263-346`; `hospital/urls.py:15`.
 
-**Problem:** `patient_detail` withholds notes from reception, but `patient_access_pdf` admits reception and `build_patient_access_pdf` includes signed assessments and plans. This bypasses the intended clinical boundary and the specification's requirement that a cashier cannot retrieve clinical-note contents.
+**Problem:** `patient_detail` withholds notes from reception, but `patient_access_pdf` admits reception, and `build_patient_access_pdf` includes signed assessments and plans. This bypasses the intended clinical boundary and the specification's requirement that a cashier cannot retrieve clinical-note contents.
 
-**Fix prompt:** In `hospital/views.py` and `hospital/pdf_reports.py`, make the patient access PDF obey the same clinical authorization as the chart. A reception user currently receives a PDF containing signed notes although the patient page hides them. Restrict the full export to clinical/owner roles, or implement an explicitly limited reception export with a separate route and named approval flow. Add a role test that creates a signed note, verifies reception cannot obtain its text through any export, and verifies authorized access remains audited.
+**Fix prompt:** In `hospital/views.py` and `hospital/pdf_reports.py`, make the patient access PDF obey the same clinical authorization as the chart. A reception user currently receives a PDF containing signed notes, although the patient page hides them. Restrict the full export to clinical/owner roles, or implement an explicitly limited reception export with a separate route and named approval flow. Add a role test that creates a signed note, verifies reception cannot obtain its text through any export, and verifies authorized access remains audited.
 
 #### P0.2 — Production backup stages plaintext patient data in the destination
 

@@ -2853,6 +2853,101 @@ class EnhancedWorkflowTests(HospitalFixtureMixin, TestCase):
         self.assertEqual(invoice.balance, Decimal("1250.00"))
         self.assertIn("OWNER-REVIEW-1", invoice.lines.get().description)
 
+    def test_every_csv_format_rejects_more_than_5000_rows(self):
+        self.client.force_login(self.owner)
+        formats = {
+            "products": (
+                "code,name,department,base_unit,sale_unit,units_per_sale_unit,sale_price,reorder_level,prescription_required",
+                "CAP-1,Product,Pharmacy,tablet,box,100,7.50,20,false",
+            ),
+            "patients": (
+                "external_reference,first_name,last_name,date_of_birth,estimated_age_years,sex,phone,guardian_name,guardian_phone",
+                "CAP-1,Mary,Wafula,1995-03-02,,F,0700000011,,",
+            ),
+            "opening_stock": (
+                "product_code,batch_number,expiry_date,purchase_cost_per_base_unit,physical_count_base_units,witness_name,count_reference",
+                "TEST-TAB,CAP-1,2027-12-31,2.25,75,Witness,COUNT-1",
+            ),
+            "opening_receivables": (
+                "external_patient_reference,external_invoice_reference,original_invoice_date,description,department,outstanding_amount,review_reference",
+                "CAP-1,CAP-INV-1,2026-01-01,Opening,Outpatient,1000.00,REVIEW-1",
+            ),
+        }
+        for kind, (header, row) in formats.items():
+            with self.subTest(kind=kind):
+                payload = (header + "\n" + (row + "\n") * 5001).encode()
+                response = self.client.post(reverse("csv_import"), {
+                    "import_kind": kind,
+                    "csv_file": SimpleUploadedFile(f"{kind}.csv", payload, content_type="text/csv"),
+                })
+                self.assertContains(response, "Maximum 5,000 rows per import")
+                self.assertFalse(ImportJob.objects.filter(filename=f"{kind}.csv").exists())
+
+    def test_csv_reference_validation_queries_stay_flat(self):
+        from .views import (
+            _validate_opening_receivables_csv,
+            _validate_opening_stock_csv,
+            _validate_patient_csv,
+            _validate_product_csv,
+        )
+
+        self.patient.external_reference = "CAP-PATIENT"
+        self.patient.save(update_fields=["external_reference", "updated_at"])
+        cases = [
+            (_validate_product_csv,
+             "code,name,department,base_unit,sale_unit,units_per_sale_unit,sale_price,reorder_level,prescription_required",
+             lambda i: f"CAP-PRODUCT-{i},Product,Pharmacy,tablet,box,100,7.50,20,false"),
+            (_validate_patient_csv,
+             "external_reference,first_name,last_name,date_of_birth,estimated_age_years,sex,phone,guardian_name,guardian_phone",
+             lambda i: f"CAP-PATIENT-{i},Mary,Wafula,1995-03-02,,F,0700000011,,"),
+            (_validate_opening_stock_csv,
+             "product_code,batch_number,expiry_date,purchase_cost_per_base_unit,physical_count_base_units,witness_name,count_reference",
+             lambda i: f"TEST-TAB,CAP-BATCH-{i},2027-12-31,2.25,75,Witness,COUNT-{i}"),
+            (_validate_opening_receivables_csv,
+             "external_patient_reference,external_invoice_reference,original_invoice_date,description,department,outstanding_amount,review_reference",
+             lambda i: f"CAP-PATIENT,CAP-INV-{i},2026-01-01,Opening,Outpatient,1000.00,REVIEW-{i}"),
+        ]
+        for validator, header, make_row in cases:
+            with self.subTest(validator=validator.__name__):
+                payload = (header + "\n" + "\n".join(make_row(i) for i in range(100)) + "\n").encode()
+                with CaptureQueriesContext(connection) as queries:
+                    _, rows, errors = validator(SimpleUploadedFile("batch.csv", payload))
+                self.assertEqual((len(rows), errors), (100, []))
+                self.assertLessEqual(len(queries), 2)
+
+    def test_expired_csv_dry_run_requires_fresh_upload(self):
+        self.client.force_login(self.owner)
+        csv_bytes = (
+            b"external_reference,first_name,last_name,date_of_birth,estimated_age_years,sex,phone,guardian_name,guardian_phone\n"
+            b"EXPIRED-44,Mary,Wafula,1995-03-02,,F,0700000011,,\n"
+        )
+        self.client.post(reverse("csv_import"), {
+            "import_kind": "patients",
+            "csv_file": SimpleUploadedFile("expired.csv", csv_bytes, content_type="text/csv"),
+        })
+        job = ImportJob.objects.get(filename="expired.csv")
+        ImportJob.objects.filter(pk=job.pk).update(created_at=timezone.now() - timedelta(hours=25))
+        response = self.client.post(reverse("csv_import"), {"commit_job": job.pk}, follow=True)
+        self.assertContains(response, "dry run expired after 24 hours")
+        self.assertContains(response, "Expired; upload again")
+        self.assertFalse(Patient.objects.filter(external_reference="EXPIRED-44").exists())
+
+    def test_failed_csv_preview_keeps_only_first_50_errors(self):
+        self.client.force_login(self.owner)
+        row = "CAP-DUP,Product,Pharmacy,tablet,box,100,7.50,20,false\n"
+        payload = (
+            "code,name,department,base_unit,sale_unit,units_per_sale_unit,sale_price,reorder_level,prescription_required\n"
+            + row * 56
+        ).encode()
+        self.client.post(reverse("csv_import"), {
+            "import_kind": "products",
+            "csv_file": SimpleUploadedFile("many-errors.csv", payload, content_type="text/csv"),
+        })
+        job = ImportJob.objects.get(filename="many-errors.csv")
+        self.assertEqual(job.error_count, 55)
+        self.assertEqual(len(job.report["errors"]), 50)
+        self.assertEqual(job.report["rows"], [])
+
 
 @override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
 class OwnerVisibilityTests(HospitalFixtureMixin, TestCase):
