@@ -37,18 +37,29 @@
     <a class="task-card {% if unchecked_deliveries %}attention{% endif %}" href="{% url 'deliveries' %}"><span>02</span><strong>Deliveries</strong><small>{% if unchecked_deliveries %}{{ unchecked_deliveries }} awaiting an independent check.{% else %}Receive stock against a photographed invoice.{% endif %}</small></a>
     <a class="task-card {% if stock.below_reorder_count %}attention{% endif %}" href="{% url 'stock' %}?view=low"><span>03</span><strong>What to reorder</strong><small>{% if stock.below_reorder_count %}{{ stock.below_reorder_count }} product{{ stock.below_reorder_count|pluralize }} at or below reorder level.{% else %}Nothing is below its reorder level.{% endif %}</small></a>
     <a class="task-card" href="{% url 'stock_counts' %}"><span>04</span><strong>Stock count</strong><small>Freeze a sheet and reconcile the shelf.</small></a>
-  {% else %}
-    <a class="task-card primary-task" href="{% url 'queue' %}"><span>01</span><strong>Assigned work</strong><small>Open the current departmental worklist.</small></a>
-    <a class="task-card" href="{% url 'wards' %}"><span>02</span><strong>Ward board</strong><small>Review active admissions.</small></a>
+  {% elif role == 'nurse' %}
+    <a class="task-card primary-task" href="{% url 'wards' %}"><span>01</span><strong>Ward board</strong><small>Review active admissions and bed availability.</small></a>
+    <a class="task-card" href="{% url 'patients' %}"><span>02</span><strong>Patient records</strong><small>Open the chart for your patient.</small></a>
+  {% elif role == 'lab' %}
+    <a class="task-card primary-task" href="{% url 'departments' %}"><span>01</span><strong>Department worklist</strong><small>Record results and release reviewed work.</small></a>
+  {% elif role == 'eye' %}
+    <a class="task-card primary-task" href="{% url 'eye_clinic' %}"><span>01</span><strong>Eye clinic</strong><small>Open the clinic session and case worklist.</small></a>
+    <a class="task-card" href="{% url 'patients' %}"><span>02</span><strong>Find patient</strong><small>Review the patient record.</small></a>
+  {% elif role == 'reviewer' %}
+    <a class="task-card primary-task" href="{% url 'reports' %}"><span>01</span><strong>Finance reviews</strong><small>Verify payments and review corrections.</small></a>
+    <a class="task-card" href="{% url 'stock_counts' %}"><span>02</span><strong>Stock count reviews</strong><small>Review submitted sheets.</small></a>
+    <a class="task-card" href="{% url 'purchasing' %}"><span>03</span><strong>Purchase reviews</strong><small>Review requested orders.</small></a>
   {% endif %}
 </section>
 {% endif %}
 
 <div class="content-grid">
+  {% if show_patient_queue %}
   <section class="panel span-2">
     <div class="panel-head"><div><p class="eyebrow">Live operational record</p><h2>Active patient queue</h2></div><a href="{% url 'queue' %}">View all</a></div>
     {% if queue %}<div class="table-wrap"><table data-sortable-table><thead><tr><th>Patient</th><th>Visit</th><th>Department</th><th>Status</th><th class="numeric">Waiting</th></tr></thead><tbody>{% for encounter in queue %}<tr class="{{ encounter.created_at|wait_row_class }}"><td><a href="{% url 'patient_detail' encounter.patient_id %}"><strong>{{ encounter.patient.full_name }}</strong><small>{{ encounter.patient.patient_number }}</small></a></td><td>{{ encounter.encounter_number }}</td><td>{{ encounter.department }}</td><td><span class="status {{ encounter.status }}">{{ encounter.get_status_display }}</span></td><td class="numeric" data-sort-value="{{ encounter.created_at|date:'U' }}"><span class="{{ encounter.created_at|wait_class }}">{{ encounter.created_at|timesince }}</span>{% if encounter.created_at|wait_note %}<small>{{ encounter.created_at|wait_note }}</small>{% endif %}</td></tr>{% endfor %}</tbody></table></div>{% else %}<div class="empty"><strong>No patients are waiting.</strong><p>New visits will appear here after reception starts them.</p></div>{% endif %}
   </section>
+  {% endif %}
   {% if low_stock or expiring_stock %}
   <section class="panel">
     <div class="panel-head"><div><p class="eyebrow">Act before it runs out</p><h2>Stock needing attention</h2></div><a href="{% url 'stock' %}">Open stock</a></div>

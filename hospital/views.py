@@ -321,15 +321,16 @@ def dashboard(request):
     role = user_role(request.user)
     today = timezone.localdate()
     start = timezone.make_aware(timezone.datetime.combine(today, timezone.datetime.min.time()))
+    show_patient_queue = role in {Role.OWNER, Role.RECEPTION, Role.CLINICIAN, Role.NURSE}
     context = {
         "role": role,
-        "open_encounters": open_clinical_encounters().count(),
-        "today_patients": Patient.objects.filter(created_at__gte=start).count(),
-        "open_orders": PharmacyOrder.objects.exclude(status__in=[PharmacyOrder.Status.DISPENSED, PharmacyOrder.Status.CANCELLED]).count(),
         "exceptions": ExceptionRecord.objects.exclude(status=ExceptionRecord.Status.RESOLVED).order_by("-created_at")[:6],
-        "queue": open_clinical_encounters().select_related("patient").order_by("created_at")[:8],
-        "my_shift": CashShift.objects.filter(cashier=request.user, status=CashShift.Status.OPEN).first(),
+        "show_patient_queue": show_patient_queue,
     }
+    if show_patient_queue:
+        context["queue"] = open_clinical_encounters().select_related("patient").order_by("created_at")[:8]
+    if role == Role.RECEPTION:
+        context["my_shift"] = CashShift.objects.filter(cashier=request.user, status=CashShift.Status.OPEN).first()
     if role in {Role.PHARMACY, Role.PROCUREMENT, Role.OWNER}:
         # The people who can act on a shortage are the only ones shown one.
         position = stock_position()
@@ -337,8 +338,9 @@ def dashboard(request):
             "stock": position,
             "low_stock": position["below_reorder"][:6],
             "expiring_stock": position["expiring_soon"][:6],
-            "unchecked_deliveries": GoodsReceipt.objects.filter(checked_by__isnull=True).count(),
         })
+        if role in {Role.PHARMACY, Role.PROCUREMENT}:
+            context["unchecked_deliveries"] = GoodsReceipt.objects.filter(checked_by__isnull=True).count()
     if role == Role.OWNER:
         valid_payments = Payment.objects.filter(status=Payment.Status.VALID, received_at__gte=start)
         context.update({
@@ -348,7 +350,6 @@ def dashboard(request):
             "receivables": outstanding_receivables(),
             "occupied_beds": Admission.objects.filter(discharged_at__isnull=True).count(),
             "active_beds": Bed.objects.filter(active=True, ward__active=True).count(),
-            "eye_waiting": EyeCase.objects.filter(status="waiting").count(),
         })
     return render(request, "hospital/dashboard.html", context)
 

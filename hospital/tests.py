@@ -2310,6 +2310,33 @@ class ContinuousIntegrationTests(SimpleTestCase):
 
 @override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
 class EnhancedWorkflowTests(HospitalFixtureMixin, TestCase):
+    def test_dashboard_shows_patient_queue_only_to_chart_roles_and_routes_other_work(self):
+        Encounter.objects.create(patient=self.patient, started_by=self.reception)
+        lab = self.make_user("dashboard-lab", Role.LAB)
+        eye = self.make_user("dashboard-eye", Role.EYE)
+        for user, destination in (
+            (self.pharmacist, "pharmacy_orders"),
+            (self.procurement, "purchasing"),
+            (lab, "departments"),
+            (eye, "eye_clinic"),
+            (self.reviewer, "reports"),
+        ):
+            with self.subTest(role=user.staff_profile.role):
+                self.client.force_login(user)
+                response = self.client.get(reverse("dashboard"))
+                self.assertEqual(response.status_code, 200)
+                self.assertNotIn("queue", response.context)
+                self.assertNotContains(response, self.patient.full_name)
+                self.assertContains(response, reverse(destination))
+                self.assertNotContains(response, "Active patient queue")
+        for user in (self.owner, self.reception, self.clinician, self.nurse):
+            with self.subTest(role=user.staff_profile.role):
+                self.client.force_login(user)
+                response = self.client.get(reverse("dashboard"))
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, self.patient.full_name)
+                self.assertContains(response, reverse("patient_detail", args=[self.patient.pk]))
+
     def test_role_scoped_pages_render_without_template_errors(self):
         encounter = Encounter.objects.create(patient=self.patient, started_by=self.reception)
         order = self.prepare(1)
