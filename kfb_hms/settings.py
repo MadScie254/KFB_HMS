@@ -3,7 +3,9 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-ENVIRONMENT = os.getenv("KFB_ENV", "demo").lower()
+ENVIRONMENT = os.getenv("KFB_ENV", "").strip().lower()
+if ENVIRONMENT not in {"demo", "production"}:
+    raise RuntimeError("KFB_ENV must be set explicitly to 'demo' or 'production'.")
 DEMO_MODE = ENVIRONMENT == "demo"
 
 SECRET_KEY = os.getenv("KFB_SECRET_KEY", "")

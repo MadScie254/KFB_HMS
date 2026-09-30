@@ -3,6 +3,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -119,6 +120,68 @@ PNG_BYTES = bytes.fromhex(
     "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
     "1f15c4890000000a49444154789c6360000002000100ffff03000006000557bfabd40000000049454e44ae426082"
 )
+class EnvironmentStartupTests(SimpleTestCase):
+    def settings_import(self, environment):
+        child_env = os.environ.copy()
+        child_env.pop("KFB_ENV", None)
+        child_env.pop("KFB_DATABASE_URL", None)
+        child_env.pop("KFB_SECRET_KEY", None)
+        if environment is not None:
+            child_env["KFB_ENV"] = environment
+        if environment == "demo":
+            child_env["KFB_DEBUG"] = "1"
+        if environment == "production":
+            child_env.update({
+                "KFB_SECRET_KEY": "ci-only-not-a-real-secret-0123456789abcdefghijklmnopqrstuvwxyz",
+                "KFB_DATABASE_URL": "postgresql://ci:ci@127.0.0.1:5432/ci",
+                "KFB_ALLOWED_HOSTS": "hospital.example.test",
+                "KFB_DEBUG": "0",
+            })
+        return subprocess.run(
+            [sys.executable, "-c", "from kfb_hms import settings; print(settings.ENVIRONMENT, settings.DEMO_MODE, settings.DEBUG)"],
+            cwd=settings.BASE_DIR, env=child_env, capture_output=True, text=True, check=False,
+        )
+
+    def test_missing_and_unknown_environment_fail_before_django_starts(self):
+        for environment in (None, "staging"):
+            with self.subTest(environment=environment):
+                result = self.settings_import(environment)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("KFB_ENV must be set explicitly", result.stderr)
+
+    def test_explicit_demo_and_production_have_expected_security_modes(self):
+        demo = self.settings_import("demo")
+        self.assertEqual(demo.returncode, 0, demo.stderr)
+        self.assertIn("demo True True", demo.stdout)
+        production = self.settings_import("production")
+        self.assertEqual(production.returncode, 0, production.stderr)
+        self.assertIn("production False False", production.stdout)
+
+    @skipUnless(os.name == "nt" and shutil.which("powershell"), "Windows PowerShell launcher test")
+    def test_service_launcher_rejects_missing_and_demo_environment(self):
+        if not (settings.BASE_DIR / ".venv" / "Scripts" / "python.exe").exists():
+            self.skipTest("Local virtual environment is required for the launcher probe")
+        script = settings.BASE_DIR / "scripts" / "start-server.ps1"
+        for environment, expected in (
+            (None, "KFB_ENV must be set explicitly"),
+            ("demo", "KFB_ENV must be production"),
+            ("production", "KFB_SECURE_SSL_REDIRECT must be 1"),
+        ):
+            child_env = os.environ.copy()
+            child_env.pop("KFB_ENV", None)
+            child_env["KFB_SECURE_SSL_REDIRECT"] = "0"
+            if environment:
+                child_env["KFB_ENV"] = environment
+            with self.subTest(environment=environment):
+                result = subprocess.run(
+                    ["powershell", "-NoProfile", "-File", str(script)],
+                    cwd=settings.BASE_DIR, env=child_env, capture_output=True,
+                    text=True, check=False,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(expected, result.stderr)
+
+
 class ReadinessTests(TestCase):
     def test_demo_and_empty_operational_settings_fail_the_command(self):
         output = StringIO()

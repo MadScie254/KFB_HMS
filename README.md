@@ -101,7 +101,7 @@ For the outpatient slice, reception registers/finds a patient and starts a visit
 ## Production-style local server
 
 1. Copy `.env.example` to `.env` and load those values with the host's service manager. Django deliberately does not silently read `.env`; production secrets should be injected by the service account.
-2. Set `KFB_ENV=production`, a long random `KFB_SECRET_KEY`, host names, secure-cookie settings, and a PostgreSQL URL.
+2. Set `KFB_ENV=production`, a long random `KFB_SECRET_KEY`, host names, secure-cookie settings, and a PostgreSQL URL. An unset or unknown environment fails startup; `start-server.ps1` accepts production only. The `run-demo` wrappers set demo explicitly.
 3. Run migrations and create named users with the admin command. Never run `seed_demo`.
 4. Run `.\.venv\Scripts\python.exe manage.py check --deploy` and `.\.venv\Scripts\python.exe manage.py check_readiness`. The readiness command exits nonzero until required operational settings are confirmed and every collected static asset is present; treat either failure as a deployment stop.
 5. Configure Caddy from `deploy\Caddyfile`, install its internal CA certificate on authorised workstations, and start Waitress with `scripts\start-server.ps1` as a restricted Windows service. Production Waitress binds only to loopback and refuses startup unless HTTPS redirect is enabled.
