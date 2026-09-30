@@ -25,7 +25,7 @@ from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.core.management.base import CommandError, OutputWrapper
-from django.db import DatabaseError, close_old_connections, connection, connections, transaction
+from django.db import DatabaseError, IntegrityError, close_old_connections, connection, connections, transaction
 from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
@@ -53,6 +53,7 @@ from .models import (
     ClinicianPayable,
     CreditNote,
     DepartmentIssue,
+    DowntimeEntry,
     Encounter,
     ExceptionRecord,
     EyeCase,
@@ -3255,6 +3256,59 @@ class RoleCapabilityNavigationTests(HospitalFixtureMixin, TestCase):
                 self.assertEqual(self.client.get(reverse("stock_counts")).status_code, 200)
                 stock = self.client.get(reverse("stock"))
                 self.assertNotContains(stock, "Request a write-off")
+
+
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
+class DowntimePaperFormTests(HospitalFixtureMixin, TestCase):
+    def test_sensitive_forms_warn_on_unsaved_or_returned_invalid_input(self):
+        invoice = Invoice.objects.create(
+            patient=self.patient, status=Invoice.Status.POSTED,
+            posted_at=timezone.now(), created_by=self.reception,
+        )
+        InvoiceLine.objects.create(
+            invoice=invoice, item=self.product, description="Medicine",
+            quantity=1, unit_price=Decimal("100.00"), department="Pharmacy",
+        )
+        encounter = Encounter.objects.create(patient=self.patient, started_by=self.reception)
+        cases = (
+            (self.reception, reverse("invoice_payment", args=[invoice.pk])),
+            (self.reception, reverse("shift_manage")),
+            (self.clinician, reverse("service_order_create", args=[encounter.pk])),
+            (self.clinician, reverse("admission_create", args=[encounter.pk])),
+        )
+        for user, url in cases:
+            with self.subTest(url=url):
+                self.client.force_login(user)
+                response = self.client.get(url)
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, "data-unsaved-warning")
+        self.client.force_login(self.reception)
+        invalid = self.client.post(reverse("invoice_payment", args=[invoice.pk]), {
+            "amount": "-1", "method": Payment.Method.CASH, "reference": "",
+        })
+        self.assertEqual(invalid.status_code, 200)
+        self.assertTrue(invalid.context["form"].is_bound)
+        self.assertContains(invalid, "data-unsaved-warning")
+        self.assertContains(invalid, "field-error")
+
+    def test_printable_forms_explain_manual_references_and_reconciliation(self):
+        self.client.force_login(self.owner)
+        response = self.client.get(reverse("downtime_forms"))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "These sheets have no automatic numbering")
+        self.assertContains(response, "checks for an existing patient, payment or stock entry")
+        self.assertEqual(response.content.decode().count("Manual register reference:"), 4)
+
+    def test_duplicate_paper_references_cannot_be_saved_twice(self):
+        details = {
+            "paper_reference": "MANUAL-001", "event_type": "payment",
+            "event_at": timezone.now(), "entered_by": self.owner,
+        }
+        DowntimeEntry.objects.create(**details)
+        with transaction.atomic():
+            with self.assertRaises(IntegrityError):
+                DowntimeEntry.objects.create(**details)
+        self.assertEqual(DowntimeEntry.objects.filter(paper_reference="MANUAL-001").count(), 1)
 
 
 @override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])

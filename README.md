@@ -26,7 +26,7 @@ A local-first, server-rendered hospital operations application for Kingdom Faith
 - Protected clinical attachment upload/download and patient access-record PDF export.
 - Read-only audit review with searchable attribution and PostgreSQL database-level append-only enforcement.
 - Product, patient, witnessed opening-stock and reviewed opening-receivable CSV dry runs with row-level errors and idempotent commit.
-- Printable receipts and four numbered downtime forms.
+- Printable receipts and four downtime paper forms with manual numbering and reconciliation instructions.
 - Checksummed database/attachment backups; production backups refuse to run without an encryption recipient.
 
 See `docs/IMPLEMENTATION_STATUS.md` for exact scope and known gaps.

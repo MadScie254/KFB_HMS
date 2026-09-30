@@ -1,3 +1,40 @@
-{% extends "base.html" %}{% block title %}Downtime forms{% endblock %}
-{% block content %}<div class="page-heading no-print"><div><p class="breadcrumbs"><a href="{% url 'dashboard' %}">Home</a> / Downtime</p><h1>Numbered downtime forms</h1><p>Print blank copies in advance. Urgent care continues under hospital policy.</p></div><button class="button primary" onclick="window.print()">Print forms</button></div><div class="downtime-pages"><section class="paper-form"><header><strong>{{ hospital_name }}</strong><span>Patient / visit downtime record</span><em>Paper reference: __________</em></header><div class="paper-lines"><p>Original event date/time: ____________________</p><p>Patient number / name: ______________________</p><p>Two identifiers checked: _____________________</p><p>Department / urgency: _______________________</p><p>Service / clinical summary: ___________________</p><p>Responsible staff name/signature: _____________</p></div><footer>Back-entry must retain the original event time, paper reference, entry time and staff member.</footer></section><section class="paper-form"><header><strong>{{ hospital_name }}</strong><span>Payment downtime record</span><em>Paper reference: __________</em></header><div class="paper-lines"><p>Original event date/time: ____________________</p><p>Patient / customer: __________________________</p><p>Invoice / basket reference: ___________________</p><p>Amount and method: __________________________</p><p>M-PESA reference (unverified): ________________</p><p>Cashier name/signature: ______________________</p></div><footer>Do not issue a second receipt during back-entry. Match this reference before posting.</footer></section><section class="paper-form"><header><strong>{{ hospital_name }}</strong><span>Dispensing downtime record</span><em>Paper reference: __________</em></header><div class="paper-lines"><p>Original event date/time: ____________________</p><p>Patient / order reference: ____________________</p><p>Product / strength: __________________________</p><p>Batch / expiry: ______________________________</p><p>Actual quantity dispensed: ____________________</p><p>Pharmacy staff name/signature: _______________</p></div><footer>Back-entry must not deduct stock twice. Reconcile batch and paper reference.</footer></section><section class="paper-form"><header><strong>{{ hospital_name }}</strong><span>Nursing downtime record</span><em>Paper reference: __________</em></header><div class="paper-lines"><p>Original event date/time: ____________________</p><p>Patient / bed: _______________________________</p><p>Observation / medicine: ______________________</p><p>Given / not given / withheld: _________________</p><p>Dose / units / reason: ________________________</p><p>Nurse name/signature: ________________________</p></div><footer>Enter the actual event time separately from the later system entry time.</footer></section></div>{% endblock %}
-
+{% extends "base.html" %}
+{% block title %}Downtime paper forms{% endblock %}
+{% block content %}
+<div class="page-heading no-print">
+  <div><p class="breadcrumbs"><a href="{% url 'dashboard' %}">Home</a> / Downtime</p><h1>Downtime paper forms</h1><p>Print blank copies in advance. Urgent care follows hospital policy.</p></div>
+  <button class="button primary" type="button" onclick="window.print()">Print forms</button>
+</div>
+<section class="panel no-print">
+  <h2>Manual reference and reconciliation</h2>
+  <ol>
+    <li>Before a sheet is used, the designated custodian assigns its unique number from a controlled paper register. Write that number on the sheet and in the register.</li>
+    <li>Record the actual event time, patient identifiers, staff name and signature. Keep completed sheets secure.</li>
+    <li>After service returns, an authorised staff member checks for an existing patient, payment or stock entry before entering anything through the normal workflow. Write the system reference and entry time on the paper sheet.</li>
+    <li>A second authorised person checks the paper against the system record, signs the register, and retains the original under hospital policy. Escalate any mismatch before posting a possible duplicate.</li>
+  </ol>
+  <p class="help-text">These sheets have no automatic numbering, duplicate check or electronic back-entry screen.</p>
+</section>
+<div class="downtime-pages">
+  <section class="paper-form">
+    <header><strong>{{ hospital_name }}</strong><span>Patient / visit downtime record</span><em>Manual register reference: __________</em></header>
+    <div class="paper-lines"><p>Original event date/time: ____________________</p><p>Patient number / name: ______________________</p><p>Two identifiers checked: _____________________</p><p>Department / urgency: _______________________</p><p>Service / clinical summary: ___________________</p><p>Responsible staff name/signature: _____________</p></div>
+    <footer>After restoration: system record/reference __________ · entered at __________ · checked by __________</footer>
+  </section>
+  <section class="paper-form">
+    <header><strong>{{ hospital_name }}</strong><span>Payment downtime record</span><em>Manual register reference: __________</em></header>
+    <div class="paper-lines"><p>Original event date/time: ____________________</p><p>Patient / customer: __________________________</p><p>Invoice / basket reference: ___________________</p><p>Amount and method: __________________________</p><p>M-PESA reference (unverified): ________________</p><p>Cashier name/signature: ______________________</p></div>
+    <footer>Check existing collections before entry. System receipt __________ · entered at __________ · checked by __________</footer>
+  </section>
+  <section class="paper-form">
+    <header><strong>{{ hospital_name }}</strong><span>Dispensing downtime record</span><em>Manual register reference: __________</em></header>
+    <div class="paper-lines"><p>Original event date/time: ____________________</p><p>Patient / order reference: ____________________</p><p>Product / strength: __________________________</p><p>Batch / expiry: ______________________________</p><p>Actual quantity dispensed: ____________________</p><p>Pharmacy staff name/signature: _______________</p></div>
+    <footer>Check the batch ledger before entry. System movement __________ · entered at __________ · checked by __________</footer>
+  </section>
+  <section class="paper-form">
+    <header><strong>{{ hospital_name }}</strong><span>Nursing downtime record</span><em>Manual register reference: __________</em></header>
+    <div class="paper-lines"><p>Original event date/time: ____________________</p><p>Patient / bed: _______________________________</p><p>Observation / medicine: ______________________</p><p>Given / not given / withheld: _________________</p><p>Dose / units / reason: ________________________</p><p>Nurse name/signature: ________________________</p></div>
+    <footer>Keep actual event time separate from later entry time. System record __________ · checked by __________</footer>
+  </section>
+</div>
+{% endblock %}

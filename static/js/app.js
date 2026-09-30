@@ -48,7 +48,9 @@
   });
 
   document.querySelectorAll('[data-unsaved-warning]').forEach((form) => {
-    let dirty = false;
+    // A rejected POST returns the user's entered values with field errors.
+    // Keep the warning active until those values are successfully submitted.
+    let dirty = Boolean(form.querySelector('.field-error, .message.error'));
     form.addEventListener('input', () => { dirty = true; });
     form.addEventListener('submit', (event) => {
       if (!event.defaultPrevented) dirty = false;

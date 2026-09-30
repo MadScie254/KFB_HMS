@@ -38,9 +38,9 @@ The walk-in sale and outpatient registration/note/service-request/payment/dispen
 | Eye clinic | Working core | Waiting list/session display, unique patients vs eyes, package price snapshot, completion service and one case payable. Package-inclusion configuration and full session edit screens remain. |
 | Purchasing / delivery | Working request, approval and delivery | Multi-line supplier requests, independent approval, requester segregation, delivery entry with invoice evidence, partial deliveries and invoice matching against goods counted in. Supplier payable/payment bookkeeping and returns to supplier remain. |
 | Stock reconciliation | Working | Snapshot at cutoff, blind count option, movement-aware expected quantities, reviewer segregation and approved adjustment movements are implemented and tested. Returned stock is quarantined until a reviewer authorises its disposition. Cycle-count scheduling remains. |
-| CSV migration | Working | Products/prices, patients, witnessed opening stock and reviewed opening receivables support validation, dry-run, row errors, content-hash idempotency and one-time commit. |
-| Backups | Working command | SQLite/PostgreSQL data plus media, manifest, checksum, production encryption gate. Restore rehearsal must be performed on the chosen host. |
-| Downtime | Working forms, partial reconciliation | Four printable forms and unique paper-reference model. Guided back-entry UI remains. |
+| CSV migration | Working | Products/prices, patients, witnessed opening stock and reviewed opening receivables support bounded validation, row errors, per-upload dry runs, 24-hour expiry and one-time commit. |
+| Backups | Working command | SQLite/PostgreSQL data plus media under an upload lock, per-file manifest hashes, checksum and production encryption gate. Restore rehearsal must be performed on the chosen host. |
+| Downtime | Printable forms, manual reconciliation | Four paper forms require references from a controlled manual register. There is no electronic back-entry or reconciliation screen; see [downtime reconciliation](DOWNTIME_RECONCILIATION.md). |
 
 ## Stage 3
 
