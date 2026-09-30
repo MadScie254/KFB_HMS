@@ -1259,17 +1259,20 @@ class AuditEvent(models.Model):
 
 
 class LoginAttempt(models.Model):
-    """Failed sign-in evidence. Kept in the database, not process memory, so a
-    restart does not clear a lockout and the owner can review attempts."""
+    """Failed sign-in evidence retained after an account's lockout is cleared."""
 
     username = models.CharField(max_length=150, db_index=True)
     ip_address = models.GenericIPAddressField(null=True, blank=True)
     user_agent = models.CharField(max_length=255, blank=True)
     attempted_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    cleared_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["-attempted_at"]
-        indexes = [models.Index(fields=["username", "attempted_at"])]
+        indexes = [
+            models.Index(fields=["username", "attempted_at"]),
+            models.Index(fields=["ip_address", "attempted_at"]),
+        ]
 
     LOCKOUT_THRESHOLD = 8
     LOCKOUT_WINDOW_MINUTES = 15
@@ -1285,7 +1288,9 @@ class LoginAttempt(models.Model):
 
     @classmethod
     def recent_failures(cls, username):
-        return cls.objects.filter(username=username[:150], attempted_at__gte=cls.window_start()).count()
+        return cls.objects.filter(
+            username=username[:150], attempted_at__gte=cls.window_start(), cleared_at__isnull=True,
+        ).count()
 
     @classmethod
     def recent_failures_from(cls, ip_address):
@@ -1301,10 +1306,10 @@ class LoginAttempt(models.Model):
 
     @classmethod
     def clear(cls, username):
-        """Clear this account's failures on a successful sign-in.
+        """Clear account lockout while retaining failed-login evidence.
 
         The address history is deliberately kept: one person remembering their
         password says nothing about the other twenty-nine attempts from that
         machine, and clearing it would hand a spray attack a free reset.
         """
-        cls.objects.filter(username=username[:150]).delete()
+        cls.objects.filter(username=username[:150], cleared_at__isnull=True).update(cleared_at=timezone.now())

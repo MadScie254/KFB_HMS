@@ -131,7 +131,8 @@ class AuditEventAdmin(ReadOnlyEvidenceAdmin):
 
 @admin.register(models.LoginAttempt)
 class LoginAttemptAdmin(ReadOnlyEvidenceAdmin):
-    list_display = ("attempted_at", "username", "ip_address")
+    list_display = ("attempted_at", "username", "ip_address", "cleared_at")
+    list_filter = ("attempted_at", "cleared_at")
     search_fields = ("username", "ip_address")
 
 

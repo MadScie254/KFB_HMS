@@ -409,6 +409,60 @@ class BackupEncryptionTests(TransactionTestCase):
                         self.assertTrue((target / "manifest.json").exists())
 
 
+class LoginAttemptRetentionTests(TestCase):
+    def test_successful_login_clears_account_counter_but_keeps_address_evidence(self):
+        LoginAttempt.objects.bulk_create([
+            LoginAttempt(username="staff", ip_address="127.0.0.1") for _ in range(LoginAttempt.LOCKOUT_THRESHOLD)
+        ] + [
+            LoginAttempt(username=f"other-{index}", ip_address="127.0.0.1") for index in range(1000)
+        ])
+        self.assertTrue(LoginAttempt.is_locked("staff", "127.0.0.1"))
+        LoginAttempt.clear("staff")
+        self.assertEqual(LoginAttempt.recent_failures("staff"), 0)
+        self.assertEqual(LoginAttempt.recent_failures_from("127.0.0.1"), 1000 + LoginAttempt.LOCKOUT_THRESHOLD)
+        self.assertEqual(LoginAttempt.objects.filter(username="staff", cleared_at__isnull=False).count(), 8)
+
+    def test_retention_exports_before_pruning_and_keeps_active_window(self):
+        old = LoginAttempt.objects.create(username="old", ip_address="192.0.2.1")
+        LoginAttempt.objects.filter(pk=old.pk).update(attempted_at=timezone.now() - timedelta(days=2))
+        active = LoginAttempt.objects.create(username="active", ip_address="192.0.2.2")
+        exported = {}
+
+        def encrypt(command, **kwargs):
+            with zipfile.ZipFile(command[-1]) as archive:
+                exported["manifest"] = json.loads(archive.read("manifest.json"))
+                exported["rows"] = [json.loads(row) for row in archive.read("login-attempts.jsonl").splitlines()]
+            Path(command[command.index("--output") + 1]).write_bytes(b"encrypted evidence")
+            return subprocess.CompletedProcess(command, 0)
+
+        with TemporaryDirectory() as output:
+            with patch.dict(os.environ, {"KFB_BACKUP_ENCRYPTION_RECIPIENT": "age1test"}):
+                with patch("hospital.management.commands.prune_login_attempts.shutil.which", return_value="age"):
+                    with patch("hospital.management.commands.prune_login_attempts.subprocess.run", side_effect=encrypt):
+                        call_command("prune_login_attempts", output=output, retention_days=1, stdout=StringIO())
+            self.assertEqual(exported["manifest"]["row_count"], 1)
+            self.assertEqual([row["id"] for row in exported["rows"]], [old.pk])
+            self.assertFalse(LoginAttempt.objects.filter(pk=old.pk).exists())
+            self.assertTrue(LoginAttempt.objects.filter(pk=active.pk).exists())
+            self.assertEqual(len(list(Path(output).glob("*.zip.age"))), 1)
+            self.assertEqual(len(list(Path(output).glob("*.zip.age.sha256"))), 1)
+
+    def test_retention_never_deletes_when_encryption_fails(self):
+        old = LoginAttempt.objects.create(username="old", ip_address="192.0.2.1")
+        LoginAttempt.objects.filter(pk=old.pk).update(attempted_at=timezone.now() - timedelta(days=2))
+        with TemporaryDirectory() as output:
+            with patch.dict(os.environ, {"KFB_BACKUP_ENCRYPTION_RECIPIENT": "age1test"}):
+                with patch("hospital.management.commands.prune_login_attempts.shutil.which", return_value="age"):
+                    with patch(
+                        "hospital.management.commands.prune_login_attempts.subprocess.run",
+                        return_value=subprocess.CompletedProcess([], 1, stderr="bad recipient"),
+                    ):
+                        with self.assertRaisesMessage(CommandError, "encryption failed"):
+                            call_command("prune_login_attempts", output=output, retention_days=1)
+            self.assertTrue(LoginAttempt.objects.filter(pk=old.pk).exists())
+            self.assertEqual(list(Path(output).iterdir()), [])
+
+
 class HospitalFixtureMixin:
     """Shared demo fixture: one of each role, a priced product and a stocked batch."""
 
