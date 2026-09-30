@@ -805,6 +805,70 @@ class RegressionTests(HospitalFixtureMixin, TestCase):
         self.assertEqual(note.status, ClinicalNote.Status.SIGNED)
         self.assertEqual(note.revision, 3)
 
+    def test_signed_note_amendment_preserves_original_and_records_reason(self):
+        encounter = Encounter.objects.create(patient=self.patient, started_by=self.reception)
+        url = reverse("clinical_note", kwargs={"encounter_id": encounter.pk})
+        self.client.force_login(self.clinician)
+        self.assertEqual(self.client.post(url, {
+            "expected_revision": "0", "assessment": "Original assessment", "action": "sign",
+        }).status_code, 302)
+        original = ClinicalNote.objects.get(encounter=encounter)
+        amendment_form = self.client.get(url).context["form"]
+        self.assertEqual(amendment_form.initial["assessment"], "Original assessment")
+        self.assertEqual(amendment_form.initial["expected_parent_note_id"], original.pk)
+        amendment = {
+            "expected_revision": "0", "expected_parent_note_id": str(original.pk),
+            "assessment": "Corrected assessment", "action": "sign",
+        }
+        self.assertContains(self.client.post(url, amendment), "This field is required")
+        self.assertEqual(ClinicalNote.objects.filter(encounter=encounter).count(), 1)
+        amendment["amendment_reason"] = "Corrected transcription error"
+        self.assertEqual(self.client.post(url, amendment).status_code, 302)
+        original.refresh_from_db()
+        revised = ClinicalNote.objects.get(encounter=encounter, parent_note=original)
+        self.assertEqual(original.status, ClinicalNote.Status.AMENDED)
+        self.assertEqual(original.assessment, "Original assessment")
+        self.assertEqual(revised.status, ClinicalNote.Status.SIGNED)
+        self.assertEqual(revised.version, original.version + 1)
+        self.assertEqual(revised.amendment_reason, "Corrected transcription error")
+        self.assertEqual(AuditEvent.objects.filter(action="clinical_note.amended", entity_id=str(revised.pk)).count(), 1)
+
+    def test_stale_pre_signature_tab_cannot_create_unlinked_amendment(self):
+        encounter = Encounter.objects.create(patient=self.patient, started_by=self.reception)
+        url = reverse("clinical_note", kwargs={"encounter_id": encounter.pk})
+        self.client.force_login(self.clinician)
+        self.assertEqual(self.client.post(url, {
+            "expected_revision": "0", "assessment": "Signed", "action": "sign",
+        }).status_code, 302)
+        response = self.client.post(url, {
+            "expected_revision": "0", "expected_parent_note_id": "0", "assessment": "Stale tab",
+            "amendment_reason": "Late edit", "action": "sign",
+        })
+        self.assertContains(response, "signed note changed in another tab")
+        self.assertEqual(ClinicalNote.objects.filter(encounter=encounter).count(), 1)
+
+    def test_note_signing_waits_for_pending_service_result(self):
+        encounter = Encounter.objects.create(patient=self.patient, started_by=self.reception)
+        service = CatalogueItem.objects.create(
+            code="LAB-NOTE", name="Note workflow test", kind=CatalogueItem.Kind.SERVICE,
+            department="Laboratory", base_unit="service", sale_unit="service", units_per_sale_unit=1,
+        )
+        PriceVersion.objects.create(item=service, amount=Decimal("100"), reason="Approved", approved_by=self.owner)
+        order = ServiceOrder.objects.create(encounter=encounter, service=service, requested_by=self.clinician)
+        self.client.force_login(self.clinician)
+        self.assertEqual(self.client.post(reverse("clinical_note", kwargs={"encounter_id": encounter.pk}), {
+            "expected_revision": "0", "assessment": "Await laboratory result", "action": "sign",
+        }).status_code, 302)
+        encounter.refresh_from_db()
+        self.assertEqual(encounter.status, Encounter.Status.TESTS)
+        performer = self.make_user("note-lab", Role.LAB)
+        reviewer = self.make_user("note-reviewer", Role.LAB)
+        update_service_order(actor=performer, order_id=order.pk, status=ServiceOrder.Status.IN_PROGRESS, result="")
+        update_service_order(actor=performer, order_id=order.pk, status=ServiceOrder.Status.REVIEW, result="Normal")
+        update_service_order(actor=reviewer, order_id=order.pk, status=ServiceOrder.Status.RELEASED, result="Normal")
+        encounter.refresh_from_db()
+        self.assertEqual(encounter.status, Encounter.Status.PHARMACY)
+
     # C1 — the lock screen was a no-op: the middleware read resolver_match
     # before URL resolution, and unlocked_required was applied to no view.
     def test_locked_session_cannot_reach_clinical_screens(self):

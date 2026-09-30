@@ -126,11 +126,20 @@ class EncounterForm(StyledFormMixin, forms.ModelForm):
 
 class ClinicalNoteForm(StyledFormMixin, forms.ModelForm):
     expected_revision = forms.IntegerField(widget=forms.HiddenInput(), min_value=0)
+    expected_parent_note_id = forms.IntegerField(widget=forms.HiddenInput(), min_value=0, required=False)
 
     class Meta:
         model = ClinicalNote
-        fields = ["complaints", "history", "examination", "assessment", "plan", "follow_up"]
+        fields = ["complaints", "history", "examination", "assessment", "plan", "follow_up", "amendment_reason"]
         widgets = {name: forms.Textarea(attrs={"rows": 3}) for name in fields}
+
+    def __init__(self, *args, is_amendment=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        if is_amendment:
+            self.fields["amendment_reason"].required = True
+            self.fields["amendment_reason"].help_text = "Explain what changed; the signed original remains in the record."
+        else:
+            self.fields.pop("amendment_reason")
 
 
 class PharmacyBasketForm(StyledFormMixin, forms.Form):

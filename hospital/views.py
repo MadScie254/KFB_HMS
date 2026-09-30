@@ -379,7 +379,7 @@ def patient_detail(request, pk):
     role = user_role(request.user)
     audit(request.user, "patient.viewed", patient, request=request)
     invoices = patient.invoices.all() if role in {Role.RECEPTION, Role.OWNER} else []
-    notes = ClinicalNote.objects.filter(encounter__patient=patient) if role in {Role.CLINICIAN, Role.NURSE, Role.OWNER} else []
+    notes = ClinicalNote.objects.filter(encounter__patient=patient).select_related("author", "parent_note") if role in {Role.CLINICIAN, Role.NURSE, Role.OWNER} else []
     attachments = patient.attachments.select_related("uploaded_by", "encounter") if role in {Role.CLINICIAN, Role.NURSE, Role.OWNER} else []
     return render(request, "hospital/patient_detail.html", {
         "patient": patient,
@@ -522,8 +522,19 @@ def encounter_close(request, encounter_id):
 @role_required(Role.OWNER, Role.CLINICIAN)
 def clinical_note(request, encounter_id):
     encounter = get_object_or_404(Encounter.objects.select_related("patient"), pk=encounter_id)
-    draft = ClinicalNote.objects.filter(encounter=encounter, author=request.user, status=ClinicalNote.Status.DRAFT).first()
-    form = ClinicalNoteForm(request.POST or None, instance=draft, initial={"expected_revision": draft.revision if draft else 0})
+    notes = ClinicalNote.objects.filter(encounter=encounter, author=request.user)
+    draft = notes.filter(status=ClinicalNote.Status.DRAFT).select_related("parent_note").first()
+    latest_signed = notes.filter(status=ClinicalNote.Status.SIGNED).order_by("-version", "-pk").first()
+    parent = draft.parent_note if draft else latest_signed
+    initial = {
+        "expected_revision": draft.revision if draft else 0,
+        "expected_parent_note_id": parent.pk if parent else 0,
+    }
+    if parent and not draft:
+        initial.update({field: getattr(parent, field) for field in (
+            "complaints", "history", "examination", "assessment", "plan", "follow_up",
+        )})
+    form = ClinicalNoteForm(request.POST or None, instance=draft, initial=initial, is_amendment=bool(parent))
     if request.method == "POST" and form.is_valid():
         with transaction.atomic():
             # Serialise note numbering on the encounter. Two tabs can no longer
@@ -534,16 +545,25 @@ def clinical_note(request, encounter_id):
                 author=request.user,
                 status=ClinicalNote.Status.DRAFT,
             ).first()
+            current_signed = ClinicalNote.objects.filter(
+                encounter=locked_encounter, author=request.user, status=ClinicalNote.Status.SIGNED,
+            ).order_by("-version", "-pk").first()
+            current_parent = current_draft.parent_note if current_draft else current_signed
             expected_revision = form.cleaned_data["expected_revision"]
             if expected_revision != (current_draft.revision if current_draft else 0):
                 form.add_error(None, "This note changed in another tab. Reload before saving again.")
+            elif (form.cleaned_data["expected_parent_note_id"] or 0) != (current_parent.pk if current_parent else 0):
+                form.add_error(None, "A signed note changed in another tab. Reload before creating an amendment.")
+            elif current_draft and current_signed and current_draft.parent_note_id != current_signed.pk:
+                form.add_error(None, "A newer signed note exists. Reload before continuing this amendment.")
             else:
-                locked_form = ClinicalNoteForm(request.POST, instance=current_draft)
+                locked_form = ClinicalNoteForm(request.POST, instance=current_draft, is_amendment=bool(current_parent))
                 if locked_form.is_valid():
                     note = locked_form.save(commit=False)
                     if not note.pk:
                         note.encounter = locked_encounter
                         note.author = request.user
+                        note.parent_note = current_parent
                         note.version = (
                             ClinicalNote.objects.filter(
                                 encounter=locked_encounter, author=request.user
@@ -555,15 +575,25 @@ def clinical_note(request, encounter_id):
                     note.save()
                     if request.POST.get("action") == "sign":
                         note.sign()
-                        locked_encounter.status = Encounter.Status.PHARMACY
-                        locked_encounter.save(update_fields=["status", "updated_at"])
-                        audit(request.user, "clinical_note.signed", note, request=request)
-                        messages.success(request, "Clinical note signed. Future changes require an attributed amendment.")
+                        if current_parent:
+                            current_parent.status = ClinicalNote.Status.AMENDED
+                            current_parent.save(update_fields=["status", "updated_at"])
+                        if locked_encounter.status != Encounter.Status.CLOSED:
+                            has_pending_tests = ServiceOrder.objects.filter(encounter=locked_encounter).exclude(
+                                status=ServiceOrder.Status.RELEASED
+                            ).exists()
+                            locked_encounter.status = Encounter.Status.TESTS if has_pending_tests else Encounter.Status.PHARMACY
+                            locked_encounter.save(update_fields=["status", "updated_at"])
+                        action = "clinical_note.amended" if current_parent else "clinical_note.signed"
+                        audit(request.user, action, note, reason=note.amendment_reason, request=request)
+                        messages.success(request, "Amendment signed and linked to the original." if current_parent else "Clinical note signed. Future changes require an attributed amendment.")
                     else:
                         audit(request.user, "clinical_note.saved", note, request=request)
                         messages.success(request, "Draft saved on the server.")
                     return redirect("patient_detail", pk=encounter.patient_id)
-    return render(request, "hospital/clinical_note_form.html", {"form": form, "encounter": encounter, "draft": draft})
+    return render(request, "hospital/clinical_note_form.html", {
+        "form": form, "encounter": encounter, "draft": draft, "parent": parent,
+    })
 
 
 @role_required(Role.OWNER, Role.CLINICIAN)

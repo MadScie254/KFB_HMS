@@ -228,6 +228,7 @@ class ClinicalNote(TimeStampedModel):
     follow_up = models.TextField(blank=True)
     signed_at = models.DateTimeField(null=True, blank=True)
     parent_note = models.ForeignKey("self", null=True, blank=True, on_delete=models.PROTECT, related_name="amendments")
+    amendment_reason = models.TextField(blank=True)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["encounter", "author", "version"], name="unique_note_version")]

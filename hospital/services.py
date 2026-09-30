@@ -11,6 +11,7 @@ from .models import (
     AuditEvent,
     CashShift,
     CatalogueItem,
+    ClinicalNote,
     ClinicianPayable,
     CreditNote,
     DepartmentIssue,
@@ -228,6 +229,13 @@ def update_service_order(*, actor, order_id, status, result, request=None):
             description=order.service.name, department=order.service.department,
             quantity=Decimal("1"), unit_price=price.amount, price_version=price,
         )
+        encounter = order.encounter
+        if encounter.status == Encounter.Status.TESTS and not ServiceOrder.objects.filter(encounter=encounter).exclude(
+            status=ServiceOrder.Status.RELEASED
+        ).exists():
+            has_signed_note = ClinicalNote.objects.filter(encounter=encounter, status=ClinicalNote.Status.SIGNED).exists()
+            encounter.status = Encounter.Status.PHARMACY if has_signed_note else Encounter.Status.CLINICIAN
+            encounter.save(update_fields=["status", "updated_at"])
         audit(actor, "service_order.released", order, after={"invoice": invoice.invoice_number}, request=request)
         return order
     if status == ServiceOrder.Status.REVIEW and order.performer_id != actor.id:
