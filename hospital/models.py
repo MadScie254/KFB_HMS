@@ -410,10 +410,12 @@ class Invoice(ReferenceNumberMixin, TimeStampedModel):
 
     @property
     def paid_amount(self):
-        return self.allocations.filter(payment__status=Payment.Status.VALID).filter(
+        received = self.allocations.filter(payment__status=Payment.Status.VALID).filter(
             Q(payment__method=Payment.Method.CASH)
             | Q(payment__verification_status__in=[Payment.Verification.MANUAL, Payment.Verification.PROVIDER])
         ).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+        refunded = self.refunds.filter(status=Refund.Status.PAID).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+        return received - refunded
 
     @property
     def pending_amount(self):
@@ -559,7 +561,7 @@ class CashShift(TimeStampedModel):
     actual_cash = models.DecimalField(**MONEY)
     transfers_in = models.DecimalField(**MONEY)
     transfers_out = models.DecimalField(**MONEY)
-    cash_refunds = models.DecimalField(**MONEY)
+    legacy_cash_refunds = models.DecimalField(**MONEY)
     variance_reason = models.TextField(blank=True)
     status = models.CharField(max_length=12, choices=Status.choices, default=Status.OPEN)
     reviewer = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="shifts_reviewed")
@@ -575,8 +577,12 @@ class CashShift(TimeStampedModel):
         return self.payments.filter(method=Payment.Method.CASH, status=Payment.Status.VALID).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
 
     @property
+    def cash_refunds(self):
+        return self.paid_refunds.filter(status=Refund.Status.PAID, payment__method=Payment.Method.CASH).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+
+    @property
     def expected_cash(self):
-        return self.opening_float + self.cash_receipts + self.transfers_in - self.cash_refunds - self.transfers_out
+        return self.opening_float + self.cash_receipts + self.transfers_in - self.cash_refunds - self.legacy_cash_refunds - self.transfers_out
 
     @property
     def variance(self):
@@ -1099,16 +1105,20 @@ class Refund(TimeStampedModel):
         PAID = "paid", "Paid"
         REJECTED = "rejected", "Rejected"
     payment = models.ForeignKey(Payment, on_delete=models.PROTECT, related_name="refunds")
+    invoice = models.ForeignKey(Invoice, null=True, blank=True, on_delete=models.PROTECT, related_name="refunds")
     amount = models.DecimalField(**MONEY, validators=[MinValueValidator(Decimal("0.01"))])
     reason = models.TextField()
     status = models.CharField(max_length=12, choices=Status.choices, default=Status.PENDING)
     requested_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="refunds_requested")
     reviewed_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="refunds_reviewed")
     reviewed_at = models.DateTimeField(null=True, blank=True)
+    paid_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="refunds_paid")
+    paid_at = models.DateTimeField(null=True, blank=True)
+    paid_shift = models.ForeignKey(CashShift, null=True, blank=True, on_delete=models.PROTECT, related_name="paid_refunds")
 
     @property
     def refundable_remaining(self):
-        already = self.payment.refunds.filter(status__in=[self.Status.APPROVED, self.Status.PAID]).exclude(pk=self.pk).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+        already = self.payment.refunds.filter(status__in=[self.Status.PENDING, self.Status.APPROVED, self.Status.PAID]).exclude(pk=self.pk).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
         return self.payment.amount - already
 
 

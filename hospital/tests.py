@@ -58,6 +58,7 @@ from .models import (
     PriceVersion,
     PurchaseOrder,
     PurchaseOrderLine,
+    Refund,
     Role,
     ServiceOrder,
     StockBatch,
@@ -81,19 +82,22 @@ from .services import (
     issue_to_department,
     open_cash_shift,
     open_stock_count,
+    pay_refund,
     prepare_pharmacy_order,
     receive_delivery,
     record_payment,
+    request_refund,
     request_write_off,
     review_cash_shift,
     review_mpesa,
+    review_refund,
     review_stock_count,
     review_write_off,
     set_batch_disposition,
     submit_stock_count,
     update_service_order,
 )
-from .views import owner_brief_context
+from .views import outstanding_receivables, owner_brief_context, verified_collections_since
 
 # Real minimal files. Upload validation reads the leading bytes, so a fixture
 # that only claims to be a JPEG is now correctly refused — as it should be.
@@ -250,7 +254,7 @@ class WorkflowTests(HospitalFixtureMixin, TestCase):
     def test_cash_shift_equation_excludes_mpesa(self):
         Payment.objects.create(amount=8000, method="cash", received_by=self.reception, shift=self.shift, idempotency_key="cash-shift-test")
         Payment.objects.create(amount=5000, method="mpesa", reference="MPESA-UNIQUE", verification_status="unverified", received_by=self.reception, shift=self.shift, idempotency_key="mpesa-shift-test")
-        self.shift.cash_refunds = 500
+        self.shift.legacy_cash_refunds = 500
         self.shift.transfers_out = 6000
         self.shift.actual_cash = 2300
         self.shift.closed_at = timezone.now()
@@ -291,6 +295,52 @@ class WorkflowTests(HospitalFixtureMixin, TestCase):
         self.shift.refresh_from_db()
         self.assertEqual(self.shift.status, CashShift.Status.CLOSED)
         self.assertEqual(self.shift.cash_refunds, Decimal("0.00"))
+
+    def test_cash_refund_reopens_invoice_and_reconciles_paying_shift(self):
+        invoice = Invoice.objects.create(
+            patient=self.patient, status=Invoice.Status.POSTED,
+            posted_at=timezone.now(), created_by=self.reception,
+        )
+        InvoiceLine.objects.create(
+            invoice=invoice, item=self.product, description="Cash refund test",
+            department="Pharmacy", quantity=1, unit_price=100,
+        )
+        payment = Payment.objects.create(
+            amount=Decimal("100"), method=Payment.Method.CASH, received_by=self.reception,
+            shift=self.shift, idempotency_key="cash-refund-test",
+        )
+        PaymentAllocation.objects.create(payment=payment, invoice=invoice, amount=Decimal("100"), allocated_by=self.reception)
+        invoice.refresh_status()
+        self.assertEqual(invoice.balance, Decimal("0.00"))
+        refund = request_refund(
+            actor=self.reception, payment_id=payment.pk, amount=Decimal("30"), reason="Duplicate collection",
+        )
+        with self.assertRaisesMessage(ValidationError, "unrefunded amount"):
+            request_refund(actor=self.reception, payment_id=payment.pk, amount=Decimal("80"), reason="Too much")
+        with self.assertRaisesMessage(ValidationError, "independent reviewer"):
+            review_refund(actor=self.reception, refund_id=refund.pk, approve=True)
+        review_refund(actor=self.reviewer, refund_id=refund.pk, approve=True)
+        self.assertEqual(invoice.balance, Decimal("0.00"))
+        pay_refund(actor=self.reception, refund_id=refund.pk)
+        refund.refresh_from_db()
+        invoice.refresh_from_db()
+        self.assertEqual(refund.status, Refund.Status.PAID)
+        self.assertEqual(refund.paid_shift, self.shift)
+        self.assertEqual(invoice.paid_amount, Decimal("70.00"))
+        self.assertEqual(invoice.balance, Decimal("30.00"))
+        self.assertEqual(invoice.status, Invoice.Status.PART_PAID)
+        self.assertEqual(outstanding_receivables(), Decimal("30.00"))
+        self.assertEqual(verified_collections_since(timezone.now() - timedelta(days=1)), Decimal("70.00"))
+        self.assertEqual(self.shift.cash_refunds, Decimal("30.00"))
+        self.assertEqual(self.shift.expected_cash, Decimal("1070.00"))
+        self.client.force_login(self.reception)
+        self.assertContains(self.client.get(reverse("receipt", args=[payment.pk])), "Cash refunded against this receipt")
+        self.assertContains(self.client.get(reverse("refunds")), "Duplicate collection")
+        self.assertEqual(self.client.get(reverse("refund_request", args=[payment.pk])).status_code, 200)
+        self.client.force_login(self.reviewer)
+        self.assertEqual(self.client.get(reverse("refunds")).status_code, 200)
+        with self.assertRaisesMessage(ValidationError, "Only an approved refund"):
+            pay_refund(actor=self.reception, refund_id=refund.pk)
 
     def test_duplicate_mpesa_reference_is_rejected(self):
         order1 = self.prepare(1)

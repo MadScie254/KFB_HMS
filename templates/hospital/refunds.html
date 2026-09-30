@@ -1,0 +1,13 @@
+{% extends "base.html" %}{% block title %}Cash refunds{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Cash control</p><h1>Refunds</h1><p>Each request links to the original receipt, an independent decision, and the shift that paid it.</p></div></div>
+<section class="panel"><div class="panel-head"><h2>Recent refund records</h2><span>{{ refunds|length }} shown</span></div>
+{% if refunds %}<div class="table-wrap"><table><thead><tr><th>Receipt</th><th>Invoice</th><th>Amount</th><th>Reason</th><th>Status</th><th>Control</th></tr></thead><tbody>
+{% for refund in refunds %}<tr><td>{% if current_role == 'reviewer' %}{{ refund.payment.receipt_number }}{% else %}<a href="{% url 'receipt' refund.payment_id %}">{{ refund.payment.receipt_number }}</a>{% endif %}</td><td>{{ refund.invoice.invoice_number }}</td><td>KES {{ refund.amount|floatformat:2 }}</td><td>{{ refund.reason }}</td><td><span class="status {{ refund.status }}">{{ refund.get_status_display }}</span></td><td>
+  {% if refund.status == 'pending' %}{% if current_role == 'reviewer' or current_role == 'owner' %}{% if user.pk != refund.requested_by_id and user.pk != refund.payment.received_by_id %}<form method="post" action="{% url 'refund_action' refund.pk %}">{% csrf_token %}<button class="button secondary" name="action" value="approve" type="submit">Approve</button><button class="button ghost" name="action" value="reject" type="submit">Reject</button></form>{% endif %}{% endif %}{% endif %}
+  {% if refund.status == 'approved' %}{% if current_role == 'reception' or current_role == 'owner' %}{% if user.pk != refund.reviewed_by_id %}<form method="post" action="{% url 'refund_action' refund.pk %}">{% csrf_token %}<button class="button primary" name="action" value="pay" type="submit">Pay from open shift</button></form>{% endif %}{% endif %}{% endif %}
+  {% if refund.status == 'paid' %}{{ refund.paid_at|date:"j M Y, H:i" }} · {{ refund.paid_by.username }} / {{ refund.paid_shift.label }}{% endif %}
+</td></tr>{% endfor %}
+</tbody></table></div>{% else %}<div class="empty compact"><strong>No refund records yet.</strong></div>{% endif %}
+</section>
+{% endblock %}

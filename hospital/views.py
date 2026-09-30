@@ -51,6 +51,7 @@ from .forms import (
     PrescriptionFormSet,
     PurchaseOrderForm,
     PurchaseOrderLineFormSet,
+    RefundRequestForm,
     ServiceOrderForm,
     ServiceResultForm,
     ShiftCloseForm,
@@ -89,6 +90,7 @@ from .models import (
     PriceVersion,
     PurchaseOrder,
     PurchaseOrderLine,
+    Refund,
     Role,
     ServiceOrder,
     Setting,
@@ -114,12 +116,15 @@ from .services import (
     issue_to_department,
     open_cash_shift,
     open_stock_count,
+    pay_refund,
     prepare_pharmacy_order,
     receive_delivery,
     record_payment,
+    request_refund,
     request_write_off,
     review_cash_shift,
     review_mpesa,
+    review_refund,
     review_stock_count,
     review_write_off,
     set_batch_disposition,
@@ -167,9 +172,9 @@ def net_billed_since(start):
 
 
 def outstanding_receivables():
-    """Posted-but-unsettled value: billed − approved credits − settled allocations.
+    """Posted-but-unsettled value after credits, settled payments, and refunds.
 
-    Three aggregates regardless of ledger size, in place of two queries per
+    Four aggregates regardless of ledger size, in place of two queries per
     open invoice.
     """
     open_invoices = Invoice.objects.exclude(status=Invoice.Status.DRAFT)
@@ -183,12 +188,15 @@ def outstanding_receivables():
         Q(payment__method=Payment.Method.CASH)
         | Q(payment__verification_status__in=[Payment.Verification.MANUAL, Payment.Verification.PROVIDER])
     ).aggregate(v=Sum("amount"))["v"] or Decimal("0.00")
-    return billed - credited - paid
+    refunded = Refund.objects.filter(
+        invoice__in=open_invoices, status=Refund.Status.PAID
+    ).aggregate(v=Sum("amount"))["v"] or Decimal("0.00")
+    return billed - credited - paid + refunded
 
 
 def verified_collections_since(start):
-    """Count cash when received and M-PESA when independently verified."""
-    return Payment.objects.filter(status=Payment.Status.VALID).filter(
+    """Net received cash and independently verified M-PESA after paid refunds."""
+    received = Payment.objects.filter(status=Payment.Status.VALID).filter(
         Q(method=Payment.Method.CASH, received_at__gte=start)
         | Q(
             method=Payment.Method.MPESA,
@@ -196,6 +204,10 @@ def verified_collections_since(start):
             reviewed_at__gte=start,
         )
     ).aggregate(v=Sum("amount"))["v"] or Decimal("0.00")
+    refunded = Refund.objects.filter(status=Refund.Status.PAID, paid_at__gte=start).aggregate(
+        v=Sum("amount")
+    )["v"] or Decimal("0.00")
+    return received - refunded
 
 
 # What each role is allowed to find. Search must never become a way around the
@@ -744,7 +756,52 @@ def invoice_payment(request, pk):
 def receipt(request, pk):
     payment = get_object_or_404(Payment.objects.prefetch_related("allocations__invoice"), pk=pk)
     audit(request.user, "receipt.viewed", payment, reason="Original or duplicate print view", request=request)
-    return render(request, "hospital/receipt.html", {"payment": payment, "duplicate": request.GET.get("reprint") == "1"})
+    refund_paid = payment.refunds.filter(status=Refund.Status.PAID).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+    return render(request, "hospital/receipt.html", {
+        "payment": payment, "duplicate": request.GET.get("reprint") == "1", "refund_paid": refund_paid,
+    })
+
+
+@role_required(Role.RECEPTION, Role.OWNER)
+def refund_request(request, pk):
+    payment = get_object_or_404(Payment.objects.prefetch_related("allocations__invoice"), pk=pk)
+    form = RefundRequestForm(request.POST or None)
+    if request.method == "POST" and form.is_valid():
+        try:
+            refund = request_refund(actor=request.user, payment_id=pk, request=request, **form.cleaned_data)
+        except ValidationError as exc:
+            form.add_error(None, _validation_message(exc))
+        else:
+            messages.success(request, f"Refund request #{refund.pk} sent for independent review.")
+            return redirect("refunds")
+    return render(request, "hospital/refund_request.html", {"payment": payment, "form": form})
+
+
+@role_required(Role.RECEPTION, Role.OWNER, Role.REVIEWER)
+def refunds(request):
+    records = Refund.objects.filter(invoice__isnull=False).select_related(
+        "payment", "invoice", "requested_by", "reviewed_by", "paid_by", "paid_shift",
+    ).order_by("-created_at")[:100]
+    return render(request, "hospital/refunds.html", {"refunds": records})
+
+
+@role_required(Role.RECEPTION, Role.OWNER, Role.REVIEWER)
+def refund_action(request, pk):
+    if request.method != "POST":
+        raise Http404
+    get_object_or_404(Refund, pk=pk)
+    try:
+        action = request.POST.get("action")
+        if action in {"approve", "reject"}:
+            review_refund(actor=request.user, refund_id=pk, approve=action == "approve", request=request)
+        elif action == "pay":
+            pay_refund(actor=request.user, refund_id=pk, request=request)
+        else:
+            raise ValidationError("Choose a valid refund action.")
+        messages.success(request, "Refund action recorded.")
+    except ValidationError as exc:
+        messages.error(request, _validation_message(exc))
+    return redirect("refunds")
 
 
 @role_required(Role.OWNER, Role.PHARMACY)

@@ -1,7 +1,7 @@
 {% extends "base.html" %}{% block title %}Receipt {{ payment.receipt_number }}{% endblock %}
 {% block content %}
 <div class="receipt-page">
-  <div class="receipt-actions no-print"><a class="button ghost" href="{% url 'pharmacy_orders' %}">Back to orders</a><button class="button primary" type="button" onclick="window.print()">Print</button></div>
+  <div class="receipt-actions no-print"><a class="button ghost" href="{% url 'pharmacy_orders' %}">Back to orders</a>{% if payment.method == 'cash' and payment.status == 'valid' %}<a class="button secondary" href="{% url 'refund_request' payment.pk %}">Request cash refund</a>{% endif %}<button class="button primary" type="button" onclick="window.print()">Print</button></div>
   <article class="receipt">
     <header><div class="brand-mark">K+</div><h1>{{ hospital_name }}</h1><p>Malaha, Webuye, Kenya</p><p class="receipt-label">{% if payment.status == 'rejected' %}REJECTED PAYMENT CLAIM{% elif payment.method == 'mpesa' and payment.verification_status == 'unverified' %}PENDING PAYMENT CLAIM{% elif duplicate %}DUPLICATE RECEIPT{% else %}PAYMENT RECEIPT{% endif %}</p></header>
     <dl>
@@ -12,6 +12,7 @@
       <div><dt>Recorded by</dt><dd>{{ payment.received_by.staff_profile }}</dd></div>
     </dl>
     <div class="receipt-amount"><span>{% if payment.status == 'rejected' %}Claim rejected{% elif payment.method == 'mpesa' and payment.verification_status == 'unverified' %}Amount claimed, not yet verified{% else %}Amount received{% endif %}</span><strong>KES {{ payment.amount|floatformat:2 }}</strong></div>
+    {% if refund_paid %}<p class="verification-note">Cash refunded against this receipt: KES {{ refund_paid|floatformat:2 }}. The original receipt amount remains shown for the audit trail.</p>{% endif %}
     {% if payment.method == 'mpesa' %}<p class="verification-note">Status: {% if payment.status == 'rejected' %}Rejected{% else %}{{ payment.get_verification_status_display }}{% endif %}. {% if payment.verification_status == 'unverified' and payment.status == 'valid' %}This claim has not reduced the invoice balance.{% endif %}</p>{% endif %}
     {% if payment.review_notes %}<p class="verification-note">Review notes: {{ payment.review_notes }}</p>{% endif %}
     <section>

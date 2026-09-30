@@ -1,0 +1,9 @@
+{% extends "base.html" %}{% block title %}Request cash refund{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="breadcrumbs"><a href="{% url 'receipt' payment.pk %}">Receipt {{ payment.receipt_number }}</a> / Refund</p><h1>Request cash refund</h1><p>Original cash payment: KES {{ payment.amount|floatformat:2 }}. The linked invoice will reopen for the amount refunded.</p></div></div>
+<form method="post" class="panel form-panel" data-unsaved-warning>{% csrf_token %}
+  <div class="form-grid one-column">{% include "hospital/_form_fields.html" %}</div>
+  <div class="callout"><strong>Independent review is required.</strong><p>After approval, a cashier pays the refund from an open shift and the invoice balance updates.</p></div>
+  <div class="form-actions"><a class="button ghost" href="{% url 'receipt' payment.pk %}">Cancel</a><button class="button primary" type="submit">Request refund</button></div>
+</form>
+{% endblock %}

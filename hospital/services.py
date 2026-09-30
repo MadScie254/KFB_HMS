@@ -28,6 +28,7 @@ from .models import (
     PharmacyOrder,
     PharmacyOrderItem,
     PurchaseOrder,
+    Refund,
     Role,
     ServiceOrder,
     Setting,
@@ -425,6 +426,88 @@ def review_cash_shift(*, actor, shift_id, request=None):
         "expected": str(shift.expected_cash), "actual": str(shift.actual_cash), "variance": str(shift.variance),
     }, request=request)
     return shift
+
+
+@transaction.atomic
+def request_refund(*, actor, payment_id, amount, reason, request=None):
+    if user_role(actor) not in {Role.RECEPTION, Role.OWNER}:
+        raise ValidationError("Only authorised cashier staff may request a refund.")
+    allocation = PaymentAllocation.objects.filter(payment_id=payment_id).first()
+    if not allocation or PaymentAllocation.objects.filter(payment_id=payment_id).count() != 1:
+        raise ValidationError("This payment needs a single linked invoice before a refund can be requested.")
+    invoice = Invoice.objects.select_for_update().get(pk=allocation.invoice_id)
+    payment = Payment.objects.select_for_update().get(pk=payment_id)
+    if payment.method != Payment.Method.CASH or payment.status != Payment.Status.VALID:
+        raise ValidationError("Only valid cash payments can be refunded through a cashier shift.")
+    if getattr(invoice, "pharmacy_order", None) and invoice.pharmacy_order.status == PharmacyOrder.Status.DISPENSED:
+        raise ValidationError("A dispensed order requires a documented return before refunding payment.")
+    if amount <= 0 or not reason.strip():
+        raise ValidationError("Enter a positive refund amount and a reason.")
+    reserved = payment.refunds.exclude(status=Refund.Status.REJECTED).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
+    if amount > allocation.amount - reserved:
+        raise ValidationError("Refund exceeds the unrefunded amount of this payment.")
+    refund = Refund.objects.create(
+        payment=payment, invoice=invoice, amount=amount, reason=reason.strip(), requested_by=actor,
+    )
+    audit(actor, "refund.requested", refund, reason=refund.reason, request=request)
+    return refund
+
+
+@transaction.atomic
+def review_refund(*, actor, refund_id, approve, request=None):
+    if user_role(actor) not in {Role.REVIEWER, Role.OWNER}:
+        raise ValidationError("Only an independent reviewer may review a refund.")
+    refund = Refund.objects.select_related("payment").get(pk=refund_id)
+    if refund.invoice_id is None:
+        raise ValidationError("This legacy refund has no linked invoice and needs manual reconciliation.")
+    invoice = Invoice.objects.select_for_update().get(pk=refund.invoice_id)
+    payment = Payment.objects.select_for_update().get(pk=refund.payment_id)
+    refund = Refund.objects.select_for_update().get(pk=refund_id)
+    if actor.pk in {refund.requested_by_id, payment.received_by_id}:
+        raise ValidationError("The requester or original cashier cannot review this refund.")
+    if refund.status != Refund.Status.PENDING:
+        raise ValidationError("Only a pending refund can be reviewed.")
+    if approve and (payment.status != Payment.Status.VALID or invoice.pk != refund.invoice_id):
+        raise ValidationError("The linked payment or invoice changed before review.")
+    refund.status = Refund.Status.APPROVED if approve else Refund.Status.REJECTED
+    refund.reviewed_by = actor
+    refund.reviewed_at = timezone.now()
+    refund.save(update_fields=["status", "reviewed_by", "reviewed_at", "updated_at"])
+    audit(actor, f"refund.{refund.status}", refund, reason=refund.reason, request=request)
+    return refund
+
+
+@transaction.atomic
+def pay_refund(*, actor, refund_id, request=None):
+    if user_role(actor) not in {Role.RECEPTION, Role.OWNER}:
+        raise ValidationError("Only authorised cashier staff may pay a refund.")
+    refund = Refund.objects.get(pk=refund_id)
+    if refund.invoice_id is None:
+        raise ValidationError("This legacy refund has no linked invoice and needs manual reconciliation.")
+    invoice = Invoice.objects.select_for_update().get(pk=refund.invoice_id)
+    payment = Payment.objects.select_for_update().get(pk=refund.payment_id)
+    refund = Refund.objects.select_for_update().get(pk=refund_id)
+    if refund.status != Refund.Status.APPROVED:
+        raise ValidationError("Only an approved refund can be paid.")
+    if actor.pk == refund.reviewed_by_id:
+        raise ValidationError("The reviewer cannot pay their own approved refund.")
+    if payment.status != Payment.Status.VALID:
+        raise ValidationError("The original payment is no longer valid.")
+    shift = CashShift.objects.select_for_update().filter(cashier=actor, status=CashShift.Status.OPEN).first()
+    if not shift:
+        raise ValidationError("Open a cashier shift before paying a cash refund.")
+    refund.status = Refund.Status.PAID
+    refund.paid_by = actor
+    refund.paid_at = timezone.now()
+    refund.paid_shift = shift
+    refund.save(update_fields=["status", "paid_by", "paid_at", "paid_shift", "updated_at"])
+    invoice.refresh_status()
+    order = getattr(invoice, "pharmacy_order", None)
+    if order and order.status == PharmacyOrder.Status.CLEARED and invoice.balance > 0:
+        order.status = PharmacyOrder.Status.PREPARED
+        order.save(update_fields=["status", "updated_at"])
+    audit(actor, "refund.paid", refund, after={"shift": shift.pk, "amount": str(refund.amount)}, request=request)
+    return refund
 
 
 @transaction.atomic

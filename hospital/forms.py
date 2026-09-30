@@ -19,6 +19,7 @@ from .models import (
     Payment,
     PurchaseOrder,
     PurchaseOrderLine,
+    Refund,
     ServiceOrder,
     StockBatch,
     StockWriteOff,
@@ -190,6 +191,13 @@ class ShiftCloseForm(StyledFormMixin, forms.ModelForm):
 class CreditNoteForm(StyledFormMixin, forms.ModelForm):
     class Meta:
         model = CreditNote
+        fields = ["amount", "reason"]
+        widgets = {"reason": forms.Textarea(attrs={"rows": 3})}
+
+
+class RefundRequestForm(StyledFormMixin, forms.ModelForm):
+    class Meta:
+        model = Refund
         fields = ["amount", "reason"]
         widgets = {"reason": forms.Textarea(attrs={"rows": 3})}
 
