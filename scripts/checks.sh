@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# The exact checks CI runs, runnable on any machine.
+# The fast demo checks CI runs, runnable on any machine. The PostgreSQL CI job
+# has its own disposable-database reproduction steps in README.md.
 #
 # The hosted runner has never once executed them: every GitHub Actions run in
 # this repository has failed in seconds without a runner because the account
-# is billing-locked. Until that is cleared, this script is the only way anyone
-# can verify a change, so it is kept identical to .github/workflows/quality.yml
-# and a test pins the two together.
+# is billing-locked. Until that is cleared, this script verifies the demo job;
+# a test pins it to the demo steps in .github/workflows/quality.yml.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

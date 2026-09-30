@@ -21,7 +21,7 @@ from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.core.management.base import CommandError, OutputWrapper
-from django.db import close_old_connections, connection, connections
+from django.db import DatabaseError, close_old_connections, connection, connections, transaction
 from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -993,6 +993,22 @@ class InvoiceBalanceRaceTests(HospitalFixtureMixin, TransactionTestCase):
             CreditNote.objects.filter(invoice=order.invoice, status=CreditNote.Status.APPROVED).count()
             + PaymentAllocation.objects.filter(invoice=order.invoice).count(), 1,
         )
+
+
+@skipUnless(connection.vendor == "postgresql", "Audit trigger requires PostgreSQL")
+class PostgreSQLAuditTriggerTests(TransactionTestCase):
+    def test_raw_update_and_delete_are_blocked_by_database_trigger(self):
+        event = AuditEvent.objects.create(action="trigger.probe", entity_type="Test", entity_id="1")
+        for sql, params in (
+            ("UPDATE hospital_auditevent SET action = %s WHERE id = %s", ["tampered", event.pk]),
+            ("DELETE FROM hospital_auditevent WHERE id = %s", [event.pk]),
+        ):
+            with self.subTest(sql=sql), self.assertRaises(DatabaseError):
+                with transaction.atomic():
+                    with connection.cursor() as cursor:
+                        cursor.execute(sql, params)
+        event.refresh_from_db()
+        self.assertEqual(event.action, "trigger.probe")
 
 
 @override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
@@ -2172,13 +2188,12 @@ class IntelligenceAndBriefTests(HospitalFixtureMixin, TestCase):
 
 
 class ContinuousIntegrationTests(SimpleTestCase):
-    """The local check script has to stay honest about what CI runs.
+    """Keep the local demo checks and the separate PostgreSQL CI job explicit.
 
     Every GitHub Actions run in this repository has failed within seconds
     without a runner, because the account is billing-locked; no commit can
-    clear that. While it holds, scripts/checks.sh is the only way anyone can
-    verify a change, so it must not drift away from the workflow it stands in
-    for.
+    clear that. scripts/checks.sh mirrors the fast demo job; README documents
+    how to reproduce the PostgreSQL job with a disposable local database.
     """
 
     workflow = Path(settings.BASE_DIR) / ".github" / "workflows" / "quality.yml"
@@ -2221,11 +2236,15 @@ class ContinuousIntegrationTests(SimpleTestCase):
 
     def test_the_workflow_still_runs_the_checks_we_think_it_does(self):
         commands = self.workflow_commands()
-        self.assertEqual(len(commands), 4, f"Unexpected CI step count: {commands}")
+        self.assertEqual(len(commands), 6, f"Unexpected CI step count: {commands}")
+        self.assertEqual(commands[4], "python manage.py migrate --noinput")
+        self.assertIn("PostgreSQLAuditTriggerTests", commands[5])
+        self.assertIn("InvoiceBalanceRaceTests", commands[5])
+        self.assertIn("services:", self.workflow.read_text())
 
     def test_every_ci_check_is_reproducible_locally(self):
         script = self.script.read_text()
-        for command in self.workflow_commands():
+        for command in self.workflow_commands()[:4]:
             # Compare the distinguishing part; the script sets env vars its own way.
             core = command.split("python manage.py ")[-1] if "manage.py" in command else command
             needle = core.split(" ")[0] if core else command

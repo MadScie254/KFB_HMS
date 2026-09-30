@@ -112,13 +112,22 @@ After the real internal HTTPS URL works, create the workstation shortcut with `s
 
 ## Checks
 
-Run everything CI runs, on any machine:
+Run the fast demo checks on any machine:
 
 ```bash
 ./scripts/checks.sh
 ```
 
-That is ruff, the test suite, a check that migrations match the models, and Django's deployment check. A test keeps the script and `.github/workflows/quality.yml` from drifting apart.
+That is ruff, the SQLite test suite, a check that migrations match the models, and Django's deployment check. CI also has a separate PostgreSQL job for migrations, invoice row-lock races, and the database audit trigger.
+
+To reproduce the PostgreSQL job locally, use a disposable PostgreSQL 16 database and set `KFB_ENV=production`, a test-only `KFB_SECRET_KEY`, `KFB_DATABASE_URL` for that database, and `KFB_ALLOWED_HOSTS=hospital.example.test`. Then run:
+
+```bash
+python manage.py migrate --noinput
+python manage.py test hospital.tests.InvoiceBalanceRaceTests hospital.tests.PostgreSQLAuditTriggerTests hospital.tests.WorkflowTests.test_shift_opening_is_unique_and_review_is_independent hospital.tests.WorkflowTests.test_supplier_change_requires_independent_review_and_current_snapshot hospital.tests.WorkflowTests.test_service_without_approved_price_cannot_be_released_unbilled
+```
+
+The PostgreSQL tests are skipped under SQLite and the test runner creates a separate test database. Run the migration command only against a disposable local database.
 
 The hosted workflow is currently red for a reason no commit can fix: every GitHub Actions run in this repository, including the ones predating this work, fails within seconds without a runner because the account is billing-locked. Clear the billing hold under GitHub → Settings → Billing and plans and the same checks will run there.
 
