@@ -182,6 +182,8 @@
         rows.sort((a, b) => {
           const left = cellValue(grouped ? a.rows[0] : a, index);
           const right = cellValue(grouped ? b.rows[0] : b, index);
+          if (left === '' && right !== '') return 1;
+          if (right === '' && left !== '') return -1;
           if (left < right) return direction === 'asc' ? -1 : 1;
           if (left > right) return direction === 'asc' ? 1 : -1;
           return 0;

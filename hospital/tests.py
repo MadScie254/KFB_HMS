@@ -1930,6 +1930,29 @@ class StockScreenTests(HospitalFixtureMixin, TestCase):
         )
         approve_purchase_order(actor=self.reviewer, order_id=self.order.pk)
 
+    def test_batch_only_search_keeps_matching_product_visible(self):
+        self.client.force_login(self.pharmacist)
+        response = self.client.get(reverse("stock"), {"q": self.batch.batch_number})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([row["item"].pk for row in response.context["products"]], [self.product.pk])
+        self.assertContains(response, f"Batch <strong>{self.batch.batch_number}</strong>", html=False)
+
+    def test_stock_page_two_labels_local_sorting_and_uses_epoch_dates(self):
+        StockMovement.objects.bulk_create([
+            StockMovement(
+                batch=self.batch, movement_type=StockMovement.MovementType.RECEIPT,
+                quantity_delta=1, unit_cost_at_event=Decimal("2.00"),
+                to_location="Pharmacy", reference_type="SortTest",
+                reference_id=str(index), idempotency_key=f"sort-page-{index}", entered_by=self.pharmacist,
+            ) for index in range(45)
+        ])
+        self.client.force_login(self.pharmacist)
+        response = self.client.get(reverse("stock"), {"page": "2"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["page"].number, 2)
+        self.assertContains(response, "Column sorting applies to this page only")
+        self.assertRegex(response.content.decode(), r'<td data-sort-value="\d{10}">')
+
     def test_stock_sort_groups_each_product_with_its_batches(self):
         second = CatalogueItem.objects.create(
             code="ALPHA-TAB", name="Alpha tablet", kind=CatalogueItem.Kind.PRODUCT,
