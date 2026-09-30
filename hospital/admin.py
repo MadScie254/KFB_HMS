@@ -7,57 +7,104 @@ through role-protected application workflows and service-layer rules.
 from django.contrib import admin
 
 from . import models
+from .services import audit
+
+
+class AuditedConfigurationAdmin(admin.ModelAdmin):
+    """Keep configuration edits attributable to the admin actor."""
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def save_model(self, request, obj, form, change):
+        before = self._snapshot(type(obj).objects.get(pk=obj.pk)) if change else None
+        if isinstance(obj, models.Setting):
+            obj.updated_by = request.user
+        super().save_model(request, obj, form, change)
+        audit(
+            request.user, f"admin.{obj._meta.model_name}.{'changed' if change else 'created'}", obj,
+            before=before, after=self._snapshot(obj), request=request,
+        )
+
+    @staticmethod
+    def _snapshot(obj):
+        return {
+            field.name: str(getattr(obj, field.attname))
+            for field in obj._meta.concrete_fields
+            if field.name not in {"id", "created_at", "updated_at"}
+        }
 
 
 @admin.register(models.StaffProfile)
-class StaffProfileAdmin(admin.ModelAdmin):
-    list_display = ("user", "display_name", "role", "second_factor_required")
-    list_filter = ("role", "second_factor_required")
+class StaffProfileAdmin(AuditedConfigurationAdmin):
+    list_display = ("user", "display_name", "role")
+    list_filter = ("role",)
     search_fields = ("user__username", "display_name")
+    exclude = ("require_password_change", "second_factor_required", "locked_at")
 
 
 @admin.register(models.Setting)
-class SettingAdmin(admin.ModelAdmin):
+class SettingAdmin(AuditedConfigurationAdmin):
     list_display = ("key", "production_confirmed", "updated_by", "updated_at")
     list_filter = ("production_confirmed",)
     search_fields = ("key", "description")
+    exclude = ("updated_by",)
 
 
 @admin.register(models.CatalogueItem)
-class CatalogueItemAdmin(admin.ModelAdmin):
+class CatalogueItemAdmin(AuditedConfigurationAdmin):
     list_display = ("code", "name", "kind", "department", "active")
     list_filter = ("kind", "department", "active")
     search_fields = ("code", "name")
 
 
 @admin.register(models.PriceVersion)
-class PriceVersionAdmin(admin.ModelAdmin):
+class PriceVersionAdmin(AuditedConfigurationAdmin):
     list_display = ("item", "amount", "effective_from", "effective_to", "approved_by")
     list_filter = ("effective_from",)
     search_fields = ("item__code", "item__name", "reason")
+    exclude = ("approved_by",)
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def save_model(self, request, obj, form, change):
+        if change:
+            raise ValueError("Approved prices are immutable; create a new version.")
+        obj.approved_by = request.user
+        super().save_model(request, obj, form, change)
 
 
 @admin.register(models.Ward)
-class WardAdmin(admin.ModelAdmin):
+class WardAdmin(AuditedConfigurationAdmin):
     list_display = ("name", "active")
     list_filter = ("active",)
 
 
 @admin.register(models.Bed)
-class BedAdmin(admin.ModelAdmin):
+class BedAdmin(AuditedConfigurationAdmin):
     list_display = ("label", "ward", "active")
     list_filter = ("ward", "active")
 
 
 @admin.register(models.Supplier)
-class SupplierAdmin(admin.ModelAdmin):
+class SupplierAdmin(AuditedConfigurationAdmin):
     list_display = ("name", "phone", "active")
     list_filter = ("active",)
     search_fields = ("name", "phone")
+    exclude = ("payment_details",)
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def save_model(self, request, obj, form, change):
+        if not change:
+            obj.payment_details = ""
+        super().save_model(request, obj, form, change)
 
 
 @admin.register(models.EyePackageItem)
-class EyePackageItemAdmin(admin.ModelAdmin):
+class EyePackageItemAdmin(AuditedConfigurationAdmin):
     list_display = ("package_code", "item", "quantity", "active")
     list_filter = ("package_code", "active")
 

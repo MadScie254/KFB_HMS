@@ -24,6 +24,7 @@ from .models import (
     StockBatch,
     StockWriteOff,
     Supplier,
+    SupplierChangeRequest,
 )
 
 # Leading bytes of the formats this hospital accepts. The browser-supplied
@@ -200,6 +201,16 @@ class RefundRequestForm(StyledFormMixin, forms.ModelForm):
         model = Refund
         fields = ["amount", "reason"]
         widgets = {"reason": forms.Textarea(attrs={"rows": 3})}
+
+
+class SupplierChangeForm(StyledFormMixin, forms.ModelForm):
+    class Meta:
+        model = SupplierChangeRequest
+        fields = ["proposed_name", "proposed_phone", "proposed_payment_details", "proposed_active", "reason"]
+        widgets = {
+            "proposed_payment_details": forms.Textarea(attrs={"rows": 3}),
+            "reason": forms.Textarea(attrs={"rows": 3}),
+        }
 
 
 class ServiceOrderForm(StyledFormMixin, forms.ModelForm):

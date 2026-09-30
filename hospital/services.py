@@ -37,6 +37,8 @@ from .models import (
     StockCountLine,
     StockMovement,
     StockWriteOff,
+    Supplier,
+    SupplierChangeRequest,
 )
 from .permissions import user_role
 
@@ -668,6 +670,60 @@ def approve_purchase_order(*, actor, order_id, request=None):
     order.save(update_fields=["approved_by", "status", "updated_at"])
     audit(actor, "purchase_order.approved", order, request=request)
     return order
+
+
+@transaction.atomic
+def request_supplier_change(*, actor, supplier_id, proposed_name, proposed_phone, proposed_payment_details,
+                            proposed_active, reason, request=None):
+    if user_role(actor) not in {Role.PROCUREMENT, Role.OWNER}:
+        raise ValidationError("Only procurement or the owner may request a supplier change.")
+    if not proposed_name.strip() or not reason.strip():
+        raise ValidationError("Enter a supplier name and a reason for the change.")
+    supplier = Supplier.objects.select_for_update().get(pk=supplier_id)
+    change = SupplierChangeRequest.objects.create(
+        supplier=supplier, proposed_name=proposed_name.strip(), proposed_phone=proposed_phone.strip(),
+        proposed_payment_details=proposed_payment_details.strip(), proposed_active=proposed_active,
+        reason=reason.strip(), supplier_updated_at=supplier.updated_at, requested_by=actor,
+    )
+    audit(actor, "supplier_change.requested", change, reason=change.reason, request=request)
+    return change
+
+
+@transaction.atomic
+def review_supplier_change(*, actor, change_id, approve, request=None):
+    if user_role(actor) not in {Role.REVIEWER, Role.OWNER}:
+        raise ValidationError("Only an independent reviewer may review supplier changes.")
+    supplier_id = SupplierChangeRequest.objects.values_list("supplier_id", flat=True).get(pk=change_id)
+    supplier = Supplier.objects.select_for_update().get(pk=supplier_id)
+    change = SupplierChangeRequest.objects.select_for_update().get(pk=change_id)
+    if actor.pk == change.requested_by_id:
+        raise ValidationError("You cannot approve your own supplier change.")
+    if change.status != SupplierChangeRequest.Status.PENDING:
+        raise ValidationError("This supplier change was already reviewed.")
+    if approve and supplier.updated_at != change.supplier_updated_at:
+        raise ValidationError("Supplier details changed after this request. Submit a new change for review.")
+    if approve:
+        before = {field: getattr(supplier, field) for field in (
+            "name", "phone", "payment_details", "active",
+        )}
+        supplier.name = change.proposed_name
+        supplier.phone = change.proposed_phone
+        supplier.payment_details = change.proposed_payment_details
+        supplier.active = change.proposed_active
+        try:
+            with transaction.atomic():
+                supplier.save(update_fields=["name", "phone", "payment_details", "active", "updated_at"])
+        except IntegrityError as exc:
+            raise ValidationError("A supplier with that name already exists.") from exc
+        audit(actor, "supplier.changed", supplier, before=before, after={
+            field: getattr(supplier, field) for field in before
+        }, reason=change.reason, request=request)
+    change.status = SupplierChangeRequest.Status.APPROVED if approve else SupplierChangeRequest.Status.REJECTED
+    change.reviewed_by = actor
+    change.reviewed_at = timezone.now()
+    change.save(update_fields=["status", "reviewed_by", "reviewed_at", "updated_at"])
+    audit(actor, f"supplier_change.{change.status}", change, reason=change.reason, request=request)
+    return change
 
 
 @transaction.atomic

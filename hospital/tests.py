@@ -61,11 +61,13 @@ from .models import (
     Refund,
     Role,
     ServiceOrder,
+    Setting,
     StockBatch,
     StockCount,
     StockMovement,
     StockWriteOff,
     Supplier,
+    SupplierChangeRequest,
     Ward,
 )
 from .permissions import ROLE_NAVIGATION, user_role
@@ -87,11 +89,13 @@ from .services import (
     receive_delivery,
     record_payment,
     request_refund,
+    request_supplier_change,
     request_write_off,
     review_cash_shift,
     review_mpesa,
     review_refund,
     review_stock_count,
+    review_supplier_change,
     review_write_off,
     set_batch_disposition,
     submit_stock_count,
@@ -341,6 +345,86 @@ class WorkflowTests(HospitalFixtureMixin, TestCase):
         self.assertEqual(self.client.get(reverse("refunds")).status_code, 200)
         with self.assertRaisesMessage(ValidationError, "Only an approved refund"):
             pay_refund(actor=self.reception, refund_id=refund.pk)
+
+    def test_supplier_change_requires_independent_review_and_current_snapshot(self):
+        supplier = Supplier.objects.create(name="Original supplier", phone="111", payment_details="Account A")
+        change = request_supplier_change(
+            actor=self.owner, supplier_id=supplier.pk, proposed_name="Updated supplier",
+            proposed_phone="222", proposed_payment_details="Account B",
+            proposed_active=True, reason="Verified new bank details",
+        )
+        with self.assertRaisesMessage(ValidationError, "cannot approve your own"):
+            review_supplier_change(actor=self.owner, change_id=change.pk, approve=True)
+        review_supplier_change(actor=self.reviewer, change_id=change.pk, approve=True)
+        supplier.refresh_from_db()
+        self.assertEqual(supplier.payment_details, "Account B")
+        self.assertEqual(supplier.name, "Updated supplier")
+        self.assertEqual(SupplierChangeRequest.objects.get(pk=change.pk).status, SupplierChangeRequest.Status.APPROVED)
+        self.assertEqual(AuditEvent.objects.filter(action="supplier.changed", entity_id=str(supplier.pk)).count(), 1)
+        stale = request_supplier_change(
+            actor=self.owner, supplier_id=supplier.pk, proposed_name="Stale name",
+            proposed_phone="333", proposed_payment_details="Account C",
+            proposed_active=False, reason="Proposed change",
+        )
+        supplier.phone = "444"
+        supplier.save(update_fields=["phone", "updated_at"])
+        with self.assertRaisesMessage(ValidationError, "changed after this request"):
+            review_supplier_change(actor=self.reviewer, change_id=stale.pk, approve=True)
+
+    def test_supplier_change_screen_submits_and_reviews_request(self):
+        supplier = Supplier.objects.create(name="Screen supplier", phone="100")
+        self.client.force_login(self.owner)
+        self.assertEqual(self.client.get(reverse("supplier_change_request", args=[supplier.pk])).status_code, 200)
+        self.assertEqual(self.client.post(reverse("supplier_change_request", args=[supplier.pk]), {
+            "proposed_name": "Screen supplier", "proposed_phone": "200",
+            "proposed_payment_details": "Verified bank", "proposed_active": "on",
+            "reason": "New verified details",
+        }).status_code, 302)
+        change = SupplierChangeRequest.objects.get(supplier=supplier)
+        self.client.force_login(self.reviewer)
+        self.assertContains(self.client.get(reverse("supplier_changes")), "New verified details")
+        self.assertEqual(self.client.post(reverse("supplier_change_review", args=[change.pk]), {
+            "decision": "approve",
+        }).status_code, 302)
+        supplier.refresh_from_db()
+        self.assertEqual(supplier.payment_details, "Verified bank")
+
+    def test_admin_configuration_is_audited_and_historical_prices_cannot_change(self):
+        self.owner.is_staff = True
+        self.owner.is_superuser = True
+        self.owner.save(update_fields=["is_staff", "is_superuser"])
+        self.client.force_login(self.owner)
+        profile = self.reception.staff_profile
+        profile_url = reverse("admin:hospital_staffprofile_change", args=[profile.pk])
+        self.assertNotContains(self.client.get(profile_url), "second_factor_required")
+        self.assertEqual(self.client.post(profile_url, {
+            "user": self.reception.pk, "role": Role.NURSE,
+            "display_name": "Reassigned", "active_shift_label": "",
+            "_save": "Save",
+        }).status_code, 302)
+        profile.refresh_from_db()
+        self.assertEqual(profile.role, Role.NURSE)
+        self.assertEqual(AuditEvent.objects.filter(action="admin.staffprofile.changed", entity_id=str(profile.pk)).count(), 1)
+        setting = Setting.objects.create(key="review_test", value="1")
+        self.assertEqual(self.client.post(reverse("admin:hospital_setting_change", args=[setting.pk]), {
+            "key": "review_test", "value": "2", "description": "Reviewed threshold",
+            "production_confirmed": "on", "_save": "Save",
+        }).status_code, 302)
+        setting.refresh_from_db()
+        self.assertEqual(setting.updated_by, self.owner)
+        self.assertEqual(AuditEvent.objects.filter(action="admin.setting.changed", entity_id=str(setting.pk)).count(), 1)
+        supplier = Supplier.objects.create(name="Admin supplier")
+        self.assertEqual(self.client.post(reverse("admin:hospital_supplier_change", args=[supplier.pk]), {
+            "name": "Tampered supplier", "_save": "Save",
+        }).status_code, 403)
+        price = PriceVersion.objects.create(item=self.product, amount=Decimal("10"), reason="Approved", approved_by=self.owner)
+        price_url = reverse("admin:hospital_priceversion_change", args=[price.pk])
+        self.assertEqual(self.client.get(price_url).status_code, 200)
+        self.assertEqual(self.client.post(price_url, {
+            "item": self.product.pk, "amount": "1.00", "reason": "Tamper", "_save": "Save",
+        }).status_code, 403)
+        price.refresh_from_db()
+        self.assertEqual(price.amount, Decimal("10"))
 
     def test_duplicate_mpesa_reference_is_rejected(self):
         order1 = self.prepare(1)

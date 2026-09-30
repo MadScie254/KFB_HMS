@@ -58,6 +58,7 @@ from .forms import (
     ShiftOpenForm,
     StockCountOpenForm,
     StockCountReviewForm,
+    SupplierChangeForm,
     WriteOffRequestForm,
     WriteOffReviewForm,
 )
@@ -98,6 +99,8 @@ from .models import (
     StockCount,
     StockMovement,
     StockWriteOff,
+    Supplier,
+    SupplierChangeRequest,
     Ward,
 )
 from .pdf_reports import build_financial_report_pdf, build_patient_access_pdf
@@ -121,11 +124,13 @@ from .services import (
     receive_delivery,
     record_payment,
     request_refund,
+    request_supplier_change,
     request_write_off,
     review_cash_shift,
     review_mpesa,
     review_refund,
     review_stock_count,
+    review_supplier_change,
     review_write_off,
     set_batch_disposition,
     submit_stock_count,
@@ -1396,6 +1401,53 @@ def models_eye_count():
 def settings_view(request):
     settings_rows = Setting.objects.all().order_by("production_confirmed", "key")
     return render(request, "hospital/settings.html", {"settings_rows": settings_rows})
+
+
+@role_required(Role.PROCUREMENT, Role.REVIEWER, Role.OWNER)
+def supplier_changes(request):
+    suppliers = Supplier.objects.order_by("name")
+    changes = SupplierChangeRequest.objects.select_related(
+        "supplier", "requested_by", "reviewed_by",
+    ).order_by("-created_at")[:100]
+    return render(request, "hospital/supplier_changes.html", {
+        "suppliers": suppliers, "changes": changes,
+    })
+
+
+@role_required(Role.PROCUREMENT, Role.OWNER)
+def supplier_change_request(request, pk):
+    supplier = get_object_or_404(Supplier, pk=pk)
+    form = SupplierChangeForm(request.POST or None, initial={
+        "proposed_name": supplier.name,
+        "proposed_phone": supplier.phone,
+        "proposed_payment_details": supplier.payment_details,
+        "proposed_active": supplier.active,
+    })
+    if request.method == "POST" and form.is_valid():
+        try:
+            request_supplier_change(actor=request.user, supplier_id=pk, request=request, **form.cleaned_data)
+        except ValidationError as exc:
+            form.add_error(None, _validation_message(exc))
+        else:
+            messages.success(request, "Supplier change sent for independent review.")
+            return redirect("supplier_changes")
+    return render(request, "hospital/supplier_change_form.html", {"supplier": supplier, "form": form})
+
+
+@role_required(Role.REVIEWER, Role.OWNER)
+def supplier_change_review(request, pk):
+    if request.method != "POST":
+        raise Http404
+    get_object_or_404(SupplierChangeRequest, pk=pk)
+    try:
+        decision = request.POST.get("decision")
+        if decision not in {"approve", "reject"}:
+            raise ValidationError("Choose a valid review decision.")
+        review_supplier_change(actor=request.user, change_id=pk, approve=decision == "approve", request=request)
+        messages.success(request, "Supplier change reviewed.")
+    except ValidationError as exc:
+        messages.error(request, _validation_message(exc))
+    return redirect("supplier_changes")
 
 
 @role_required(Role.PROCUREMENT, Role.REVIEWER, Role.OWNER)

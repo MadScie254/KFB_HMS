@@ -1,0 +1,5 @@
+{% extends "base.html" %}{% block title %}Change supplier{% endblock %}
+{% block content %}
+<div class="page-heading"><div><p class="breadcrumbs"><a href="{% url 'supplier_changes' %}">Supplier changes</a> / {{ supplier.name }}</p><h1>Request supplier change</h1><p>Current details remain in force until an independent reviewer approves this request.</p></div></div>
+<form method="post" class="panel form-panel" data-unsaved-warning>{% csrf_token %}<div class="form-grid one-column">{% include "hospital/_form_fields.html" %}</div><div class="form-actions"><a class="button ghost" href="{% url 'supplier_changes' %}">Cancel</a><button class="button primary" type="submit">Send for review</button></div></form>
+{% endblock %}

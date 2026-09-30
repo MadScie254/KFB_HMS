@@ -767,6 +767,25 @@ class Supplier(TimeStampedModel):
     active = models.BooleanField(default=True)
 
 
+class SupplierChangeRequest(TimeStampedModel):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending review"
+        APPROVED = "approved", "Approved"
+        REJECTED = "rejected", "Rejected"
+
+    supplier = models.ForeignKey(Supplier, on_delete=models.PROTECT, related_name="change_requests")
+    proposed_name = models.CharField(max_length=160)
+    proposed_phone = models.CharField(max_length=30, blank=True)
+    proposed_payment_details = models.TextField(blank=True)
+    proposed_active = models.BooleanField(default=True)
+    reason = models.TextField()
+    supplier_updated_at = models.DateTimeField()
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.PENDING)
+    requested_by = models.ForeignKey(User, on_delete=models.PROTECT, related_name="supplier_changes_requested")
+    reviewed_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="supplier_changes_reviewed")
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+
 class PurchaseOrder(ReferenceNumberMixin, TimeStampedModel):
     REFERENCE_FIELD = "order_number"
     REFERENCE_PREFIX = "PO"
