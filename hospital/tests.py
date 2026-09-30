@@ -50,6 +50,7 @@ from .models import (
     ImportJob,
     Invoice,
     InvoiceLine,
+    LoginAttempt,
     Patient,
     Payment,
     PaymentAllocation,
@@ -1059,6 +1060,34 @@ class RegressionTests(HospitalFixtureMixin, TestCase):
         self.client.post(reverse("screen_unlock"), {"password": self.password})
         self.assertEqual(self.client.get(reverse("queue")).status_code, 200)
 
+    def test_unlock_failures_obey_account_lockout_even_with_correct_password(self):
+        self.client.force_login(self.clinician)
+        profile = self.clinician.staff_profile
+        profile.locked_at = timezone.now()
+        profile.save(update_fields=["locked_at"])
+        url = reverse("screen_unlock")
+        for _ in range(LoginAttempt.LOCKOUT_THRESHOLD):
+            self.client.post(url, {"password": "incorrect"})
+        self.assertEqual(LoginAttempt.recent_failures(self.clinician.username), LoginAttempt.LOCKOUT_THRESHOLD)
+        response = self.client.post(url, {"password": self.password})
+        self.assertEqual(response.status_code, 429)
+        self.assertContains(response, "Too many failed attempts", status_code=429)
+        profile.refresh_from_db()
+        self.assertIsNotNone(profile.locked_at)
+        LoginAttempt.objects.filter(username=self.clinician.username).update(
+            attempted_at=timezone.now() - timedelta(minutes=LoginAttempt.LOCKOUT_WINDOW_MINUTES + 1)
+        )
+        self.assertEqual(self.client.post(url, {"password": self.password}).status_code, 302)
+        profile.refresh_from_db()
+        self.assertIsNone(profile.locked_at)
+
+    def test_unlock_obeys_address_lockout(self):
+        self.client.force_login(self.clinician)
+        for index in range(LoginAttempt.ADDRESS_LOCKOUT_THRESHOLD):
+            LoginAttempt.objects.create(username=f"other-{index}", ip_address="127.0.0.1")
+        response = self.client.post(reverse("screen_unlock"), {"password": self.password})
+        self.assertEqual(response.status_code, 429)
+
     # C2 — two lines for the same product each read the untouched batch
     # balance, so one order could dispense more than the hospital held.
     def test_repeated_product_lines_cannot_overdraw_a_batch(self):
@@ -1107,7 +1136,6 @@ class RegressionTests(HospitalFixtureMixin, TestCase):
 
     # C5 — unlimited password attempts against an unauthenticated endpoint.
     def test_repeated_failed_logins_lock_the_username(self):
-        from .models import LoginAttempt
         for _ in range(LoginAttempt.LOCKOUT_THRESHOLD):
             self.client.post(reverse("login"), {"username": "clinician", "password": "wrong"})
         blocked = self.client.post(reverse("login"), {"username": "clinician", "password": "wrong"})
@@ -1116,7 +1144,6 @@ class RegressionTests(HospitalFixtureMixin, TestCase):
         self.assertEqual(correct.status_code, 429, "A locked username must not fall through on a correct password")
 
     def test_successful_login_clears_earlier_failures(self):
-        from .models import LoginAttempt
         self.client.post(reverse("login"), {"username": "clinician", "password": "wrong"})
         self.client.post(reverse("login"), {"username": "clinician", "password": self.password})
         self.assertEqual(LoginAttempt.recent_failures("clinician"), 0)

@@ -1859,6 +1859,11 @@ def screen_lock(request):
 
 @login_required
 def screen_unlock(request):
+    locked_out = LoginAttempt.is_locked(request.user.username, request.META.get("REMOTE_ADDR"))
+    if locked_out:
+        return render(request, "hospital/unlock.html", {
+            "lockout_minutes": LoginAttempt.LOCKOUT_WINDOW_MINUTES,
+        }, status=429)
     if request.method == "POST":
         user = authenticate(request, username=request.user.username, password=request.POST.get("password", ""))
         if user:
