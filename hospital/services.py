@@ -189,7 +189,12 @@ def update_service_order(*, actor, order_id, status, result, request=None):
         raise ValidationError("Only authorised clinical or laboratory staff may update a service order.")
     order = ServiceOrder.objects.select_for_update().select_related("encounter__patient", "service").get(pk=order_id)
     if order.status == ServiceOrder.Status.RELEASED:
-        if status == ServiceOrder.Status.RELEASED and InvoiceLine.objects.filter(service_order=order).exists():
+        if (
+            status == ServiceOrder.Status.RELEASED
+            and actor.pk == order.reviewed_by_id
+            and result.strip() == order.result
+            and InvoiceLine.objects.filter(service_order=order).exists()
+        ):
             return order
         raise ValidationError("This result is already released and cannot be changed.")
     next_status = {

@@ -1217,6 +1217,7 @@ def service_order_update(request, pk):
             )
         except ValidationError as exc:
             form.add_error(None, _validation_message(exc))
+            order.refresh_from_db()
         else:
             messages.success(request, "Department work item updated.")
             return redirect("departments")

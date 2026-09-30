@@ -600,14 +600,22 @@ class WorkflowTests(HospitalFixtureMixin, TestCase):
         order = ServiceOrder.objects.create(encounter=encounter, service=service, requested_by=self.clinician)
         lab = self.make_user("lab", Role.LAB)
         self.client.login(username=lab.username, password=self.password)
-        response = self.client.post(reverse("service_order_update", kwargs={"pk": order.pk}), {"status": "released", "result": ""})
+        url = reverse("service_order_update", kwargs={"pk": order.pk})
+        response = self.client.post(url, {"status": "in_progress", "result": ""})
+        self.assertEqual(response.status_code, 302)
+        response = self.client.post(url, {"status": "review", "result": ""})
         self.assertEqual(response.status_code, 200)
         order.refresh_from_db()
-        self.assertEqual(order.status, ServiceOrder.Status.REQUESTED)
-        response = self.client.post(reverse("service_order_update", kwargs={"pk": order.pk}), {"status": "released", "result": "Fictional demonstration result"})
+        self.assertEqual(order.status, ServiceOrder.Status.IN_PROGRESS)
+        response = self.client.post(url, {"status": "review", "result": "Fictional demonstration result"})
+        self.assertEqual(response.status_code, 302)
+        reviewer = self.make_user("lab-reviewer", Role.LAB)
+        self.client.force_login(reviewer)
+        response = self.client.post(url, {"status": "released", "result": "Fictional demonstration result"})
         self.assertEqual(response.status_code, 302)
         order.refresh_from_db()
         self.assertEqual(order.status, ServiceOrder.Status.RELEASED)
+        self.assertEqual(order.reviewed_by, reviewer)
         self.assertIsNotNone(order.released_at)
         self.assertEqual(order.charge_line.invoice.balance, Decimal("150"))
 
@@ -620,14 +628,26 @@ class WorkflowTests(HospitalFixtureMixin, TestCase):
         price = PriceVersion.objects.create(item=service, amount=Decimal("250"), reason="Approved tariff", approved_by=self.owner)
         order = ServiceOrder.objects.create(encounter=encounter, service=service, requested_by=self.clinician)
         lab = self.make_user("billing-lab", Role.LAB)
-        with self.assertRaisesMessage(ValidationError, "requester cannot release"):
+        reviewer = self.make_user("billing-reviewer", Role.LAB)
+        with self.assertRaisesMessage(ValidationError, "next review step"):
+            update_service_order(
+                actor=reviewer, order_id=order.pk, status=ServiceOrder.Status.RELEASED, result="Normal",
+            )
+        update_service_order(actor=lab, order_id=order.pk, status=ServiceOrder.Status.IN_PROGRESS, result="")
+        update_service_order(actor=lab, order_id=order.pk, status=ServiceOrder.Status.REVIEW, result="Normal")
+        with self.assertRaisesMessage(ValidationError, "cannot release their own result"):
             update_service_order(
                 actor=self.clinician, order_id=order.pk, status=ServiceOrder.Status.RELEASED,
                 result="Normal", request=None,
             )
-        update_service_order(actor=lab, order_id=order.pk, status=ServiceOrder.Status.RELEASED, result="Normal")
+        with self.assertRaisesMessage(ValidationError, "cannot release their own result"):
+            update_service_order(actor=lab, order_id=order.pk, status=ServiceOrder.Status.RELEASED, result="Normal")
+        with self.assertRaisesMessage(ValidationError, "without editing"):
+            update_service_order(actor=reviewer, order_id=order.pk, status=ServiceOrder.Status.RELEASED, result="Changed")
+        update_service_order(actor=reviewer, order_id=order.pk, status=ServiceOrder.Status.RELEASED, result="Normal")
         order.refresh_from_db()
         line = order.charge_line
+        self.assertEqual(order.reviewed_by, reviewer)
         self.assertEqual(line.price_version, price)
         self.assertEqual(line.unit_price, Decimal("250"))
         self.assertEqual(line.invoice.status, Invoice.Status.POSTED)
@@ -640,7 +660,7 @@ class WorkflowTests(HospitalFixtureMixin, TestCase):
             reverse("invoice_payment", kwargs={"pk": line.invoice_id}),
         )
         released_at = order.released_at
-        update_service_order(actor=lab, order_id=order.pk, status=ServiceOrder.Status.RELEASED, result="Changed retry text")
+        update_service_order(actor=reviewer, order_id=order.pk, status=ServiceOrder.Status.RELEASED, result="Normal")
         order.refresh_from_db()
         self.assertEqual(order.released_at, released_at)
         self.assertEqual(order.result, "Normal")
@@ -655,10 +675,13 @@ class WorkflowTests(HospitalFixtureMixin, TestCase):
         )
         order = ServiceOrder.objects.create(encounter=encounter, service=service, requested_by=self.clinician)
         lab = self.make_user("unpriced-lab", Role.LAB)
+        reviewer = self.make_user("unpriced-reviewer", Role.LAB)
+        update_service_order(actor=lab, order_id=order.pk, status=ServiceOrder.Status.IN_PROGRESS, result="")
+        update_service_order(actor=lab, order_id=order.pk, status=ServiceOrder.Status.REVIEW, result="Result")
         with self.assertRaisesMessage(ValidationError, "no active approved price"):
-            update_service_order(actor=lab, order_id=order.pk, status=ServiceOrder.Status.RELEASED, result="Result")
+            update_service_order(actor=reviewer, order_id=order.pk, status=ServiceOrder.Status.RELEASED, result="Result")
         order.refresh_from_db()
-        self.assertEqual(order.status, ServiceOrder.Status.REQUESTED)
+        self.assertEqual(order.status, ServiceOrder.Status.REVIEW)
         self.assertFalse(InvoiceLine.objects.filter(service_order=order).exists())
 
     def test_outpatient_prescription_prices_then_dispenses_actual_quantity(self):
@@ -2051,6 +2074,9 @@ class EnhancedWorkflowTests(HospitalFixtureMixin, TestCase):
         order = ServiceOrder.objects.create(
             encounter=encounter, service=service, requested_by=self.clinician,
         )
+        performer = self.make_user("xray-performer", Role.LAB)
+        update_service_order(actor=performer, order_id=order.pk, status=ServiceOrder.Status.IN_PROGRESS, result="")
+        update_service_order(actor=performer, order_id=order.pk, status=ServiceOrder.Status.REVIEW, result="Demonstration result")
         self.client.login(username=self.clinician.username, password=self.password)
         response = self.client.post(
             reverse("service_order_update", kwargs={"pk": order.pk}),
@@ -2059,7 +2085,7 @@ class EnhancedWorkflowTests(HospitalFixtureMixin, TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "cannot release their own result")
         order.refresh_from_db()
-        self.assertEqual(order.status, ServiceOrder.Status.REQUESTED)
+        self.assertEqual(order.status, ServiceOrder.Status.REVIEW)
 
     def test_multi_item_prescription_creates_one_signed_order(self):
         second = CatalogueItem.objects.create(

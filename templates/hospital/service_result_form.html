@@ -13,6 +13,7 @@
 </form>
 {% else %}
 <section class="panel form-panel">
+  {% if form.non_field_errors %}<div class="message error">{{ form.non_field_errors }}</div>{% endif %}
   <div class="panel-head"><h2>{% if order.status == 'released' %}Released result{% else %}Awaiting independent release{% endif %}</h2><span class="status {{ order.status }}">{{ order.get_status_display }}</span></div>
   <p>{{ order.result|linebreaksbr|default:"No result recorded yet." }}</p>
   {% if order.reviewed_by %}<p class="help-text">Released by {{ order.reviewed_by.staff_profile }} on {{ order.released_at|date:"j M Y, H:i" }}.</p>{% endif %}
