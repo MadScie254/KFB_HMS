@@ -2909,11 +2909,12 @@ class EnhancedWorkflowTests(HospitalFixtureMixin, TestCase):
         ]
         for validator, header, make_row in cases:
             with self.subTest(validator=validator.__name__):
-                payload = (header + "\n" + "\n".join(make_row(i) for i in range(100)) + "\n").encode()
+                row_count = 5000 if validator is _validate_product_csv else 100
+                payload = (header + "\n" + "\n".join(make_row(i) for i in range(row_count)) + "\n").encode()
                 with CaptureQueriesContext(connection) as queries:
                     _, rows, errors = validator(SimpleUploadedFile("batch.csv", payload))
-                self.assertEqual((len(rows), errors), (100, []))
-                self.assertLessEqual(len(queries), 2)
+                self.assertEqual((len(rows), errors), (row_count, []))
+                self.assertLessEqual(len(queries), 10 if row_count == 5000 else 2)
 
     def test_expired_csv_dry_run_requires_fresh_upload(self):
         self.client.force_login(self.owner)
