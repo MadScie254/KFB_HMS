@@ -48,7 +48,7 @@
   </section>
 
   <section class="panel">
-    <div class="panel-head"><div><p class="eyebrow">Second person required</p><h2>Awaiting check</h2></div></div>
+    <div class="panel-head"><div><p class="eyebrow">Second person required</p><h2>Awaiting check</h2></div><span>{{ awaiting_check.paginator.count }} awaiting</span></div>
     {% if awaiting_check %}
     <ul class="review-list">
       {% for receipt in awaiting_check %}
@@ -62,6 +62,13 @@
       </li>
       {% endfor %}
     </ul>
+    {% if awaiting_check.has_other_pages %}
+    <nav class="pagination" aria-label="Unchecked deliveries pages">
+      {% if awaiting_check.has_previous %}<a class="button ghost small" href="?check_page={{ awaiting_check.previous_page_number }}&amp;history_page={{ receipts.number }}">Previous</a>{% endif %}
+      <span>Page {{ awaiting_check.number }} of {{ awaiting_check.paginator.num_pages }}</span>
+      {% if awaiting_check.has_next %}<a class="button ghost small" href="?check_page={{ awaiting_check.next_page_number }}&amp;history_page={{ receipts.number }}">Next</a>{% endif %}
+    </nav>
+    {% endif %}
     {% else %}
     <div class="empty compact"><strong>Every delivery has been checked.</strong><p>A receiver can never check their own delivery.</p></div>
     {% endif %}
@@ -69,7 +76,7 @@
 </div>
 
 <section class="panel">
-  <div class="panel-head"><div><p class="eyebrow">Posted to the stock ledger</p><h2>Delivery history</h2></div><span>Most recent 50</span></div>
+  <div class="panel-head"><div><p class="eyebrow">Posted to the stock ledger</p><h2>Delivery history</h2></div><span>{{ receipts.paginator.count }} total</span></div>
   {% if receipts %}
   <div class="table-wrap">
     <table data-sortable-table>
@@ -89,6 +96,13 @@
       </tbody>
     </table>
   </div>
+  {% if receipts.has_other_pages %}
+  <nav class="pagination" aria-label="Delivery history pages">
+    {% if receipts.has_previous %}<a class="button ghost small" href="?history_page={{ receipts.previous_page_number }}&amp;check_page={{ awaiting_check.number }}">Previous</a>{% endif %}
+    <span>Page {{ receipts.number }} of {{ receipts.paginator.num_pages }}</span>
+    {% if receipts.has_next %}<a class="button ghost small" href="?history_page={{ receipts.next_page_number }}&amp;check_page={{ awaiting_check.number }}">Next</a>{% endif %}
+  </nav>
+  {% endif %}
   {% else %}
   <div class="empty">
     <strong>No delivery has been received yet.</strong>

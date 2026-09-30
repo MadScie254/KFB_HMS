@@ -3048,6 +3048,63 @@ class FunctionalQueryBudget(int):
         return f"at most {int(self)}"
 
 
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
+class ReviewQueuePaginationTests(HospitalFixtureMixin, TestCase):
+    def test_reports_keep_older_payment_and_credit_reviews_reachable(self):
+        invoice = Invoice.objects.create(patient=self.patient, created_by=self.reception)
+        now = timezone.now()
+        Payment.objects.bulk_create([
+            Payment(
+                receipt_number=f"RCT-PAGE-{index:03}", amount=Decimal("1.00"),
+                method=Payment.Method.MPESA, reference=f"MP-PAGE-{index:03}",
+                verification_status=Payment.Verification.UNVERIFIED,
+                received_by=self.reception, received_at=now + timedelta(minutes=index),
+                idempotency_key=f"mp-page-{index:03}",
+            ) for index in range(51)
+        ])
+        CreditNote.objects.bulk_create([
+            CreditNote(
+                invoice=invoice, amount=Decimal("1.00"), reason=f"Credit page {index:03}",
+                requested_by=self.reception,
+            ) for index in range(51)
+        ])
+        self.client.force_login(self.reviewer)
+        first = self.client.get(reverse("reports"))
+        self.assertContains(first, "51 awaiting review")
+        self.assertContains(first, "mpesa_page=2")
+        self.assertContains(first, "credits_page=2")
+        second = self.client.get(reverse("reports"), {"days": "30", "mpesa_page": "2", "credits_page": "2"})
+        self.assertContains(second, "MP-PAGE-000")
+        self.assertContains(second, "Credit page 000")
+        self.assertContains(second, "days=30&amp;mpesa_page=1&amp;credits_page=2")
+        self.assertContains(second, "days=30&amp;credits_page=1&amp;mpesa_page=2")
+
+    def test_delivery_check_and_history_pages_keep_older_receipts_reachable(self):
+        supplier = Supplier.objects.create(name="Pagination supplier")
+        order = PurchaseOrder.objects.create(
+            supplier=supplier, requested_by=self.procurement, approved_by=self.reviewer,
+            status="received",
+        )
+        now = timezone.now()
+        GoodsReceipt.objects.bulk_create([
+            GoodsReceipt(
+                receipt_number=f"GRN-PAGE-{index:03}", purchase_order=order,
+                supplier_invoice_reference=f"SUP-PAGE-{index:03}", invoice_amount=Decimal("0.00"),
+                delivered_at=now + timedelta(minutes=index), received_by=self.procurement,
+            ) for index in range(51)
+        ])
+        self.client.force_login(self.reviewer)
+        first = self.client.get(reverse("deliveries"))
+        self.assertContains(first, "51 awaiting")
+        self.assertContains(first, "51 total")
+        self.assertContains(first, "check_page=2")
+        self.assertContains(first, "history_page=2")
+        last = self.client.get(reverse("deliveries"), {"check_page": "3", "history_page": "2"})
+        self.assertContains(last, "GRN-PAGE-000")
+        self.assertContains(last, "check_page=2&amp;history_page=2")
+        self.assertContains(last, "history_page=1&amp;check_page=3")
+
+
 class StaticAssetDeliveryTests(SimpleTestCase):
     """The production deployment must be able to serve its own stylesheet.
 

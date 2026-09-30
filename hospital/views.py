@@ -934,12 +934,17 @@ def deliveries(request):
     receipts = GoodsReceipt.objects.select_related(
         "purchase_order__supplier", "received_by__staff_profile", "checked_by__staff_profile"
     ).prefetch_related("lines__order_line__item")
-    awaiting = receipts.filter(checked_by__isnull=True)[:20]
+    awaiting = Paginator(
+        receipts.filter(checked_by__isnull=True).order_by("-delivered_at", "-pk"), 20
+    ).get_page(request.GET.get("check_page"))
+    history = Paginator(
+        receipts.order_by("-delivered_at", "-pk"), 50
+    ).get_page(request.GET.get("history_page"))
     open_orders = PurchaseOrder.objects.filter(
         status__in=["approved", "part_received"]
     ).select_related("supplier").prefetch_related("lines__item").order_by("-created_at")
     return render(request, "hospital/deliveries.html", {
-        "receipts": receipts[:50],
+        "receipts": history,
         "awaiting_check": awaiting,
         "open_orders": open_orders,
         "summary": receiving_summary(30),
@@ -1184,14 +1189,18 @@ def stock_count_review(request, pk):
 def reports(request):
     context = _report_context(request.GET.get("days", "7"))
     context.update({
-        "unverified_payments": Payment.objects.filter(
-            method=Payment.Method.MPESA,
-            status=Payment.Status.VALID,
-            verification_status=Payment.Verification.UNVERIFIED,
-        ).select_related("received_by").order_by("-received_at")[:50],
-        "pending_credits": CreditNote.objects.filter(
-            status=CreditNote.Status.PENDING
-        ).select_related("invoice", "requested_by").order_by("-created_at")[:50],
+        "unverified_payments": Paginator(
+            Payment.objects.filter(
+                method=Payment.Method.MPESA,
+                status=Payment.Status.VALID,
+                verification_status=Payment.Verification.UNVERIFIED,
+            ).select_related("received_by__staff_profile").order_by("-received_at", "-pk"), 50
+        ).get_page(request.GET.get("mpesa_page")),
+        "pending_credits": Paginator(
+            CreditNote.objects.filter(
+                status=CreditNote.Status.PENDING
+            ).select_related("invoice", "requested_by__staff_profile").order_by("-created_at", "-pk"), 50
+        ).get_page(request.GET.get("credits_page")),
     })
     return render(request, "hospital/reports.html", context)
 
