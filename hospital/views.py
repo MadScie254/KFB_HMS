@@ -927,9 +927,15 @@ def stock_view(request):
         products = [row for row in products if row["item"].pk in quarantined_items]
     if query:
         needle = query.lower()
+        matching_batch_items = {
+            row["item"].pk for row in position["rows"]
+            if needle in row["batch"].batch_number.lower()
+        }
         products = [
             row for row in products
-            if needle in row["item"].name.lower() or needle in row["item"].code.lower()
+            if needle in row["item"].name.lower()
+            or needle in row["item"].code.lower()
+            or row["item"].pk in matching_batch_items
         ]
 
     batches_by_item = {}

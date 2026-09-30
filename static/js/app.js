@@ -205,6 +205,14 @@
     let active = -1;
     let timer = null;
     let lastFocus = null;
+    let searchController = null;
+    let searchSequence = 0;
+
+    const cancelSearch = () => {
+      searchSequence += 1;
+      if (searchController) searchController.abort();
+      searchController = null;
+    };
 
     const links = () => Array.from(list.querySelectorAll('a'));
     const highlight = (index) => {
@@ -216,6 +224,7 @@
     };
 
     const open = () => {
+      cancelSearch();
       lastFocus = document.activeElement;
       palette.classList.add('is-open');
       input.value = '';
@@ -223,6 +232,8 @@
       input.focus();
     };
     const close = () => {
+      window.clearTimeout(timer);
+      cancelSearch();
       palette.classList.remove('is-open');
       active = -1;
       input.blur();
@@ -235,6 +246,7 @@
 
     const render = (results) => {
       if (!results.length) {
+        active = -1;
         list.innerHTML = '<li class="palette-empty">Nothing matched, within what your role can open.</li>';
         return;
       }
@@ -265,22 +277,34 @@
       // Pre-select the first hit: Enter should open the obvious answer without
       // making somebody press Down first.
       highlight(0);
-      highlight(0);
     };
 
     const search = (term) => {
       if (term.trim().length < 2) {
+        cancelSearch();
+        active = -1;
         list.innerHTML = '<li class="palette-empty">Start typing a name, number or batch.</li>';
         return;
       }
-      fetch(`${endpoint}?q=${encodeURIComponent(term)}`, { headers: { 'X-Requested-With': 'fetch' } })
+      cancelSearch();
+      const sequence = searchSequence;
+      searchController = new AbortController();
+      fetch(`${endpoint}?q=${encodeURIComponent(term)}`, {
+        headers: { 'X-Requested-With': 'fetch' }, signal: searchController.signal,
+      })
         .then((response) => (response.ok ? response.json() : { results: [] }))
-        .then((data) => render(data.results || []))
-        .catch(() => { list.innerHTML = '<li class="palette-empty">Search is unavailable right now.</li>'; });
+        .then((data) => { if (sequence === searchSequence) render(data.results || []); })
+        .catch((error) => {
+          if (sequence === searchSequence && error.name !== 'AbortError') {
+            active = -1;
+            list.innerHTML = '<li class="palette-empty">Search is unavailable right now.</li>';
+          }
+        });
     };
 
     input.addEventListener('input', () => {
       window.clearTimeout(timer);
+      cancelSearch();
       timer = window.setTimeout(() => search(input.value), 180);
     });
     input.addEventListener('keydown', (event) => {
