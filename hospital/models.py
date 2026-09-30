@@ -482,6 +482,7 @@ class Payment(ReferenceNumberMixin, TimeStampedModel):
     shift = models.ForeignKey("CashShift", null=True, blank=True, on_delete=models.PROTECT, related_name="payments")
     received_by = models.ForeignKey(User, on_delete=models.PROTECT)
     received_at = models.DateTimeField(default=timezone.now)
+    receipt_issued_at = models.DateTimeField(null=True, blank=True)
     reviewed_by = models.ForeignKey(User, null=True, blank=True, on_delete=models.PROTECT, related_name="payments_reviewed")
     reviewed_at = models.DateTimeField(null=True, blank=True)
     review_notes = models.TextField(blank=True)

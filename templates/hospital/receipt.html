@@ -1,9 +1,9 @@
 {% extends "base.html" %}{% block title %}Receipt {{ payment.receipt_number }}{% endblock %}
 {% block content %}
 <div class="receipt-page">
-  <div class="receipt-actions no-print"><a class="button ghost" href="{% url 'pharmacy_orders' %}">Back to orders</a>{% if payment.method == 'cash' and payment.status == 'valid' %}<a class="button secondary" href="{% url 'refund_request' payment.pk %}">Request cash refund</a>{% endif %}<button class="button primary" type="button" onclick="window.print()">Print</button></div>
+  <div class="receipt-actions no-print"><a class="button ghost" href="{% url 'pharmacy_orders' %}">Back to orders</a>{% if payment.method == 'cash' and payment.status == 'valid' %}<a class="button secondary" href="{% url 'refund_request' payment.pk %}">Request cash refund</a>{% endif %}<a class="button secondary" href="?reprint=1">Open marked reprint</a><button class="button primary" type="button" onclick="window.print()">Print</button></div>
   <article class="receipt">
-    <header><div class="brand-mark">K+</div><h1>{{ hospital_name }}</h1><p>Malaha, Webuye, Kenya</p><p class="receipt-label">{% if payment.status == 'rejected' %}REJECTED PAYMENT CLAIM{% elif payment.method == 'mpesa' and payment.verification_status == 'unverified' %}PENDING PAYMENT CLAIM{% elif duplicate %}DUPLICATE RECEIPT{% else %}PAYMENT RECEIPT{% endif %}</p></header>
+    <header><div class="brand-mark">K+</div><h1>{{ hospital_name }}</h1><p>Malaha, Webuye, Kenya</p><p class="receipt-label">{% if payment.status == 'rejected' %}{% if duplicate %}DUPLICATE {% endif %}REJECTED PAYMENT CLAIM{% elif payment.method == 'mpesa' and payment.verification_status == 'unverified' %}{% if duplicate %}DUPLICATE {% endif %}PENDING PAYMENT CLAIM{% elif duplicate %}DUPLICATE RECEIPT{% else %}PAYMENT RECEIPT{% endif %}</p></header>
     <dl>
       <div><dt>Reference</dt><dd>{{ payment.receipt_number }}</dd></div>
       <div><dt>Date</dt><dd>{{ payment.received_at|date:"j M Y, H:i" }} EAT</dd></div>

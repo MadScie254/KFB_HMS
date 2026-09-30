@@ -268,6 +268,25 @@ class HospitalFixtureMixin:
 @override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
 class WorkflowTests(HospitalFixtureMixin, TestCase):
 
+    def test_receipt_reopen_and_explicit_reprint_are_marked_duplicate(self):
+        order = self.prepare(1)
+        payment = record_payment(
+            actor=self.reception, invoice_id=order.invoice_id, amount=Decimal("5.00"),
+            method=Payment.Method.CASH, reference="", idempotency_key="receipt-first-issue",
+        )
+        url = reverse("receipt", args=[payment.pk])
+        self.client.force_login(self.reception)
+        self.assertEqual(self.client.head(url).status_code, 200)
+        payment.refresh_from_db()
+        self.assertIsNone(payment.receipt_issued_at)
+        self.assertContains(self.client.get(url), "PAYMENT RECEIPT")
+        payment.refresh_from_db()
+        self.assertIsNotNone(payment.receipt_issued_at)
+        self.assertContains(self.client.get(url), "DUPLICATE RECEIPT")
+        self.assertContains(self.client.get(f"{url}?reprint=1"), "DUPLICATE RECEIPT")
+        self.assertEqual(AuditEvent.objects.filter(action="receipt.issued", entity_id=str(payment.pk)).count(), 1)
+        self.assertEqual(AuditEvent.objects.filter(action="receipt.reprinted", entity_id=str(payment.pk)).count(), 2)
+
     def test_walk_in_payment_and_dispense_reconcile(self):
         order = self.prepare(15)
         self.assertEqual(order.status, PharmacyOrder.Status.PREPARED)

@@ -762,10 +762,23 @@ def invoice_payment(request, pk):
 @role_required(Role.RECEPTION, Role.OWNER)
 def receipt(request, pk):
     payment = get_object_or_404(Payment.objects.prefetch_related("allocations__invoice"), pk=pk)
-    audit(request.user, "receipt.viewed", payment, reason="Original or duplicate print view", request=request)
+    if request.method == "HEAD":
+        return HttpResponse()
+    issued_now = Payment.objects.filter(pk=pk, receipt_issued_at__isnull=True).update(
+        receipt_issued_at=timezone.now()
+    ) == 1
+    duplicate = not issued_now or request.GET.get("reprint") == "1"
+    if issued_now:
+        audit(request.user, "receipt.issued", payment, request=request)
+    if duplicate:
+        audit(
+            request.user, "receipt.reprinted", payment,
+            reason="Explicit reprint" if request.GET.get("reprint") == "1" else "Receipt reopened",
+            request=request,
+        )
     refund_paid = payment.refunds.filter(status=Refund.Status.PAID).aggregate(total=Sum("amount"))["total"] or Decimal("0.00")
     return render(request, "hospital/receipt.html", {
-        "payment": payment, "duplicate": request.GET.get("reprint") == "1", "refund_paid": refund_paid,
+        "payment": payment, "duplicate": duplicate, "refund_paid": refund_paid,
     })
 
 
