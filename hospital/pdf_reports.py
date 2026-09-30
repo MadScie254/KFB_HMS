@@ -7,6 +7,7 @@ patient or financial information to a temporary file.
 from io import BytesIO
 from xml.sax.saxutils import escape
 
+from django.db.models import Prefetch
 from django.utils import timezone
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_LEFT, TA_RIGHT
@@ -21,6 +22,8 @@ from reportlab.platypus import (
     Table,
     TableStyle,
 )
+
+from .models import ClinicalNote
 
 NAVY = colors.HexColor("#0B1F38")
 TEAL = colors.HexColor("#087F8C")
@@ -261,6 +264,13 @@ def build_financial_report_pdf(*, context, hospital_name, generated_by):
 
 
 def build_patient_access_pdf(*, patient, hospital_name, generated_by):
+    encounters = list(patient.encounters.order_by("created_at").prefetch_related(
+        Prefetch(
+            "clinical_notes",
+            queryset=ClinicalNote.objects.exclude(status=ClinicalNote.Status.DRAFT).select_related("author"),
+            to_attr="export_notes",
+        )
+    ))
     styles = _styles()
     generated_at = timezone.localtime()
     story = [
@@ -298,7 +308,7 @@ def build_patient_access_pdf(*, patient, hospital_name, generated_by):
 
     story.append(Paragraph("Visits", styles["KFBSection"]))
     visit_rows = [["Visit", "Started", "Department", "Urgency", "Status"]]
-    for encounter in patient.encounters.all().order_by("created_at"):
+    for encounter in encounters:
         visit_rows.append([
             encounter.encounter_number,
             timezone.localtime(encounter.created_at).strftime("%d %b %Y %H:%M"),
@@ -312,11 +322,10 @@ def build_patient_access_pdf(*, patient, hospital_name, generated_by):
     visit_table.setStyle(_table_style())
     story.append(visit_table)
 
-    notes = patient.encounters.prefetch_related("clinical_notes__author").all()
     story.append(Paragraph("Signed clinical notes", styles["KFBSection"]))
     note_rows = [["Date", "Author", "Assessment", "Plan"]]
-    for encounter in notes:
-        for note in encounter.clinical_notes.exclude(status="draft"):
+    for encounter in encounters:
+        for note in encounter.export_notes:
             note_rows.append([
                 timezone.localtime(note.created_at).strftime("%d %b %Y"),
                 note.author.get_full_name() or note.author.username,

@@ -40,13 +40,13 @@ from .models import (
     InvoiceLine,
     Payment,
     PaymentAllocation,
-    PriceVersion,
     Refund,
     StockBatch,
     StockCount,
     StockMovement,
     StockWriteOff,
 )
+from .pricing import active_price_versions
 
 ZERO_MONEY = Value(Decimal("0.00"), output_field=DecimalField(max_digits=14, decimal_places=2))
 ZERO_QUANTITY = Value(Decimal("0.000"), output_field=DecimalField(max_digits=14, decimal_places=3))
@@ -91,20 +91,14 @@ def active_price_map():
     Reading the active price per row inside a loop is one query per product;
     on a real catalogue that is the difference between a page and a stall.
     """
-    now = timezone.now()
-    prices = (
-        PriceVersion.objects.filter(effective_from__lte=now)
-        .filter(Q(effective_to__isnull=True) | Q(effective_to__gt=now))
-        .order_by("item_id", "-effective_from")
-        .values_list("item_id", "amount")
-    )
+    prices = active_price_versions().values_list("item_id", "amount")
     latest = {}
     for item_id, amount in prices:
         latest.setdefault(item_id, amount)
     return latest
 
 
-def batch_rows(expiry_window_days=DEFAULT_EXPIRY_WINDOW_DAYS, include_depleted=False):
+def batch_rows(expiry_window_days=DEFAULT_EXPIRY_WINDOW_DAYS, include_depleted=False, *, prices=None):
     """Every batch that still matters, with balance, value and expiry standing.
 
     A batch that has been fully dispensed is history, not position. Keeping
@@ -115,7 +109,8 @@ def batch_rows(expiry_window_days=DEFAULT_EXPIRY_WINDOW_DAYS, include_depleted=F
     """
     today = timezone.localdate()
     horizon = today + timedelta(days=expiry_window_days)
-    prices = active_price_map()
+    if prices is None:
+        prices = active_price_map()
     batches = (
         StockBatch.objects.select_related("item")
         .annotate(on_hand=Coalesce(Sum("movements__quantity_delta"), ZERO_QUANTITY))
@@ -151,8 +146,8 @@ def stock_position(expiry_window_days=DEFAULT_EXPIRY_WINDOW_DAYS):
     count of the rest is returned so the figure can be shown with its own
     caveat instead of pretending the catalogue is fully priced.
     """
-    rows = batch_rows(expiry_window_days)
     prices = active_price_map()
+    rows = batch_rows(expiry_window_days, prices=prices)
     cost_value = Decimal("0.00")
     sellable_cost_value = Decimal("0.00")
     retail_value = Decimal("0.00")

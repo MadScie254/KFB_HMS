@@ -80,6 +80,7 @@ from .models import (
     EyeCase,
     EyeSession,
     GoodsReceipt,
+    GoodsReceiptLine,
     ImportJob,
     Invoice,
     InvoiceLine,
@@ -471,7 +472,7 @@ def patient_attachment_download(request, pk):
 
 @role_required(Role.OWNER, Role.CLINICIAN, Role.NURSE)
 def patient_access_pdf(request, pk):
-    patient = get_object_or_404(Patient.objects.prefetch_related("encounters__clinical_notes__author"), pk=pk)
+    patient = get_object_or_404(Patient, pk=pk)
     pdf = build_patient_access_pdf(
         patient=patient,
         hospital_name=settings.HOSPITAL_NAME,
@@ -1046,17 +1047,19 @@ def goods_receipt_create(request, pk):
             )
             return redirect("goods_receipt_detail", pk=receipt.pk)
 
-    received_so_far = {
-        line.pk: line.receipt_lines.aggregate(total=Sum("quantity_received"))["total"] or Decimal("0.000")
-        for line in order.lines.all()
-    }
+    order_lines = list(order.lines.all())
+    received_so_far = dict(
+        GoodsReceiptLine.objects.filter(order_line__order=order)
+        .values("order_line_id").annotate(total=Sum("quantity_received"))
+        .values_list("order_line_id", "total")
+    )
     return render(request, "hospital/goods_receipt_form.html", {
         "form": form,
         "formset": lines,
         "order": order,
         "received_so_far": [
             (line, received_so_far.get(line.pk, Decimal("0.000")), Decimal(str(line.quantity_base_units)) - received_so_far.get(line.pk, Decimal("0.000")))
-            for line in order.lines.all()
+            for line in order_lines
         ],
     })
 

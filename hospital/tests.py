@@ -83,6 +83,7 @@ from .models import (
     SupplierChangeRequest,
     Ward,
 )
+from .pdf_reports import build_patient_access_pdf
 from .permissions import ROLE_NAVIGATION, user_role
 from .services import (
     account_for_issue,
@@ -1261,6 +1262,28 @@ class InvoiceBalanceRaceTests(HospitalFixtureMixin, TransactionTestCase):
         )
 
 
+@skipUnless(connection.vendor == "postgresql", "Concurrent increments require PostgreSQL")
+class ExceptionRecurrenceRaceTests(TransactionTestCase):
+    def test_simultaneous_recurrences_are_all_counted(self):
+        from .services import raise_exception
+
+        record = raise_exception("race", "Recurring issue", "initial")
+        start = Barrier(2)
+
+        def recur(index):
+            close_old_connections()
+            try:
+                start.wait(timeout=10)
+                raise_exception("race", "Recurring issue", f"recurrence {index}")
+            finally:
+                connections.close_all()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            list(pool.map(recur, (1, 2)))
+        record.refresh_from_db()
+        self.assertEqual(record.occurrence_count, 3)
+
+
 @skipUnless(connection.vendor == "postgresql", "Audit trigger requires PostgreSQL")
 class PostgreSQLAuditTriggerTests(TransactionTestCase):
     def test_raw_update_and_delete_are_blocked_by_database_trigger(self):
@@ -1638,6 +1661,24 @@ class StockControlTests(HospitalFixtureMixin, TestCase):
         movement = StockMovement.objects.get(reference_type="GoodsReceipt", reference_id=str(receipt.pk))
         self.assertEqual(movement.movement_type, StockMovement.MovementType.RECEIPT)
         self.assertEqual(movement.quantity_delta, Decimal("100.000"))
+
+    def test_repeated_delivery_lines_share_one_quantity_aggregate(self):
+        order = self.approved_order(quantity=Decimal("100"))
+        lines = [
+            self.delivery_line(order, quantity=Decimal("40"), batch=f"B-REPEAT-{index}")
+            for index in range(3)
+        ]
+        with CaptureQueriesContext(connection) as queries:
+            receipt = self.receive(order, amount=Decimal("240.00"), lines=lines)
+        receipt_queries = [
+            query["sql"] for query in queries
+            if "hospital_goodsreceiptline" in query["sql"].lower() and "SUM(" in query["sql"].upper()
+        ]
+        self.assertEqual(len(receipt_queries), 1)
+        self.assertEqual(receipt.received_value, Decimal("240.00"))
+        order.refresh_from_db()
+        self.assertEqual(order.status, "received")
+        self.assertTrue(ExceptionRecord.objects.filter(summary__contains="exceeds the approved order").exists())
 
     def test_repeat_batch_receipts_use_weighted_average_and_preserve_dispense_cost(self):
         first_order = self.approved_order(unit_cost=Decimal("3.00"))
@@ -3810,6 +3851,59 @@ class InvoiceListPerformanceTests(HospitalFixtureMixin, TestCase):
         self.assertEqual((annotated.total, annotated.paid_amount, annotated.balance), (
             Decimal("100.00"), Decimal("25.00"), Decimal("65.00"),
         ))
+
+
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
+class RepeatedQueryRegressionTests(HospitalFixtureMixin, TestCase):
+    def test_stock_position_reads_effective_prices_once(self):
+        with CaptureQueriesContext(connection) as queries:
+            position = stock_position()
+        price_queries = [
+            query["sql"] for query in queries if "hospital_priceversion" in query["sql"].lower()
+        ]
+        self.assertEqual(len(price_queries), 1)
+        self.assertEqual(position["stock_value_retail"], Decimal("1000.00"))
+
+    def test_many_pharmacy_lines_use_one_price_lookup(self):
+        products = [self.product]
+        for index in range(10):
+            item = CatalogueItem.objects.create(
+                code=f"BASKET-{index}", name=f"Basket product {index}",
+                kind=CatalogueItem.Kind.PRODUCT, department="Pharmacy",
+                base_unit="item", sale_unit="item", units_per_sale_unit=1,
+                reorder_level=0,
+            )
+            PriceVersion.objects.create(item=item, amount=Decimal("7.00"), reason="Test", approved_by=self.owner)
+            products.append(item)
+        with CaptureQueriesContext(connection) as queries:
+            order = prepare_pharmacy_order(
+                actor=self.pharmacist, customer_name="Many lines", patient=None,
+                items=[(item, Decimal("1")) for item in products],
+            )
+        price_queries = [
+            query["sql"] for query in queries if "hospital_priceversion" in query["sql"].lower()
+        ]
+        self.assertEqual(len(price_queries), 1)
+        self.assertEqual(order.invoice.total, Decimal("75.00"))
+
+    def test_patient_access_pdf_fetches_visits_and_signed_notes_in_two_queries(self):
+        for index in range(4):
+            encounter = Encounter.objects.create(patient=self.patient, started_by=self.reception)
+            ClinicalNote.objects.create(
+                encounter=encounter, author=self.clinician, status=ClinicalNote.Status.SIGNED,
+                assessment=f"Assessment {index}", plan="Follow up", signed_at=timezone.now(),
+            )
+        with CaptureQueriesContext(connection) as queries:
+            pdf = build_patient_access_pdf(
+                patient=self.patient, hospital_name="Test hospital", generated_by="Reviewer",
+            )
+        related_queries = [
+            query["sql"] for query in queries
+            if "hospital_encounter" in query["sql"].lower()
+            or "hospital_clinicalnote" in query["sql"].lower()
+        ]
+        self.assertEqual(len(related_queries), 2)
+        self.assertTrue(pdf.startswith(b"%PDF"))
 
 
 @override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])

@@ -3,7 +3,8 @@ from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
-from django.db.models import F, Sum
+from django.db.models import Case, F, Sum, Value, When
+from django.db.models.functions import Greatest
 from django.utils import timezone
 
 from .models import (
@@ -41,6 +42,7 @@ from .models import (
     SupplierChangeRequest,
 )
 from .permissions import user_role
+from .pricing import active_price_versions
 from .setting_validation import validated_setting_decimal
 
 # Defaults for thresholds an implementer is expected to review. They are read
@@ -85,16 +87,21 @@ def raise_exception(category, summary, evidence, severity="warning", dedupe_on=N
         record = ExceptionRecord.objects.get(dedupe_key=key)
     if created:
         return record
-    record.occurrence_count = (record.occurrence_count or 0) + 1
-    record.last_seen_at = now
-    record.evidence = evidence
-    fields = ["occurrence_count", "last_seen_at", "evidence", "updated_at"]
-    if record.status == ExceptionRecord.Status.RESOLVED:
-        # A problem that has come back is not a resolved problem.
-        record.status = ExceptionRecord.Status.OPEN
-        record.resolved_at = None
-        fields += ["status", "resolved_at"]
-    record.save(update_fields=fields)
+    ExceptionRecord.objects.filter(pk=record.pk).update(
+        occurrence_count=F("occurrence_count") + 1,
+        last_seen_at=Greatest(F("last_seen_at"), Value(now)),
+        evidence=evidence,
+        updated_at=now,
+        status=Case(
+            When(status=ExceptionRecord.Status.RESOLVED, then=Value(ExceptionRecord.Status.OPEN)),
+            default=F("status"),
+        ),
+        resolved_at=Case(
+            When(status=ExceptionRecord.Status.RESOLVED, then=Value(None)),
+            default=F("resolved_at"),
+        ),
+    )
+    record.refresh_from_db()
     return record
 
 
@@ -127,15 +134,7 @@ def audit(actor, action, entity, *, reason="", before=None, after=None, request=
 
 
 def active_price(item):
-    now = timezone.now()
-    return item.prices.filter(effective_from__lte=now).filter(
-        models_q_effective(now)
-    ).order_by("-effective_from").first()
-
-
-def models_q_effective(now):
-    from django.db.models import Q
-    return Q(effective_to__isnull=True) | Q(effective_to__gt=now)
+    return active_price_versions().filter(item=item).first()
 
 
 @transaction.atomic
@@ -264,10 +263,13 @@ def prepare_pharmacy_order(*, actor, customer_name, patient, items, encounter=No
         invoice=invoice,
         prepared_by=actor,
     )
+    current_prices = {}
+    for price in active_price_versions().filter(item_id__in={item.pk for item, _ in items}):
+        current_prices.setdefault(price.item_id, price)
     for item, quantity in items:
         if item.kind != CatalogueItem.Kind.PRODUCT or quantity <= 0:
             raise ValidationError("Every basket line must be an active product with a positive quantity.")
-        price = active_price(item)
+        price = current_prices.get(item.pk)
         if not price:
             raise ValidationError(f"{item.name} has no active price. It cannot silently be priced at zero.")
         PharmacyOrderItem.objects.create(order=order, product=item, quantity_base_units=quantity, unit_price=price.amount)
@@ -809,6 +811,17 @@ def receive_delivery(
             )
         prepared.append((order_line, quantity, batch_number, expiry, Decimal(str(row["actual_unit_cost"]))))
 
+    order_lines = list(order.lines.select_related("item"))
+    received_totals = {
+        row["order_line_id"]: row["total"]
+        for row in GoodsReceiptLine.objects.filter(order_line__order=order)
+        .values("order_line_id").annotate(total=Sum("quantity_received"))
+    }
+    delivered_value = sum(
+        ((quantity * unit_cost).quantize(Decimal("0.01")) for _, quantity, _, _, unit_cost in prepared),
+        Decimal("0.00"),
+    )
+
     try:
         # A savepoint keeps the outer transaction usable when the per-order
         # invoice uniqueness constraint rejects a repeated submission.
@@ -896,9 +909,8 @@ def receive_delivery(
                 f"{receipt.receipt_number}: expires {expiry:%d %b %Y}, within the {near_expiry_days}-day review window.",
             ))
 
-        received_total = GoodsReceiptLine.objects.filter(order_line=order_line).aggregate(
-            total=Sum("quantity_received")
-        )["total"] or Decimal("0.000")
+        received_total = received_totals.get(order_line.pk, Decimal("0.000")) + quantity
+        received_totals[order_line.pk] = received_total
         if received_total > Decimal(str(order_line.quantity_base_units)):
             flags.append((
                 "warning",
@@ -909,22 +921,20 @@ def receive_delivery(
     receipt.posted_at = timezone.now()
     receipt.save(update_fields=["posted_at", "updated_at"])
 
-    order_lines = list(order.lines.select_related("item"))
     fully_received = all(
-        (GoodsReceiptLine.objects.filter(order_line=line).aggregate(total=Sum("quantity_received"))["total"] or Decimal("0.000"))
-        >= Decimal(str(line.quantity_base_units))
+        received_totals.get(line.pk, Decimal("0.000")) >= Decimal(str(line.quantity_base_units))
         for line in order_lines
     )
     order.status = "received" if fully_received else "part_received"
     order.save(update_fields=["status", "updated_at"])
 
     tolerance = setting_decimal("supplier_invoice_tolerance", INVOICE_TOLERANCE)
-    variance = receipt.invoice_variance
+    variance = (invoice_amount - delivered_value).quantize(Decimal("0.01"))
     if abs(variance) > tolerance:
         flags.append((
             "warning",
             f"Supplier invoice {reference} does not match the goods counted in",
-            f"{receipt.receipt_number}: invoice KES {invoice_amount:,.2f}, delivered value KES {receipt.received_value:,.2f}, difference KES {variance:,.2f}.",
+            f"{receipt.receipt_number}: invoice KES {invoice_amount:,.2f}, delivered value KES {delivered_value:,.2f}, difference KES {variance:,.2f}.",
         ))
 
     for index, (severity, summary, evidence) in enumerate(flags):
@@ -941,7 +951,7 @@ def receive_delivery(
             "order": order.order_number,
             "invoice": reference,
             "lines": len(prepared),
-            "delivered_value": str(receipt.received_value),
+            "delivered_value": str(delivered_value),
             "invoice_amount": str(invoice_amount),
             "order_status": order.status,
             "flags": len(flags),
