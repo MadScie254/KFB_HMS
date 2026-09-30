@@ -3172,6 +3172,92 @@ class EnhancedWorkflowTests(HospitalFixtureMixin, TestCase):
 
 
 @override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
+class RoleCapabilityNavigationTests(HospitalFixtureMixin, TestCase):
+    def roles(self):
+        return {
+            Role.OWNER: self.owner,
+            Role.RECEPTION: self.reception,
+            Role.CLINICIAN: self.clinician,
+            Role.NURSE: self.nurse,
+            Role.PHARMACY: self.pharmacist,
+            Role.PROCUREMENT: self.procurement,
+            Role.REVIEWER: self.reviewer,
+            Role.LAB: self.make_user("role-lab", Role.LAB),
+            Role.EYE: self.make_user("role-eye", Role.EYE),
+        }
+
+    def test_patient_tabs_exist_only_when_the_section_is_rendered_for_the_role(self):
+        encounter = Encounter.objects.create(patient=self.patient, started_by=self.reception)
+        ClinicalNote.objects.create(encounter=encounter, author=self.clinician, assessment="Review")
+        Invoice.objects.create(patient=self.patient, created_by=self.reception)
+        for role, user in self.roles().items():
+            if role not in {Role.OWNER, Role.RECEPTION, Role.CLINICIAN, Role.NURSE, Role.EYE}:
+                continue
+            with self.subTest(role=role):
+                self.client.force_login(user)
+                response = self.client.get(reverse("patient_detail", args=[self.patient.pk]))
+                self.assertEqual(response.status_code, 200)
+                html = response.content.decode()
+                tabs = set(re.findall(r'<a href="#(visits|notes|attachments|billing)"', html))
+                sections = set(re.findall(r'<section[^>]* id="(visits|notes|attachments|billing)"', html))
+                self.assertEqual(tabs, sections)
+                expected = {"visits"}
+                if role in {Role.OWNER, Role.CLINICIAN, Role.NURSE}:
+                    expected |= {"notes", "attachments"}
+                if role in {Role.OWNER, Role.RECEPTION}:
+                    expected.add("billing")
+                self.assertEqual(tabs, expected)
+                visit_url = reverse("encounter_create", args=[self.patient.pk])
+                self.assertEqual(f'href="{visit_url}"' in html, role in {Role.RECEPTION, Role.CLINICIAN})
+
+        self.client.force_login(self.clinician)
+        ClinicalNote.objects.all().delete()
+        response = self.client.get(reverse("patient_detail", args=[self.patient.pk]))
+        self.assertNotContains(response, 'href="#notes"')
+
+    def test_shortcuts_and_pharmacy_navigation_match_each_role(self):
+        expected = {
+            Role.OWNER: set("dpqsbr"),
+            Role.RECEPTION: set("dpq"),
+            Role.CLINICIAN: set("dpq"),
+            Role.NURSE: set("dp"),
+            Role.PHARMACY: set("ds"),
+            Role.PROCUREMENT: set("ds"),
+            Role.REVIEWER: set("dsbr"),
+            Role.LAB: set("dq"),
+            Role.EYE: set("dp"),
+        }
+        for role, user in self.roles().items():
+            with self.subTest(role=role):
+                self.client.force_login(user)
+                response = self.client.get(reverse("dashboard"))
+                self.assertEqual(response.status_code, 200)
+                html = response.content.decode()
+                shortcuts = dict(re.findall(r'data-shortcut-([a-z])="([^"]+)"', html))
+                self.assertEqual(set(shortcuts), expected[role])
+                for url in shortcuts.values():
+                    self.assertEqual(self.client.get(url).status_code, 200, f"{role} shortcut to {url}")
+                sidebar = html.split('<nav>', 1)[1].split('</nav>', 1)[0]
+                self.assertLessEqual(sidebar.count(f'href="{reverse("pharmacy_orders")}"'), 1)
+
+    def test_owner_and_reviewer_brief_actions_are_reachable_and_accurate(self):
+        self.batch.expiry_date = timezone.localdate() - timedelta(days=1)
+        self.batch.save(update_fields=["expiry_date", "updated_at"])
+        for role, user in ((Role.OWNER, self.owner), (Role.REVIEWER, self.reviewer)):
+            with self.subTest(role=role):
+                self.client.force_login(user)
+                response = self.client.get(reverse("owner_brief"))
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, "Review expired stock")
+                self.assertContains(response, "Review count sheets")
+                self.assertNotContains(response, ">Start a count</a>")
+                self.assertEqual(self.client.get(reverse("write_offs")).status_code, 200)
+                self.assertEqual(self.client.get(reverse("stock_counts")).status_code, 200)
+                stock = self.client.get(reverse("stock"))
+                self.assertNotContains(stock, "Request a write-off")
+
+
+@override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
 class OwnerVisibilityTests(HospitalFixtureMixin, TestCase):
     """The owner can open every screen, which is not the same as doing everything.
 

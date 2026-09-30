@@ -35,8 +35,7 @@
         {% if 'brief' in allowed_navigation %}<a href="{% url 'owner_brief' %}" class="{% if request.resolver_match.url_name == 'owner_brief' %}active{% endif %}">{% include "hospital/_icon.html" with name="alert" %}<span>Today's brief</span></a>{% endif %}
         {% if 'patients' in allowed_navigation %}<a href="{% url 'patients' %}" class="{% if 'patient' in request.resolver_match.url_name %}active{% endif %}">{% include "hospital/_icon.html" with name="users" %}<span>Patients</span></a>{% endif %}
         {% if 'queue' in allowed_navigation %}<a href="{% url 'queue' %}" class="{% if request.resolver_match.url_name == 'queue' %}active{% endif %}">{% include "hospital/_icon.html" with name="queue" %}<span>Queue</span></a>{% endif %}
-        {% if 'payments' in allowed_navigation %}<a href="{% url 'pharmacy_orders' %}">{% include "hospital/_icon.html" with name="wallet" %}<span>Payments</span></a>{% endif %}
-        {% if 'pharmacy' in allowed_navigation %}<a href="{% url 'pharmacy_orders' %}" class="{% if 'pharmacy' in request.resolver_match.url_name %}active{% endif %}">{% include "hospital/_icon.html" with name="pharmacy" %}<span>Pharmacy</span></a>{% endif %}
+        {% if 'payments' in allowed_navigation %}<a href="{% url 'pharmacy_orders' %}" class="{% if 'pharmacy' in request.resolver_match.url_name %}active{% endif %}">{% include "hospital/_icon.html" with name="wallet" %}<span>Payments &amp; pharmacy</span></a>{% elif 'pharmacy' in allowed_navigation %}<a href="{% url 'pharmacy_orders' %}" class="{% if 'pharmacy' in request.resolver_match.url_name %}active{% endif %}">{% include "hospital/_icon.html" with name="pharmacy" %}<span>Pharmacy</span></a>{% endif %}
         {% if 'wards' in allowed_navigation %}<a href="{% url 'wards' %}" class="{% if request.resolver_match.url_name == 'wards' %}active{% endif %}">{% include "hospital/_icon.html" with name="bed" %}<span>Wards</span></a>{% endif %}
         {% if 'eye' in allowed_navigation %}<a href="{% url 'eye_clinic' %}" class="{% if 'eye' in request.resolver_match.url_name %}active{% endif %}">{% include "hospital/_icon.html" with name="eye" %}<span>Eye Clinic</span></a>{% endif %}
         {% if 'departments' in allowed_navigation %}<a href="{% url 'departments' %}" class="{% if 'service_order' in request.resolver_match.url_name or request.resolver_match.url_name == 'departments' %}active{% endif %}">{% include "hospital/_icon.html" with name="lab" %}<span>Lab and departments</span></a>{% endif %}
@@ -81,7 +80,7 @@
     </div>
   </div>
 
-  <div class="palette-backdrop" data-palette="{% url 'quick_search' %}" role="dialog" aria-modal="true" aria-label="Search everything you can open">
+  <div class="palette-backdrop" data-palette="{% url 'quick_search' %}" {% for shortcut in keyboard_shortcuts %}data-shortcut-{{ shortcut.key }}="{{ shortcut.url }}" {% endfor %}role="dialog" aria-modal="true" aria-label="Search everything you can open">
     <div class="palette">
       <input type="search" autocomplete="off" spellcheck="false" placeholder="Search patients, visits, batches, orders, deliveries…" aria-label="Search">
       <ul class="palette-results"></ul>
@@ -89,7 +88,7 @@
         <span><kbd>↑</kbd><kbd>↓</kbd> move</span>
         <span><kbd>↵</kbd> open</span>
         <span><kbd>esc</kbd> close</span>
-        <span><kbd>g</kbd> then <kbd>d</kbd> home · <kbd>p</kbd> patients · <kbd>q</kbd> queue · <kbd>s</kbd> stock</span>
+        <span><kbd>g</kbd> then {% for shortcut in keyboard_shortcuts %}{% if not forloop.first %} · {% endif %}<kbd>{{ shortcut.key }}</kbd> {{ shortcut.label }}{% endfor %}</span>
       </p>
     </div>
   </div>

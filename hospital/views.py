@@ -106,7 +106,7 @@ from .models import (
     Ward,
 )
 from .pdf_reports import build_financial_report_pdf, build_patient_access_pdf
-from .permissions import role_required, user_role
+from .permissions import has_capability, role_required, user_role
 from .services import (
     account_for_issue,
     approve_credit_note,
@@ -423,16 +423,16 @@ def patient_detail(request, pk):
     patient = get_object_or_404(Patient, pk=pk)
     role = user_role(request.user)
     audit(request.user, "patient.viewed", patient, request=request)
-    invoices = with_invoice_financials(patient.invoices.all()) if role in {Role.RECEPTION, Role.OWNER} else []
-    notes = ClinicalNote.objects.filter(encounter__patient=patient).select_related("author", "parent_note") if role in {Role.CLINICIAN, Role.NURSE, Role.OWNER} else []
-    attachments = patient.attachments.select_related("uploaded_by", "encounter") if role in {Role.CLINICIAN, Role.NURSE, Role.OWNER} else []
+    invoices = with_invoice_financials(patient.invoices.all()) if has_capability(role, "view_billing") else []
+    notes = ClinicalNote.objects.filter(encounter__patient=patient).select_related("author", "parent_note") if has_capability(role, "view_notes") else []
+    attachments = patient.attachments.select_related("uploaded_by", "encounter") if has_capability(role, "view_attachments") else []
     return render(request, "hospital/patient_detail.html", {
         "patient": patient,
         "invoices": invoices,
         "notes": notes,
         "encounters": patient.encounters.all(),
         "attachments": attachments,
-        "attachment_form": ClinicalAttachmentForm() if role in {Role.CLINICIAN, Role.NURSE} else None,
+        "attachment_form": ClinicalAttachmentForm() if has_capability(role, "upload_attachment") else None,
     })
 
 
@@ -967,10 +967,10 @@ def stock_view(request):
         "selected_view_label": STOCK_VIEWS[selected],
         "stock_views": STOCK_VIEWS,
         "days": days,
-        "can_receive": user_role(request.user) in {Role.PROCUREMENT, Role.PHARMACY},
-        "can_count": user_role(request.user) in {Role.PHARMACY, Role.PROCUREMENT},
-        "can_dispose": user_role(request.user) in {Role.REVIEWER, Role.OWNER},
-        "can_request_write_off": user_role(request.user) in {Role.OWNER, Role.PHARMACY, Role.PROCUREMENT},
+        "can_receive": has_capability(user_role(request.user), "receive_delivery"),
+        "can_count": has_capability(user_role(request.user), "start_stock_count"),
+        "can_dispose": has_capability(user_role(request.user), "review_write_off"),
+        "can_request_write_off": has_capability(user_role(request.user), "request_write_off"),
     })
 
 
@@ -994,7 +994,7 @@ def deliveries(request):
         "awaiting_check": awaiting,
         "open_orders": open_orders,
         "summary": receiving_summary(30),
-        "can_receive": user_role(request.user) in {Role.PROCUREMENT, Role.PHARMACY},
+        "can_receive": has_capability(user_role(request.user), "receive_delivery"),
     })
 
 
@@ -1132,8 +1132,8 @@ def stock_counts(request):
     return render(request, "hospital/stock_counts.html", {
         "counts": counts[:40],
         "open_form": StockCountOpenForm(),
-        "can_open": user_role(request.user) in {Role.PHARMACY, Role.PROCUREMENT},
-        "can_review": user_role(request.user) in {Role.REVIEWER, Role.OWNER},
+        "can_open": has_capability(user_role(request.user), "start_stock_count"),
+        "can_review": has_capability(user_role(request.user), "review_stock_count"),
     })
 
 
@@ -2104,10 +2104,10 @@ def write_offs(request):
     return render(request, "hospital/write_offs.html", {
         "pending": records.filter(status=StockWriteOff.Status.PENDING),
         "decided": records.exclude(status=StockWriteOff.Status.PENDING)[:25],
-        "form": WriteOffRequestForm() if role in {Role.PHARMACY, Role.PROCUREMENT} else None,
+        "form": WriteOffRequestForm() if has_capability(role, "request_write_off") else None,
         "review_form": WriteOffReviewForm(),
-        "can_request": role in {Role.PHARMACY, Role.PROCUREMENT},
-        "can_review": role in {Role.REVIEWER, Role.OWNER},
+        "can_request": has_capability(role, "request_write_off"),
+        "can_review": has_capability(role, "review_write_off"),
         "expired": stock_position()["expired"],
     })
 
@@ -2199,7 +2199,7 @@ def stock_intelligence(request):
     })
 
 
-def owner_brief_context(days=7):
+def owner_brief_context(days=7, role=Role.OWNER):
     """What needs the owner's attention, assembled in one place.
 
     The specification forbids automatic external messaging, so this is a
@@ -2218,7 +2218,7 @@ def owner_brief_context(days=7):
             "headline": f"{position['expired_count']} expired batch{'es' if position['expired_count'] != 1 else ''} still on the shelf",
             "detail": f"KES {position['expired_value']:,.2f} at cost. Expired stock cannot be sold and stays in the ledger until it is written off.",
             "url": reverse("write_offs"),
-            "action": "Write it off",
+            "action": "Propose write-off" if has_capability(role, "request_write_off") else "Review expired stock",
         })
     if adoption["write_offs_pending"]:
         items.append({
@@ -2276,7 +2276,7 @@ def owner_brief_context(days=7):
             "headline": "No stock count has been approved in the last 30 days",
             "detail": "Without a count, stock loss cannot be measured at all — only guessed at.",
             "url": reverse("stock_counts"),
-            "action": "Start a count",
+            "action": "Start a count" if has_capability(role, "start_stock_count") else "Review count sheets",
         })
 
     order = {"urgent": 0, "warning": 1, "info": 2}
@@ -2291,6 +2291,6 @@ def owner_brief_context(days=7):
 
 @role_required(Role.OWNER, Role.REVIEWER)
 def owner_brief(request):
-    context = owner_brief_context()
+    context = owner_brief_context(role=user_role(request.user))
     context.update({"shrinkage": shrinkage(90), "custody": departmental_custody()})
     return render(request, "hospital/owner_brief.html", context)

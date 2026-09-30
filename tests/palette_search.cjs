@@ -23,7 +23,7 @@ list.querySelectorAll = (selector) => selector === 'a' ? list.children.map((item
 list.replaceChildren = (...items) => { list.children = items; };
 Object.defineProperty(list, 'innerHTML', { set: () => { list.children = []; } });
 const palette = element();
-palette.dataset = { palette: '/search/' };
+palette.dataset = { palette: '/search/', shortcutD: '/', shortcutP: '/patients/' };
 palette.querySelector = (selector) => ({ input, '.palette-results': list })[selector] || null;
 const opener = element();
 const document = {
@@ -37,10 +37,12 @@ const document = {
 const timers = new Map();
 let timerId = 0;
 const requests = [];
+const navigated = [];
 const window = {
   addEventListener() {},
   setTimeout(callback) { const id = ++timerId; timers.set(id, callback); return id; },
   clearTimeout(id) { timers.delete(id); },
+  location: { assign(url) { navigated.push(url); } },
 };
 const fetch = (url, options) => new Promise((resolve) => requests.push({ url, options, resolve }));
 vm.runInNewContext(fs.readFileSync(path.join(__dirname, '..', 'static', 'js', 'app.js'), 'utf8'), {
@@ -77,4 +79,12 @@ const flushPromises = () => new Promise((resolve) => setImmediate(resolve));
   await flushPromises();
   assert.equal(list.children.length, 1);
   assert.equal(list.children[0].children[0].children[1].children[0].textContent, 'Beta');
+
+  const key = (value) => ({ key: value, target: null, preventDefault() {} });
+  listeners.keydown(key('g'));
+  listeners.keydown(key('s'));
+  assert.deepEqual(navigated, [], 'Stock shortcut is absent for this role');
+  listeners.keydown(key('g'));
+  listeners.keydown(key('p'));
+  assert.deepEqual(navigated, ['/patients/']);
 })().catch((error) => { process.stderr.write(`${error.stack}\n`); process.exitCode = 1; });

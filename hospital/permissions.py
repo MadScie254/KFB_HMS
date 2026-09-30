@@ -47,27 +47,61 @@ def unlocked_required(view):
     return wrapped
 
 
-# "stock" shows the ledger; "stock_control" adds the deliveries and stock-count
-# screens that post movements, so a reviewer can read the position without
-# being offered the buttons that change it.
-ROLE_NAVIGATION = {
+# Navigation and visible actions use the same role capabilities. Service-layer
+# checks still enforce segregation of duties for each transaction.
+ROLE_CAPABILITIES = {
     # The owner is deliberately given every navigation entry: they asked to be
     # able to reach any page. Page access is not the same as authority, and the
     # segregation of duties that matters lives in the service layer, where a
     # person still cannot approve their own request no matter which screen they
     # can open.
-    Role.OWNER: [
+    Role.OWNER: frozenset({
         "dashboard", "brief", "intelligence", "patients", "queue", "clinical",
         "payments", "pharmacy", "wards", "departments", "eye", "reports",
         "stock", "stock_control", "custody", "purchasing", "exceptions",
-        "audit", "shifts", "settings",
-    ],
-    Role.RECEPTION: ["dashboard", "patients", "queue", "payments", "pharmacy", "shifts"],
-    Role.CLINICIAN: ["dashboard", "patients", "queue", "clinical", "wards", "departments", "custody"],
-    Role.NURSE: ["dashboard", "patients", "wards", "departments", "custody"],
-    Role.PHARMACY: ["dashboard", "pharmacy", "stock", "stock_control", "custody"],
-    Role.LAB: ["dashboard", "queue", "departments"],
-    Role.EYE: ["dashboard", "patients", "eye"],
-    Role.PROCUREMENT: ["dashboard", "intelligence", "stock", "stock_control", "custody", "purchasing"],
-    Role.REVIEWER: ["dashboard", "brief", "intelligence", "exceptions", "audit", "purchasing", "reports", "stock", "stock_control", "custody"],
+        "audit", "shifts", "settings", "view_notes", "view_attachments",
+        "view_billing", "download_patient_access", "request_correction",
+        "review_write_off", "review_stock_count",
+    }),
+    Role.RECEPTION: frozenset({
+        "dashboard", "patients", "queue", "payments", "shifts", "view_billing",
+        "start_visit", "take_payment", "request_correction",
+    }),
+    Role.CLINICIAN: frozenset({
+        "dashboard", "patients", "queue", "clinical", "wards", "departments", "custody",
+        "view_notes", "view_attachments", "upload_attachment", "start_visit", "download_patient_access",
+    }),
+    Role.NURSE: frozenset({
+        "dashboard", "patients", "wards", "departments", "custody",
+        "view_notes", "view_attachments", "upload_attachment", "download_patient_access",
+    }),
+    Role.PHARMACY: frozenset({
+        "dashboard", "pharmacy", "stock", "stock_control", "custody",
+        "start_stock_count", "request_write_off", "receive_delivery",
+    }),
+    Role.LAB: frozenset({"dashboard", "queue", "departments"}),
+    Role.EYE: frozenset({"dashboard", "patients", "eye"}),
+    Role.PROCUREMENT: frozenset({
+        "dashboard", "intelligence", "stock", "stock_control", "custody", "purchasing",
+        "start_stock_count", "request_write_off", "receive_delivery",
+    }),
+    Role.REVIEWER: frozenset({
+        "dashboard", "brief", "intelligence", "exceptions", "audit", "purchasing",
+        "reports", "stock", "stock_control", "custody", "review_write_off",
+        "review_stock_count",
+    }),
 }
+
+NAVIGATION_KEYS = frozenset({
+    "dashboard", "brief", "intelligence", "patients", "queue", "clinical", "payments",
+    "pharmacy", "wards", "departments", "eye", "reports", "stock", "stock_control",
+    "custody", "purchasing", "exceptions", "audit", "shifts", "settings",
+})
+ROLE_NAVIGATION = {
+    role: sorted(capabilities & NAVIGATION_KEYS)
+    for role, capabilities in ROLE_CAPABILITIES.items()
+}
+
+
+def has_capability(role, capability):
+    return capability in ROLE_CAPABILITIES.get(role, frozenset())

@@ -6,7 +6,7 @@
     <h1>What needs you today</h1>
     <p>Assembled from the ledger at {{ brief_generated_at|date:"H:i" }} EAT. Nothing here is sent anywhere; it is only shown to you.</p>
   </div>
-  <div class="heading-actions"><a class="button secondary" href="{% url 'stock_intelligence' %}">Stock intelligence</a><a class="button primary" href="{% url 'reports' %}">Owner reports</a></div>
+  <div class="heading-actions"><a class="button secondary" href="{% url 'stock_intelligence' %}">Stock intelligence</a><a class="button primary" href="{% url 'reports' %}">Reports</a></div>
 </div>
 
 {% if brief_items %}
@@ -52,7 +52,7 @@
     <div class="empty compact">
       <strong>Not yet measurable.</strong>
       <p>Stock loss can only be measured against a physical count. Until a count is approved, any figure here would be a guess.</p>
-      <p><a class="button secondary small" href="{% url 'stock_counts' %}">Start a count</a></p>
+      <p><a class="button secondary small" href="{% url 'stock_counts' %}">Review count sheets</a></p>
     </div>
     {% endif %}
   </section>

@@ -327,7 +327,6 @@
 
     let chord = null;
     let chordTimer = null;
-    const go = { d: '/', p: '/patients/', q: '/queue/', s: '/stock/', b: '/brief/', r: '/reports/' };
 
     document.addEventListener('keydown', (event) => {
       if ((event.key === 'k' || event.key === 'K') && (event.metaKey || event.ctrlKey)) {
@@ -345,10 +344,11 @@
         chordTimer = window.setTimeout(() => { chord = null; }, 1200);
         return;
       }
-      if (chord === 'g' && go[event.key]) {
+      const destination = palette.dataset[`shortcut${event.key.toUpperCase()}`];
+      if (chord === 'g' && destination) {
         event.preventDefault();
         chord = null;
-        window.location.assign(go[event.key]);
+        window.location.assign(destination);
       }
     });
   }
