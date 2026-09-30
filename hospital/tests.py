@@ -1682,6 +1682,37 @@ class StockScreenTests(HospitalFixtureMixin, TestCase):
         self.assertIn("TEST-SECOND", test)
         self.assertNotIn("ALPHA-FIRST", test)
 
+    def test_quarantined_batch_release_is_visible_to_reviewer_only(self):
+        self.batch.status = StockBatch.Status.QUARANTINE
+        self.batch.save(update_fields=["status"])
+        url = reverse("batch_disposition", args=[self.batch.pk])
+        self.client.force_login(self.pharmacist)
+        self.assertNotContains(self.client.get(reverse("stock")), url)
+        self.assertEqual(self.client.post(url, {
+            "status": StockBatch.Status.ACTIVE, "reason": "Unapproved",
+        }).status_code, 403)
+
+        self.client.force_login(self.reviewer)
+        self.assertContains(self.client.get(reverse("stock")), url)
+        response = self.client.post(url, {
+            "status": StockBatch.Status.ACTIVE,
+            "reason": "Seal intact after independent inspection.",
+        })
+        self.assertRedirects(response, reverse("stock"))
+        self.batch.refresh_from_db()
+        self.assertEqual(self.batch.status, StockBatch.Status.ACTIVE)
+        self.assertTrue(AuditEvent.objects.filter(action="stock_batch.disposition", entity_id=str(self.batch.pk)).exists())
+
+    def test_expired_quarantined_batch_shows_write_off_instead_of_release(self):
+        self.batch.status = StockBatch.Status.QUARANTINE
+        self.batch.expiry_date = timezone.localdate() - timedelta(days=1)
+        self.batch.save(update_fields=["status", "expiry_date"])
+        self.client.force_login(self.owner)
+        response = self.client.get(reverse("stock"))
+        self.assertContains(response, "Expired stock cannot be released")
+        self.assertContains(response, reverse("write_offs"))
+        self.assertNotContains(response, reverse("batch_disposition", args=[self.batch.pk]))
+
     def post_delivery(self, reference="SUP-INV-100"):
         return self.client.post(
             reverse("goods_receipt_create", args=[self.order.pk]),

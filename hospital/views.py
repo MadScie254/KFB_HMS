@@ -925,6 +925,8 @@ def stock_view(request):
         "days": days,
         "can_receive": user_role(request.user) in {Role.PROCUREMENT, Role.PHARMACY},
         "can_count": user_role(request.user) in {Role.PHARMACY, Role.PROCUREMENT},
+        "can_dispose": user_role(request.user) in {Role.REVIEWER, Role.OWNER},
+        "can_request_write_off": user_role(request.user) in {Role.OWNER, Role.PHARMACY, Role.PROCUREMENT},
     })
 
 

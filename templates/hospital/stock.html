@@ -196,7 +196,27 @@
     <div class="section-divider"><div><p class="eyebrow">Held, not sellable</p><h2>Quarantined batches</h2></div></div>
     <ul class="record-list compact-list">
       {% for row in position.quarantined %}
-      <li><div><strong>{{ row.item.name }}</strong><p>Batch {{ row.batch.batch_number }}</p><small>Awaiting an authorised disposition</small></div><span class="quantity">{{ row.on_hand|floatformat:"-3" }}</span></li>
+      <li>
+        <div>
+          <strong>{{ row.item.name }}</strong>
+          <p>Batch {{ row.batch.batch_number }} · <span class="status quarantine">Quarantined</span></p>
+          {% if row.expired %}
+            <small>Expired stock cannot be released. Use the independent write-off process.</small>
+            {% if can_request_write_off %}<a href="{% url 'write_offs' %}">Request a write-off</a>{% endif %}
+          {% elif can_dispose %}
+            <form method="post" action="{% url 'batch_disposition' row.batch.pk %}" class="form-stack" data-confirm="Release this quarantined batch to sellable stock?">
+              {% csrf_token %}
+              <input type="hidden" name="status" value="active">
+              <label for="disposition-reason-{{ row.batch.pk }}">Reason for release</label>
+              <textarea id="disposition-reason-{{ row.batch.pk }}" class="field-control" name="reason" rows="2" required></textarea>
+              <button class="button secondary small" type="submit">Release batch</button>
+            </form>
+          {% else %}
+            <small>A reviewer or owner must record the reason before release.</small>
+          {% endif %}
+        </div>
+        <span class="quantity">{{ row.on_hand|floatformat:"-3" }}</span>
+      </li>
       {% endfor %}
     </ul>
     {% endif %}
