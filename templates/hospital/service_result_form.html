@@ -1,0 +1,23 @@
+{% extends "base.html" %}{% block title %}Department result{% endblock %}
+{% block content %}
+<div class="patient-banner">
+  <div><p class="eyebrow">{{ order.encounter.patient.patient_number }} · {{ order.encounter.encounter_number }}</p><h1>{{ order.encounter.patient.full_name }}</h1><p>{{ order.service.name }} · {{ order.service.department }}</p></div>
+  <div class="allergy {{ order.encounter.patient.allergy_status }}"><span>Allergy status</span><strong>{{ order.encounter.patient.get_allergy_status_display }}</strong></div>
+</div>
+{% if can_update %}
+<form method="post" class="panel form-panel" data-unsaved-warning>{% csrf_token %}
+  <div class="panel-head"><h2>{% if order.status == 'review' %}Independently review and release{% else %}Record department result{% endif %}</h2><span class="status {{ order.status }}">{{ order.get_status_display }}</span></div>
+  <div class="form-grid one-column">{% include "hospital/_form_fields.html" %}</div>
+  <div class="callout"><strong>Clinical release is independent of payment.</strong><p>Start the work, submit the result for review, then have a different authorised clinician or laboratory staff member release it. Release posts one versioned service charge to the patient's account.</p></div>
+  <div class="form-actions"><a class="button ghost" href="{% url 'departments' %}">Back to worklist</a><button class="button primary" type="submit">{% if order.status == 'review' %}Release reviewed result{% else %}Save next step{% endif %}</button></div>
+</form>
+{% else %}
+<section class="panel form-panel">
+  <div class="panel-head"><h2>{% if order.status == 'released' %}Released result{% else %}Awaiting independent release{% endif %}</h2><span class="status {{ order.status }}">{{ order.get_status_display }}</span></div>
+  <p>{{ order.result|linebreaksbr|default:"No result recorded yet." }}</p>
+  {% if order.reviewed_by %}<p class="help-text">Released by {{ order.reviewed_by.staff_profile }} on {{ order.released_at|date:"j M Y, H:i" }}.</p>{% endif %}
+  {% if order.charge_line %}<p class="help-text">Service charge posted on invoice {{ order.charge_line.invoice.invoice_number }}.</p>{% endif %}
+  <a class="button ghost" href="{% url 'departments' %}">Back to worklist</a>
+</section>
+{% endif %}
+{% endblock %}
