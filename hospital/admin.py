@@ -103,12 +103,6 @@ class SupplierAdmin(AuditedConfigurationAdmin):
         super().save_model(request, obj, form, change)
 
 
-@admin.register(models.EyePackageItem)
-class EyePackageItemAdmin(AuditedConfigurationAdmin):
-    list_display = ("package_code", "item", "quantity", "active")
-    list_filter = ("package_code", "active")
-
-
 class ReadOnlyEvidenceAdmin(admin.ModelAdmin):
     actions = None
 
