@@ -164,6 +164,7 @@
   document.querySelectorAll('table[data-sortable-table]').forEach((table) => {
     const body = table.querySelector('tbody');
     if (!body) return;
+    const grouped = table.hasAttribute('data-sort-grouped');
     table.querySelectorAll('thead th').forEach((th, index) => {
       if (th.hasAttribute('data-no-sort')) return;
       th.setAttribute('data-sortable', '');
@@ -172,17 +173,20 @@
       const sort = () => {
         const current = th.getAttribute('data-sort');
         const direction = current === 'asc' ? 'desc' : 'asc';
-        table.querySelectorAll('thead th').forEach((other) => other.removeAttribute('data-sort'));
+        table.querySelectorAll('thead th').forEach((other) => {
+          other.removeAttribute('data-sort');
+          other.removeAttribute('aria-sort');
+        });
         th.setAttribute('data-sort', direction);
-        const rows = Array.from(body.querySelectorAll('tr'));
+        const rows = grouped ? Array.from(table.tBodies) : Array.from(body.rows);
         rows.sort((a, b) => {
-          const left = cellValue(a, index);
-          const right = cellValue(b, index);
+          const left = cellValue(grouped ? a.rows[0] : a, index);
+          const right = cellValue(grouped ? b.rows[0] : b, index);
           if (left < right) return direction === 'asc' ? -1 : 1;
           if (left > right) return direction === 'asc' ? 1 : -1;
           return 0;
         });
-        rows.forEach((row) => body.appendChild(row));
+        rows.forEach((row) => (grouped ? table : body).appendChild(row));
         th.setAttribute('aria-sort', direction === 'asc' ? 'ascending' : 'descending');
       };
       th.addEventListener('click', sort);

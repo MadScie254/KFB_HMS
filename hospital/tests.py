@@ -1648,6 +1648,40 @@ class StockScreenTests(HospitalFixtureMixin, TestCase):
         )
         approve_purchase_order(actor=self.reviewer, order_id=self.order.pk)
 
+    def test_stock_sort_groups_each_product_with_its_batches(self):
+        second = CatalogueItem.objects.create(
+            code="ALPHA-TAB", name="Alpha tablet", kind=CatalogueItem.Kind.PRODUCT,
+            department="Pharmacy", base_unit="tablet", sale_unit="box",
+            units_per_sale_unit=100, reorder_level=10,
+        )
+        for item, number in (
+            (self.product, "TEST-SECOND"),
+            (second, "ALPHA-FIRST"),
+            (second, "ALPHA-SECOND"),
+        ):
+            batch = StockBatch.objects.create(
+                item=item, batch_number=number,
+                purchase_cost_per_base_unit=Decimal("1.00"),
+            )
+            StockMovement.objects.create(
+                batch=batch, movement_type=StockMovement.MovementType.RECEIPT,
+                quantity_delta=10, to_location="Pharmacy", reference_type="OpeningCount",
+                reference_id=number, idempotency_key=f"sort-{number}", entered_by=self.pharmacist,
+            )
+        self.client.force_login(self.pharmacist)
+        response = self.client.get(reverse("stock"))
+        self.assertContains(response, "data-sort-grouped")
+        groups = re.findall(r"<tbody data-sort-group>(.*?)</tbody>", response.content.decode(), re.S)
+        self.assertEqual(len(groups), 2)
+        alpha = next(group for group in groups if "Alpha tablet" in group)
+        test = next(group for group in groups if "Test tablet" in group)
+        self.assertIn("ALPHA-FIRST", alpha)
+        self.assertIn("ALPHA-SECOND", alpha)
+        self.assertNotIn("TEST-SECOND", alpha)
+        self.assertIn("B-001", test)
+        self.assertIn("TEST-SECOND", test)
+        self.assertNotIn("ALPHA-FIRST", test)
+
     def post_delivery(self, reference="SUP-INV-100"):
         return self.client.post(
             reverse("goods_receipt_create", args=[self.order.pk]),

@@ -100,10 +100,10 @@
   </div>
   {% if products %}
   <div class="table-wrap">
-    <table data-sortable-table>
+    <table data-sortable-table data-sort-grouped>
       <thead><tr><th>Product</th><th class="numeric">On hand</th><th class="numeric">Sellable</th><th>Reorder level</th><th>Earliest expiry</th><th class="numeric">Cost value</th><th class="numeric">Sale value</th><th>Standing</th></tr></thead>
-      <tbody>
       {% for row in products %}
+      <tbody data-sort-group>
         <tr>
           <td><strong>{{ row.item.name }}</strong><small>{{ row.item.code }} · {{ row.batch_count }} batch{{ row.batch_count|pluralize:"es" }}</small></td>
           <td class="numeric"><strong>{{ row.on_hand|floatformat:"-3" }}</strong> {{ row.item.base_unit }}</td>
@@ -132,8 +132,8 @@
           </td>
         </tr>
         {% endfor %}
-      {% endfor %}
       </tbody>
+      {% endfor %}
     </table>
   </div>
   {% else %}
