@@ -130,7 +130,7 @@ STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 STATICFILES_DIRS = [BASE_DIR / "static"]
 STORAGES = {
-    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "default": {"BACKEND": "hospital.media_storage.BackupSafeFileSystemStorage"},
     "staticfiles": {
         # Hashed filenames let the browser cache assets indefinitely and still
         # pick up a change the moment one is deployed.

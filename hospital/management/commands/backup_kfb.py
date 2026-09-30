@@ -13,6 +13,8 @@ from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from django.db import connection
 
+from hospital.media_storage import LOCK_FILENAME, media_write_lock
+
 
 class Command(BaseCommand):
     help = "Create a checksummed database + attachment backup. Production requires configured encryption."
@@ -29,15 +31,21 @@ class Command(BaseCommand):
             raise CommandError("Encryption recipient is configured but the 'age' executable is not installed.")
 
         destination = Path(options.get("output") or os.getenv("KFB_BACKUP_DIRECTORY", settings.BASE_DIR / "backups")).resolve()
+        media_root = Path(settings.MEDIA_ROOT).resolve()
+        if destination == media_root or media_root in destination.parents:
+            raise CommandError("Backup directory must be outside MEDIA_ROOT.")
         destination.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         archive_name = f"kfb-hms-{timestamp}-{uuid.uuid4().hex[:8]}.zip"
 
-        with tempfile.TemporaryDirectory(prefix="kfb-backup-") as temp_dir:
+        # File storage takes this same cross-process lock while writing each
+        # immutable upload. A DB row cannot reference a partly written file.
+        with media_write_lock(timeout=60), tempfile.TemporaryDirectory(prefix="kfb-backup-") as temp_dir:
             work = Path(temp_dir)
             if os.name != "nt":
                 work.chmod(0o700)
             database_file = work / ("database.sqlite3" if connection.vendor == "sqlite" else "database.dump")
+            snapshot_started = datetime.now(timezone.utc)
             if connection.vendor == "sqlite":
                 # VACUUM INTO takes a consistent snapshot through SQLite itself.
                 # A plain file copy can capture a torn page set while another
@@ -56,12 +64,27 @@ class Command(BaseCommand):
             else:
                 raise CommandError(f"Unsupported database backend: {connection.vendor}")
 
+            snapshot_finished = datetime.now(timezone.utc)
+            media_files = []
+            media_hashes = {}
+            if media_root.exists():
+                for file in sorted(media_root.rglob("*")):
+                    if file.name == LOCK_FILENAME and file.parent == media_root:
+                        continue
+                    if file.is_symlink():
+                        raise CommandError(f"Media contains a symlink; inspect before backup: {file}")
+                    if file.is_file():
+                        relative_name = file.relative_to(media_root).as_posix()
+                        media_files.append((file, relative_name))
+                        media_hashes[relative_name] = self._sha256(file)
             manifest = {
                 "created_utc": datetime.now(timezone.utc).isoformat(),
                 "environment": settings.ENVIRONMENT,
                 "database_vendor": connection.vendor,
                 "database_sha256": self._sha256(database_file),
-                "recovery_point": "Database state at backup command start; changes after that time are not included.",
+                "database_snapshot_window_utc": [snapshot_started.isoformat(), snapshot_finished.isoformat()],
+                "media_sha256": media_hashes,
+                "recovery_point": "Database snapshot captured within the stated window. Application media writes were quiesced through archive creation; later database transactions are not included.",
             }
             (work / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
             # Never put a plaintext patient archive on the backup medium.
@@ -69,11 +92,8 @@ class Command(BaseCommand):
             with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as output:
                 output.write(database_file, database_file.name)
                 output.write(work / "manifest.json", "manifest.json")
-                media_root = Path(settings.MEDIA_ROOT)
-                if media_root.exists():
-                    for file in media_root.rglob("*"):
-                        if file.is_file():
-                            output.write(file, Path("media") / file.relative_to(media_root))
+                for file, relative_name in media_files:
+                    output.write(file, Path("media") / relative_name)
 
             final_name = f"{archive_name}.age" if recipient else archive_name
             final_path = destination / final_name

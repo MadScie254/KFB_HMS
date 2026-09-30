@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -12,7 +13,7 @@ from decimal import Decimal
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Barrier
+from threading import Barrier, Event, Thread
 from unittest import skipUnless
 from unittest.mock import patch
 
@@ -20,6 +21,7 @@ from django.conf import settings
 from django.contrib.auth.models import User
 from django.contrib.sessions.models import Session
 from django.core.exceptions import ValidationError
+from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.core.management.base import CommandError, OutputWrapper
@@ -296,6 +298,91 @@ class BackupEncryptionTests(TransactionTestCase):
             self.assertEqual(len(list(Path(output).glob("*.zip.age"))), 1)
             self.assertEqual(len(list(Path(output).glob("*.zip"))), 0)
             self.assertEqual(len(list(Path(output).glob("*.zip.age.sha256"))), 1)
+
+    @override_settings(DEMO_MODE=True, ENVIRONMENT="demo")
+    def test_backup_excludes_upload_that_starts_during_snapshot(self):
+        from hospital.media_storage import BackupSafeFileSystemStorage
+
+        with TemporaryDirectory() as output, TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root), patch.dict(os.environ, {"KFB_BACKUP_ENCRYPTION_RECIPIENT": ""}):
+                storage = BackupSafeFileSystemStorage(location=media_root)
+                storage.save("clinical/existing.pdf", ContentFile(b"existing evidence"))
+                started, finished = Event(), Event()
+                failures = []
+
+                def upload():
+                    started.set()
+                    try:
+                        storage.save("clinical/concurrent.pdf", ContentFile(b"later evidence"))
+                    except Exception as exc:
+                        failures.append(exc)
+                    finally:
+                        finished.set()
+
+                original_write = zipfile.ZipFile.write
+                worker = None
+
+                def write_while_upload_waits(archive, filename, arcname=None, *args, **kwargs):
+                    nonlocal worker
+                    if arcname == "database.sqlite3":
+                        worker = Thread(target=upload)
+                        worker.start()
+                        self.assertTrue(started.wait(2))
+                        self.assertFalse(finished.wait(0.2), "Upload passed the backup lock")
+                    return original_write(archive, filename, arcname, *args, **kwargs)
+
+                with patch.object(zipfile.ZipFile, "write", write_while_upload_waits):
+                    call_command("backup_kfb", output=output)
+                worker.join(5)
+                self.assertTrue(finished.is_set())
+                self.assertEqual(failures, [])
+                archive_path = next(Path(output).glob("*.zip"))
+                with zipfile.ZipFile(archive_path) as archive:
+                    self.assertIn("media/clinical/existing.pdf", archive.namelist())
+                    self.assertNotIn("media/clinical/concurrent.pdf", archive.namelist())
+                    manifest = json.loads(archive.read("manifest.json"))
+                    self.assertEqual(
+                        manifest["media_sha256"],
+                        {"clinical/existing.pdf": hashlib.sha256(b"existing evidence").hexdigest()},
+                    )
+
+    @skipUnless(os.name == "nt", "Restore script uses Windows PowerShell and icacls")
+    def test_encrypted_restore_removes_plaintext_zip_on_success_and_failure(self):
+        restore_script = Path(settings.BASE_DIR) / "scripts" / "restore-backup.ps1"
+        with TemporaryDirectory() as root:
+            root = Path(root)
+            fake_bin = root / "bin"
+            fake_bin.mkdir()
+            (fake_bin / "age.cmd").write_text(
+                '@echo off\r\ncopy /Y "%~6" "%~5" >NUL\r\nexit /b %ERRORLEVEL%\r\n', encoding="ascii"
+            )
+            temporary_root = root / "temporary"
+            temporary_root.mkdir()
+            environment = os.environ.copy()
+            environment["PATH"] = str(fake_bin) + os.pathsep + environment["PATH"]
+            environment["TEMP"] = str(temporary_root)
+            environment["TMP"] = str(temporary_root)
+            for valid in (True, False):
+                with self.subTest(valid=valid):
+                    archive_path = root / ("valid.zip.age" if valid else "invalid.zip.age")
+                    if valid:
+                        with zipfile.ZipFile(archive_path, "w") as archive:
+                            archive.writestr("manifest.json", "{}")
+                    else:
+                        archive_path.write_bytes(b"invalid zip")
+                    checksum = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+                    Path(f"{archive_path}.sha256").write_text(f"{checksum}  {archive_path.name}\n")
+                    target = root / ("valid-target" if valid else "invalid-target")
+                    result = subprocess.run(
+                        ["pwsh", "-NoProfile", "-File", str(restore_script), "-Archive", str(archive_path),
+                         "-TargetDirectory", str(target), "-AgeIdentity", "dummy"],
+                        env=environment, capture_output=True, text=True,
+                    )
+                    self.assertEqual(result.returncode == 0, valid, result.stderr)
+                    self.assertFalse((target / "decrypted-backup.zip").exists())
+                    self.assertEqual(list(temporary_root.iterdir()), [])
+                    if valid:
+                        self.assertTrue((target / "manifest.json").exists())
 
 
 class HospitalFixtureMixin:
