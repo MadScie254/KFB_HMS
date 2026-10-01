@@ -28,7 +28,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - exercised by hand
     raise RuntimeError(
         f"A required dependency is missing: {exc.name}.\n"
         "The dependencies changed since this environment was built. Install them with:\n"
-        "    python -m pip install -r requirements.txt\n"
+        "    python -m pip install -r requirements.lock\n"
         "or start the demo with scripts/run-demo.sh (or run-demo.ps1 on Windows), "
         "which installs them for you."
     ) from exc

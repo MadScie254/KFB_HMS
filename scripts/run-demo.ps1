@@ -24,17 +24,22 @@ if (-not (Test-Path -LiteralPath $PythonPath)) {
     Write-Host "==> Creating the virtual environment"
     $Launcher = if (Get-Command py -ErrorAction SilentlyContinue) { "py" } else { "python" }
     & $Launcher -m venv .venv
+    if ($LASTEXITCODE -ne 0) { throw "Virtual environment creation failed with exit code $LASTEXITCODE." }
 }
 
 Write-Host "==> Installing locked dependencies"
 & $PythonPath -m pip install --quiet --upgrade pip
+if ($LASTEXITCODE -ne 0) { throw "Pip upgrade failed with exit code $LASTEXITCODE." }
 & $PythonPath -m pip install --quiet -r requirements.lock
+if ($LASTEXITCODE -ne 0) { throw "Dependency installation failed with exit code $LASTEXITCODE." }
 
 Write-Host "==> Applying migrations"
 & $PythonPath manage.py migrate --noinput
+if ($LASTEXITCODE -ne 0) { throw "Migration failed with exit code $LASTEXITCODE." }
 
 Write-Host "==> Seeding fictional demonstration data"
 & $PythonPath manage.py seed_demo
+if ($LASTEXITCODE -ne 0) { throw "Demo seeding failed with exit code $LASTEXITCODE." }
 
 Write-Host @"
 
@@ -66,3 +71,4 @@ Write-Host @"
 "@
 
 & $PythonPath manage.py runserver "${HostName}:${Port}"
+if ($LASTEXITCODE -ne 0) { throw "Demo server stopped with exit code $LASTEXITCODE." }

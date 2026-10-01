@@ -8,6 +8,8 @@ After a successful daily backup, run the failed-login evidence export/prune task
 
 Each archive includes a consistent database snapshot, protected attachment files and a manifest with the UTC snapshot window, database checksum and SHA-256 of each media file. Application uploads and backup creation use the same cross-process media lock, so a referenced attachment is fully written before it can enter the database snapshot. Backups temporarily defer uploads; schedule them outside busy clinical hours. The sidecar checksum verifies the final archive. Store backups outside `MEDIA_ROOT`, copy the encrypted archive off the server, and monitor Task Scheduler exit status for failures or overdue jobs.
 
+Backup retention is an operator-controlled storage policy. The application does not automatically delete old archives; confirm the approved period, keep a separately stored recovery copy, and only remove archives after verifying newer encrypted backups and a restore rehearsal.
+
 ## Restore rehearsal
 
 1. Use a separate isolated test host—never overwrite the active hospital database.

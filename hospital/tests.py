@@ -186,6 +186,54 @@ class EnvironmentStartupTests(SimpleTestCase):
                 self.assertIn(expected, result.stderr)
 
 
+class DemoLauncherFailureTests(SimpleTestCase):
+    @skipUnless(os.name == "nt" and shutil.which("powershell"), "Windows launcher test")
+    def test_windows_launchers_stop_before_migration_when_pip_fails(self):
+        python = settings.BASE_DIR / ".venv" / "Scripts" / "python.exe"
+        if not python.exists():
+            self.skipTest("Project virtual environment is required")
+        with TemporaryDirectory() as root:
+            fake_pip = Path(root) / "pip"
+            fake_pip.mkdir()
+            (fake_pip / "__init__.py").write_text("", encoding="utf-8")
+            (fake_pip / "__main__.py").write_text("raise SystemExit(37)\n", encoding="utf-8")
+            child_env = os.environ.copy()
+            child_env["KFB_ENV"] = "demo"
+            child_env["PYTHONPATH"] = root + os.pathsep + child_env.get("PYTHONPATH", "")
+            for command in (
+                ["powershell", "-NoProfile", "-File", str(settings.BASE_DIR / "scripts" / "run-demo.ps1")],
+                ["cmd", "/c", str(settings.BASE_DIR / "scripts" / "run-demo.cmd")],
+            ):
+                with self.subTest(command=command[0]):
+                    result = subprocess.run(
+                        command, cwd=settings.BASE_DIR, env=child_env,
+                        capture_output=True, text=True, check=False, timeout=30,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("Installing locked dependencies", result.stdout)
+                    self.assertNotIn("Applying migrations", result.stdout)
+
+    @skipUnless(os.name != "nt" and shutil.which("bash"), "Unix launcher test")
+    def test_unix_launcher_stops_before_migration_when_pip_fails(self):
+        with TemporaryDirectory() as root:
+            root_path = Path(root)
+            scripts = root_path / "scripts"
+            scripts.mkdir()
+            shutil.copy2(settings.BASE_DIR / "scripts" / "run-demo.sh", scripts / "run-demo.sh")
+            python = root_path / ".venv" / "bin" / "python"
+            python.parent.mkdir(parents=True)
+            python.write_text("#!/bin/sh\nexit 37\n", encoding="utf-8")
+            python.chmod(0o755)
+            result = subprocess.run(
+                ["bash", str(scripts / "run-demo.sh")], cwd=root,
+                env={**os.environ, "KFB_ENV": "demo"}, capture_output=True,
+                text=True, check=False, timeout=30,
+            )
+            self.assertEqual(result.returncode, 37)
+            self.assertIn("Installing locked dependencies", result.stdout)
+            self.assertNotIn("Applying migrations", result.stdout)
+
+
 class ReadinessTests(TestCase):
     def test_demo_and_empty_operational_settings_fail_the_command(self):
         output = StringIO()
@@ -2665,6 +2713,15 @@ class ContinuousIntegrationTests(SimpleTestCase):
 
     workflow = Path(settings.BASE_DIR) / ".github" / "workflows" / "quality.yml"
     script = Path(settings.BASE_DIR) / "scripts" / "checks.sh"
+
+    def test_demo_and_ci_install_the_same_pinned_dependencies(self):
+        workflow = self.workflow.read_text()
+        self.assertEqual(workflow.count("python -m pip install -r requirements.lock"), 2)
+        self.assertEqual(workflow.count("cache-dependency-path: requirements.lock"), 2)
+        for name in ("run-demo.ps1", "run-demo.cmd", "run-demo.sh"):
+            with self.subTest(name=name):
+                script = (settings.BASE_DIR / "scripts" / name).read_text()
+                self.assertIn("-r requirements.lock", script)
 
     def workflow_commands(self):
         """Every `run:` step, including the folded (`>-`) multi-line ones.

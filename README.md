@@ -38,8 +38,8 @@ Prerequisites: Windows 10/11 or a supported Linux host, Python 3.11 or newer, an
 **After every `git pull`, reinstall the dependencies before starting the server:**
 
 ```
-.venv\Scripts\python.exe -m pip install -r requirements.txt     # Windows
-.venv/bin/python -m pip install -r requirements.txt              # Linux/macOS
+.venv\Scripts\python.exe -m pip install -r requirements.lock     # Windows
+.venv/bin/python -m pip install -r requirements.lock              # Linux/macOS
 ```
 
 A pull can add a dependency, and starting without it fails at import. The
@@ -62,17 +62,20 @@ scripts\run-demo.cmd
 
 The first is PowerShell, the second a Command Prompt, the third a Unix shell. Command Prompt cannot execute a `.ps1` file, which is why there is a `.cmd` beside it.
 
-Both print the sign-in accounts and a suggested order to walk the stock controls. They refuse to run when `KFB_ENV` is anything but `demo`, because they seed fictional patients and prices.
+All three print the sign-in accounts and a suggested order to walk the stock controls. They refuse to run when `KFB_ENV` is anything but `demo`, because they seed fictional patients and prices.
 
 The equivalent steps by hand:
 
 ```powershell
+$env:KFB_ENV = "demo"
 py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.lock
 .\.venv\Scripts\python.exe manage.py migrate
 .\.venv\Scripts\python.exe manage.py seed_demo
 .\.venv\Scripts\python.exe manage.py runserver 127.0.0.1:8000
 ```
+
+`requirements.txt` lists direct runtime dependencies and `requirements-dev.txt` adds check tools. The wrappers and CI install the fully pinned `requirements.lock`. To refresh it, use a clean Python 3.11 virtual environment, install `requirements-dev.txt`, run `python -m pip freeze > requirements.lock`, and run the local checks before committing the new lock file.
 
 Open `http://127.0.0.1:8000`. Seeded usernames are `owner.demo`, `reception.demo`, `clinician.demo`, `nurse.demo`, `pharmacy.demo`, `lab.demo`, `eye.demo`, `procurement.demo`, and `reviewer.demo`. The demo-only password is `Demo-Only-2026!`.
 
@@ -124,7 +127,7 @@ To reproduce the PostgreSQL job locally, use a disposable PostgreSQL 16 database
 
 ```bash
 python manage.py migrate --noinput
-python manage.py test hospital.tests.InvoiceBalanceRaceTests hospital.tests.PostgreSQLAuditTriggerTests hospital.tests.WorkflowTests.test_shift_opening_is_unique_and_review_is_independent hospital.tests.WorkflowTests.test_supplier_change_requires_independent_review_and_current_snapshot hospital.tests.WorkflowTests.test_service_without_approved_price_cannot_be_released_unbilled
+python manage.py test hospital.tests.InvoiceBalanceRaceTests hospital.tests.ExceptionRecurrenceRaceTests hospital.tests.PostgreSQLAuditTriggerTests hospital.tests.WorkflowTests.test_shift_opening_is_unique_and_review_is_independent hospital.tests.WorkflowTests.test_supplier_change_requires_independent_review_and_current_snapshot hospital.tests.WorkflowTests.test_service_without_approved_price_cannot_be_released_unbilled
 ```
 
 The PostgreSQL tests are skipped under SQLite and the test runner creates a separate test database. Run the migration command only against a disposable local database.

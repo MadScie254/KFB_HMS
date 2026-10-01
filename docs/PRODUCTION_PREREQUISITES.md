@@ -20,7 +20,7 @@ Do not enter real patient data until every applicable item is resolved and signe
 
 ## Host and network readiness
 
-- A reliable dedicated host that supports Python 3.14 and PostgreSQL, with restricted service and database accounts.
+- A reliable dedicated host that supports Python 3.11 and PostgreSQL, with restricted service and database accounts.
 - Repaired/verified workstations, supported browsers, reliable LAN/router, ordinary/receipt printer testing and a desktop shortcut to the HTTPS application URL.
 - UPS for safe shutdown, surge protection and a rehearsed power-loss recovery process. A UPS is not represented as two-day power.
 - LAN firewall rules that expose only the HTTPS application; never expose PostgreSQL or an unauthenticated application to the internet.
@@ -42,6 +42,5 @@ Do not enter real patient data until every applicable item is resolved and signe
 ## Pilot gate
 
 - Run the automated suite against PostgreSQL and perform supervised role-by-role acceptance with staff.
-- Test double-clicks, two-user last-stock contention, printer failure/reprint, overnight shifts, internet loss, server loss, power recovery and downtime back-entry.
+- Test double-clicks, two-user last-stock contention, printer failure/reprint, overnight shifts, internet loss, server loss, power recovery and manual downtime reconciliation.
 - Display official prices and insist on patient receipts; restrict physical stock and use witnessed counts. Software cannot by itself prevent collusion, unrecorded cash sales or physical theft.
-

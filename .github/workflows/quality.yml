@@ -15,7 +15,8 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - run: python -m pip install -r requirements.txt -r requirements-dev.txt
+          cache-dependency-path: requirements.lock
+      - run: python -m pip install -r requirements.lock
       - run: ruff check hospital kfb_hms
       - run: python manage.py test
       # A model change without its migration passes every test and then breaks
@@ -58,11 +59,13 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - run: python -m pip install -r requirements.txt -r requirements-dev.txt
+          cache-dependency-path: requirements.lock
+      - run: python -m pip install -r requirements.lock
       - run: python manage.py migrate --noinput
       - run: >-
           python manage.py test
           hospital.tests.InvoiceBalanceRaceTests
+          hospital.tests.ExceptionRecurrenceRaceTests
           hospital.tests.PostgreSQLAuditTriggerTests
           hospital.tests.WorkflowTests.test_shift_opening_is_unique_and_review_is_independent
           hospital.tests.WorkflowTests.test_supplier_change_requires_independent_review_and_current_snapshot
