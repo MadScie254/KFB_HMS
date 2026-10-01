@@ -1,5 +1,13 @@
 # Code review — 29 September 2026
 
+> **Remediation update — 1 October 2026.** The P0–P3 action items, quick wins,
+> and redundancy removals below have been applied on `main` through commit
+> `0248d5b`. The findings remain as the original review record. The latest
+> local verification passed 249 hospital tests (7 environment-specific skips),
+> Ruff, Django system and migration checks, and all six Node test files.
+> PostgreSQL-specific and POSIX shell tests still require those environments;
+> hosted GitHub Actions is unavailable while the account is billing-locked.
+
 ## 1. Executive Summary
 
 The codebase has a sound server-rendered structure, role checks on most routes, ledger-backed stock, and useful workflow tests; Ruff, all 148 Django tests, and the migration check pass. The largest risks are gaps between the guarded UI and alternate paths: reception can export clinical notes, a production backup can leave a plaintext archive, and concurrent balance-changing actions can duplicate or overstate records. Stock counts have two independent ways to post incorrect adjustments, while several clinical and finance flows never reach a reliable terminal state. Performance is generally reasonable for a small demonstration but several owner, stock, and order pages scale with full historical data or one query per displayed row; some polished UI controls also report false state or lead to inaccessible actions.
