@@ -1,9 +1,6 @@
-import mimetypes
 from datetime import timedelta
 from decimal import Decimal
-from pathlib import Path
 
-from django import forms
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import authenticate, login
@@ -11,16 +8,22 @@ from django.contrib.auth.decorators import login_required
 from django.contrib.auth.views import LoginView
 from django.core.exceptions import ValidationError
 from django.core.paginator import Paginator
-from django.db import connection, transaction
-from django.db.models import Case, Count, IntegerField, Max, Prefetch, Q, Sum, Value, When
-from django.http import FileResponse, Http404, HttpResponse, JsonResponse
+from django.db import connection
+from django.db.models import Count, Prefetch, Q, Sum
+from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.http import content_disposition_header, urlencode
 
 from . import billing_views as _billing_views
+from . import clinical_views as _clinical_views
+from . import custody_views as _custody_views
 from . import import_views as _import_views
+from . import patient_views as _patient_views
+from . import pharmacy_views as _pharmacy_views
+from . import purchasing_views as _purchasing_views
+from . import stock_views as _stock_views
 from .analytics import (
     control_adoption,
     departmental_custody,
@@ -33,45 +36,20 @@ from .analytics import (
 )
 from .forms import (
     AdmissionForm,
-    BatchDispositionForm,
-    ClinicalAttachmentForm,
-    ClinicalNoteForm,
-    DeliveryCheckForm,
-    DepartmentIssueForm,
-    DepartmentIssueLineFormSet,
-    EncounterForm,
-    GoodsReceiptForm,
-    GoodsReceiptLineFormSet,
-    PatientForm,
-    PharmacyBasketForm,
-    PrescriptionForm,
-    PrescriptionFormSet,
-    PurchaseOrderForm,
-    PurchaseOrderLineFormSet,
-    ServiceOrderForm,
     ServiceResultForm,
-    StockCountOpenForm,
-    StockCountReviewForm,
-    SupplierChangeForm,
-    WriteOffRequestForm,
-    WriteOffReviewForm,
 )
 from .models import (
     Admission,
     AuditEvent,
     Bed,
     CashShift,
-    ClinicalAttachment,
-    ClinicalNote,
     ClinicianPayable,
     CreditNote,
-    DepartmentIssue,
     Encounter,
     ExceptionRecord,
     EyeCase,
     EyeSession,
     GoodsReceipt,
-    GoodsReceiptLine,
     Invoice,
     InvoiceLine,
     LoginAttempt,
@@ -79,47 +57,22 @@ from .models import (
     Payment,
     PaymentAllocation,
     PharmacyOrder,
-    Prescription,
-    PrescriptionItem,
-    PurchaseOrder,
-    PurchaseOrderLine,
     Refund,
     Role,
     ServiceOrder,
     Setting,
     StockBatch,
-    StockCount,
-    StockMovement,
-    StockWriteOff,
-    Supplier,
-    SupplierChangeRequest,
     Ward,
 )
-from .pdf_reports import build_financial_report_pdf, build_patient_access_pdf
+from .pdf_reports import build_financial_report_pdf
 from .permissions import has_capability, role_required, user_role
 from .services import (
-    account_for_issue,
-    approve_purchase_order,
     audit,
-    check_delivery,
-    close_encounter,
     complete_eye_case,
     discharge_admission,
-    dispense_order,
-    issue_to_department,
-    open_stock_count,
-    prepare_pharmacy_order,
-    receive_delivery,
-    request_supplier_change,
-    request_write_off,
-    review_stock_count,
-    review_supplier_change,
-    review_write_off,
-    set_batch_disposition,
-    submit_stock_count,
     update_service_order,
 )
-from .view_helpers import _validation_message
+from .view_helpers import _filter_query, _period_days, _validation_message, _worklist_page
 
 # Keep URL callbacks and the established imports available from hospital.views.
 credit_note_create = _billing_views.credit_note_create
@@ -146,32 +99,54 @@ _commit_import_job = _import_views._commit_import_job
 _check_import_job_current = _import_views._check_import_job_current
 csv_import = _import_views.csv_import
 
+patient_list = _patient_views.patient_list
+patient_create = _patient_views.patient_create
+patient_detail = _patient_views.patient_detail
+patient_attachment_upload = _patient_views.patient_attachment_upload
+patient_attachment_download = _patient_views.patient_attachment_download
+patient_access_pdf = _patient_views.patient_access_pdf
 
-def _period_days(value, default=7):
-    """A safe reporting window from a query string, clamped to one year."""
-    days = int(value) if str(value).isdigit() else default
-    return max(1, min(days, 365))
+encounter_create = _clinical_views.encounter_create
+TRIAGE_RANK = _clinical_views.TRIAGE_RANK
+open_clinical_encounters = _clinical_views.open_clinical_encounters
+queue = _clinical_views.queue
+encounter_close = _clinical_views.encounter_close
+clinical_note = _clinical_views.clinical_note
+prescription_create = _clinical_views.prescription_create
+service_order_create = _clinical_views.service_order_create
 
+pharmacy_orders = _pharmacy_views.pharmacy_orders
+pharmacy_prepare_prescription = _pharmacy_views.pharmacy_prepare_prescription
+pharmacy_order_create = _pharmacy_views.pharmacy_order_create
+pharmacy_order_detail = _pharmacy_views.pharmacy_order_detail
+pharmacy_dispense = _pharmacy_views.pharmacy_dispense
 
-def _filter_query(**params):
-    """Query-string tail that keeps active filters on pagination links."""
-    active = {key: value for key, value in params.items() if value not in (None, "")}
-    return f"&{urlencode(active)}" if active else ""
+STOCK_VIEWS = _stock_views.STOCK_VIEWS
+stock_view = _stock_views.stock_view
+deliveries = _stock_views.deliveries
+goods_receipt_create = _stock_views.goods_receipt_create
+goods_receipt_detail = _stock_views.goods_receipt_detail
+goods_receipt_invoice = _stock_views.goods_receipt_invoice
+goods_receipt_check = _stock_views.goods_receipt_check
+stock_counts = _stock_views.stock_counts
+stock_count_open = _stock_views.stock_count_open
+stock_count_detail = _stock_views.stock_count_detail
+stock_count_review = _stock_views.stock_count_review
 
+supplier_changes = _purchasing_views.supplier_changes
+supplier_change_request = _purchasing_views.supplier_change_request
+supplier_change_review = _purchasing_views.supplier_change_review
+purchasing = _purchasing_views.purchasing
+purchase_order_create = _purchasing_views.purchase_order_create
+purchase_order_approve = _purchasing_views.purchase_order_approve
 
-def _worklist_page(request, queryset, per_page, parameter, anchor):
-    """Page a worklist while preserving the other lists' current pages."""
-    page = Paginator(queryset, per_page).get_page(request.GET.get(parameter))
-
-    def link(number):
-        query = request.GET.copy()
-        query[parameter] = number
-        return f"?{query.urlencode()}#{anchor}"
-
-    return page, {
-        "previous": link(page.previous_page_number()) if page.has_previous() else None,
-        "next": link(page.next_page_number()) if page.has_next() else None,
-    }
+custody = _custody_views.custody
+custody_issue = _custody_views.custody_issue
+custody_account = _custody_views.custody_account
+write_offs = _custody_views.write_offs
+write_off_request = _custody_views.write_off_request
+write_off_review = _custody_views.write_off_review
+batch_disposition = _custody_views.batch_disposition
 
 
 def invoiced_total(invoices):
@@ -239,7 +214,6 @@ SEARCH_SCOPES = {
     "encounters": {Role.OWNER, Role.RECEPTION, Role.CLINICIAN, Role.NURSE, Role.LAB},
     "stock": {Role.OWNER, Role.PHARMACY, Role.PROCUREMENT, Role.REVIEWER},
     "orders": {Role.OWNER, Role.PHARMACY, Role.RECEPTION},
-    "invoices": {Role.OWNER, Role.RECEPTION, Role.REVIEWER},
     "deliveries": {Role.OWNER, Role.PROCUREMENT, Role.PHARMACY, Role.REVIEWER},
 }
 
@@ -359,11 +333,16 @@ def dashboard(request):
     today = timezone.localdate()
     start = timezone.make_aware(timezone.datetime.combine(today, timezone.datetime.min.time()))
     show_patient_queue = role in {Role.OWNER, Role.RECEPTION, Role.CLINICIAN, Role.NURSE}
+    show_exceptions = has_capability(role, "exceptions")
     context = {
         "role": role,
-        "exceptions": ExceptionRecord.objects.exclude(status=ExceptionRecord.Status.RESOLVED).order_by("-created_at")[:6],
+        "show_exceptions": show_exceptions,
         "show_patient_queue": show_patient_queue,
     }
+    if show_exceptions:
+        context["exceptions"] = ExceptionRecord.objects.exclude(
+            status=ExceptionRecord.Status.RESOLVED
+        ).order_by("-created_at")[:6]
     if show_patient_queue:
         context["queue"] = open_clinical_encounters().select_related("patient").order_by("created_at")[:8]
     if role == Role.RECEPTION:
@@ -389,751 +368,6 @@ def dashboard(request):
             "active_beds": Bed.objects.filter(active=True, ward__active=True).count(),
         })
     return render(request, "hospital/dashboard.html", context)
-
-
-@role_required(Role.RECEPTION, Role.CLINICIAN, Role.NURSE, Role.OWNER, Role.EYE)
-def patient_list(request):
-    query = request.GET.get("q", "").strip()
-    patients = Patient.objects.all()
-    if query:
-        patients = patients.filter(
-            Q(patient_number__icontains=query)
-            | Q(first_name__icontains=query)
-            | Q(last_name__icontains=query)
-            | Q(phone__icontains=query)
-            | Q(id_number__iexact=query)
-            | Q(guardian_phone__icontains=query)
-        )
-    page = Paginator(patients, 50).get_page(request.GET.get("page"))
-    return render(request, "hospital/patient_list.html", {"patients": page, "page": page, "query": query})
-
-
-@role_required(Role.OWNER, Role.RECEPTION)
-def patient_create(request):
-    form = PatientForm(request.POST or None)
-    duplicate_candidates = []
-    if request.method == "POST" and form.is_valid():
-        duplicate_candidates = Patient.objects.filter(
-            first_name__iexact=form.cleaned_data["first_name"],
-            last_name__iexact=form.cleaned_data["last_name"],
-        )
-        if form.cleaned_data.get("phone"):
-            duplicate_candidates = duplicate_candidates.filter(phone=form.cleaned_data["phone"])
-        if duplicate_candidates.exists() and request.POST.get("confirm_duplicate") != "yes":
-            messages.warning(request, "Possible matching patient found. Review before creating a separate record.")
-        else:
-            patient = form.save(commit=False)
-            patient.registered_by = request.user
-            patient.is_demo = settings.DEMO_MODE
-            patient.save()
-            audit(request.user, "patient.registered", patient, request=request)
-            messages.success(request, f"Patient {patient.patient_number} registered.")
-            return redirect("patient_detail", pk=patient.pk)
-    return render(request, "hospital/patient_form.html", {"form": form, "duplicates": duplicate_candidates})
-
-
-@role_required(Role.RECEPTION, Role.CLINICIAN, Role.NURSE, Role.OWNER, Role.EYE)
-def patient_detail(request, pk):
-    patient = get_object_or_404(Patient, pk=pk)
-    role = user_role(request.user)
-    audit(request.user, "patient.viewed", patient, request=request)
-    active_encounters, active_links = _worklist_page(
-        request, patient.encounters.exclude(status=Encounter.Status.CLOSED).order_by("-created_at", "-pk"),
-        10, "active_page", "visits",
-    )
-    encounter_history, visit_links = _worklist_page(
-        request, patient.encounters.filter(status=Encounter.Status.CLOSED).order_by("-created_at", "-pk"),
-        20, "visit_page", "visits",
-    )
-    notes = attachments = invoices = None
-    note_links = attachment_links = invoice_links = None
-    if has_capability(role, "view_notes"):
-        notes, note_links = _worklist_page(
-            request,
-            ClinicalNote.objects.filter(encounter__patient=patient)
-            .select_related("author", "parent_note")
-            .order_by("-created_at", "-pk"),
-            20, "note_page", "notes",
-        )
-    if has_capability(role, "view_attachments"):
-        attachments, attachment_links = _worklist_page(
-            request,
-            patient.attachments.select_related("uploaded_by__staff_profile").order_by("-created_at", "-pk"),
-            20, "attachment_page", "attachments",
-        )
-    if has_capability(role, "view_billing"):
-        invoices, invoice_links = _worklist_page(
-            request, with_invoice_financials(patient.invoices.order_by("-created_at", "-pk")),
-            20, "invoice_page", "billing",
-        )
-    return render(request, "hospital/patient_detail.html", {
-        "patient": patient,
-        "invoices": invoices,
-        "invoice_links": invoice_links,
-        "notes": notes,
-        "note_links": note_links,
-        "active_encounters": active_encounters,
-        "active_links": active_links,
-        "encounter_history": encounter_history,
-        "visit_links": visit_links,
-        "attachments": attachments,
-        "attachment_links": attachment_links,
-        "attachment_form": ClinicalAttachmentForm() if has_capability(role, "upload_attachment") else None,
-    })
-
-
-@role_required(Role.OWNER, Role.CLINICIAN, Role.NURSE)
-def patient_attachment_upload(request, pk):
-    if request.method != "POST":
-        raise Http404
-    patient = get_object_or_404(Patient, pk=pk)
-    form = ClinicalAttachmentForm(request.POST, request.FILES)
-    if form.is_valid():
-        attachment = form.save(commit=False)
-        attachment.patient = patient
-        attachment.original_name = Path(attachment.file.name).name[:255]
-        attachment.uploaded_by = request.user
-        attachment.save()
-        audit(request.user, "clinical_attachment.uploaded", attachment, after={"name": attachment.original_name}, request=request)
-        messages.success(request, "Clinical attachment uploaded securely.")
-    else:
-        messages.error(request, " ".join(
-            str(error) for errors in form.errors.values() for error in errors
-        ))
-    return redirect("patient_detail", pk=patient.pk)
-
-
-@role_required(Role.CLINICIAN, Role.NURSE, Role.OWNER)
-def patient_attachment_download(request, pk):
-    attachment = get_object_or_404(ClinicalAttachment.objects.select_related("patient"), pk=pk)
-    content_type = mimetypes.guess_type(attachment.original_name)[0] or "application/octet-stream"
-    attachment.file.open("rb")
-    response = FileResponse(attachment.file, content_type=content_type)
-    response["Content-Disposition"] = content_disposition_header(True, attachment.original_name)
-    response["X-Content-Type-Options"] = "nosniff"
-    audit(request.user, "clinical_attachment.downloaded", attachment, request=request)
-    return response
-
-
-@role_required(Role.OWNER, Role.CLINICIAN, Role.NURSE)
-def patient_access_pdf(request, pk):
-    patient = get_object_or_404(Patient, pk=pk)
-    pdf = build_patient_access_pdf(
-        patient=patient,
-        hospital_name=settings.HOSPITAL_NAME,
-        generated_by=str(request.user.staff_profile),
-    )
-    response = HttpResponse(pdf, content_type="application/pdf")
-    response["Content-Disposition"] = content_disposition_header(
-        True, f"KFBH-patient-record-{patient.patient_number}.pdf"
-    )
-    response["X-Content-Type-Options"] = "nosniff"
-    audit(request.user, "patient.exported_pdf", patient, request=request)
-    return response
-
-
-@role_required(Role.OWNER, Role.RECEPTION, Role.CLINICIAN)
-def encounter_create(request, patient_id):
-    patient = get_object_or_404(Patient, pk=patient_id)
-    form = EncounterForm(request.POST or None)
-    if request.method == "POST" and form.is_valid():
-        encounter = form.save(commit=False)
-        encounter.patient = patient
-        encounter.started_by = request.user
-        encounter.status = Encounter.Status.TRIAGE
-        encounter.save()
-        if encounter.urgency == "emergency":
-            ExceptionRecord.objects.create(category="emergency_override", summary=f"Emergency override for {encounter.encounter_number}", evidence=encounter.emergency_override_reason)
-        audit(request.user, "encounter.started", encounter, request=request)
-        messages.success(request, f"Visit {encounter.encounter_number} started.")
-        return redirect("queue")
-    return render(request, "hospital/encounter_form.html", {"form": form, "patient": patient})
-
-
-#: Clinical priority. Never sort the queue on the raw ``urgency`` string —
-#: alphabetically "routine" precedes "urgent", which pushes urgent patients
-#: below routine ones.
-TRIAGE_RANK = Case(
-    When(urgency="emergency", then=Value(0)),
-    When(urgency="urgent", then=Value(1)),
-    default=Value(2),
-    output_field=IntegerField(),
-)
-
-
-def open_clinical_encounters():
-    active_admissions = Admission.objects.filter(discharged_at__isnull=True).values("encounter_id")
-    return Encounter.objects.exclude(status=Encounter.Status.CLOSED).exclude(pk__in=active_admissions)
-
-
-@role_required(Role.OWNER, Role.RECEPTION, Role.CLINICIAN, Role.NURSE, Role.LAB)
-def queue(request):
-    encounters = (
-        open_clinical_encounters()
-        .select_related("patient", "assigned_clinician")
-        .annotate(triage_rank=TRIAGE_RANK)
-        .order_by("triage_rank", "created_at", "pk")
-    )
-    encounters, queue_links = _worklist_page(request, encounters, 50, "page", "queue-list")
-    return render(request, "hospital/queue.html", {"encounters": encounters, "queue_links": queue_links})
-
-
-@role_required(Role.OWNER, Role.CLINICIAN)
-def encounter_close(request, encounter_id):
-    if request.method != "POST":
-        raise Http404
-    try:
-        encounter = close_encounter(
-            actor=request.user, encounter_id=encounter_id,
-            reason=request.POST.get("reason", ""), request=request,
-        )
-        messages.success(request, f"Encounter {encounter.encounter_number} closed. Any outstanding balance remains visible to reception.")
-    except ValidationError as exc:
-        messages.error(request, _validation_message(exc))
-    return redirect("queue")
-
-
-@role_required(Role.OWNER, Role.CLINICIAN)
-def clinical_note(request, encounter_id):
-    encounter = get_object_or_404(Encounter.objects.select_related("patient"), pk=encounter_id)
-    notes = ClinicalNote.objects.filter(encounter=encounter, author=request.user)
-    draft = notes.filter(status=ClinicalNote.Status.DRAFT).select_related("parent_note").first()
-    latest_signed = notes.filter(status=ClinicalNote.Status.SIGNED).order_by("-version", "-pk").first()
-    parent = draft.parent_note if draft else latest_signed
-    initial = {
-        "expected_revision": draft.revision if draft else 0,
-        "expected_parent_note_id": parent.pk if parent else 0,
-    }
-    if parent and not draft:
-        initial.update({field: getattr(parent, field) for field in (
-            "complaints", "history", "examination", "assessment", "plan", "follow_up",
-        )})
-    form = ClinicalNoteForm(request.POST or None, instance=draft, initial=initial, is_amendment=bool(parent))
-    if request.method == "POST" and form.is_valid():
-        with transaction.atomic():
-            # Serialise note numbering on the encounter. Two tabs can no longer
-            # calculate the same next version and collide on the unique key.
-            locked_encounter = Encounter.objects.select_for_update().get(pk=encounter.pk)
-            current_draft = ClinicalNote.objects.select_for_update().filter(
-                encounter=locked_encounter,
-                author=request.user,
-                status=ClinicalNote.Status.DRAFT,
-            ).first()
-            current_signed = ClinicalNote.objects.filter(
-                encounter=locked_encounter, author=request.user, status=ClinicalNote.Status.SIGNED,
-            ).order_by("-version", "-pk").first()
-            current_parent = current_draft.parent_note if current_draft else current_signed
-            expected_revision = form.cleaned_data["expected_revision"]
-            if expected_revision != (current_draft.revision if current_draft else 0):
-                form.add_error(None, "This note changed in another tab. Reload before saving again.")
-            elif (form.cleaned_data["expected_parent_note_id"] or 0) != (current_parent.pk if current_parent else 0):
-                form.add_error(None, "A signed note changed in another tab. Reload before creating an amendment.")
-            elif current_draft and current_signed and current_draft.parent_note_id != current_signed.pk:
-                form.add_error(None, "A newer signed note exists. Reload before continuing this amendment.")
-            else:
-                locked_form = ClinicalNoteForm(request.POST, instance=current_draft, is_amendment=bool(current_parent))
-                if locked_form.is_valid():
-                    note = locked_form.save(commit=False)
-                    if not note.pk:
-                        note.encounter = locked_encounter
-                        note.author = request.user
-                        note.parent_note = current_parent
-                        note.version = (
-                            ClinicalNote.objects.filter(
-                                encounter=locked_encounter, author=request.user
-                            ).aggregate(v=Max("version"))["v"]
-                            or 0
-                        ) + 1
-                    else:
-                        note.revision = current_draft.revision + 1
-                    note.save()
-                    if request.POST.get("action") == "sign":
-                        note.sign()
-                        if current_parent:
-                            current_parent.status = ClinicalNote.Status.AMENDED
-                            current_parent.save(update_fields=["status", "updated_at"])
-                        if locked_encounter.status != Encounter.Status.CLOSED:
-                            has_pending_tests = ServiceOrder.objects.filter(encounter=locked_encounter).exclude(
-                                status=ServiceOrder.Status.RELEASED
-                            ).exists()
-                            locked_encounter.status = Encounter.Status.TESTS if has_pending_tests else Encounter.Status.PHARMACY
-                            locked_encounter.save(update_fields=["status", "updated_at"])
-                        action = "clinical_note.amended" if current_parent else "clinical_note.signed"
-                        audit(request.user, action, note, reason=note.amendment_reason, request=request)
-                        messages.success(request, "Amendment signed and linked to the original." if current_parent else "Clinical note signed. Future changes require an attributed amendment.")
-                    else:
-                        audit(request.user, "clinical_note.saved", note, request=request)
-                        messages.success(request, "Draft saved on the server.")
-                    return redirect("patient_detail", pk=encounter.patient_id)
-    return render(request, "hospital/clinical_note_form.html", {
-        "form": form, "encounter": encounter, "draft": draft, "parent": parent,
-    })
-
-
-@role_required(Role.OWNER, Role.CLINICIAN)
-def prescription_create(request, encounter_id):
-    encounter = get_object_or_404(Encounter.objects.select_related("patient"), pk=encounter_id)
-    # Accept the original single-line payload as well as the new formset so
-    # bookmarked clients and downtime back-entry tools keep working.
-    legacy_payload = request.method == "POST" and "items-TOTAL_FORMS" not in request.POST
-    form = PrescriptionForm(request.POST or None) if legacy_payload else None
-    formset = PrescriptionFormSet(request.POST or None, prefix="items")
-    is_valid = form.is_valid() if legacy_payload else formset.is_valid()
-    if request.method == "POST" and is_valid:
-        lines = [form.cleaned_data] if legacy_payload else [
-            row.cleaned_data for row in formset
-            if row.cleaned_data and not row.cleaned_data.get("DELETE")
-        ]
-        with transaction.atomic():
-            prescription = Prescription.objects.create(encounter=encounter, prescriber=request.user, signed_at=timezone.now())
-            for line in lines:
-                PrescriptionItem.objects.create(
-                    prescription=prescription,
-                    product=line["product"], strength=line["strength"],
-                    dose=line["dose"], route=line["route"], frequency=line["frequency"],
-                    duration=line["duration"], quantity_base_units=line["quantity_base_units"],
-                    instructions=line["instructions"],
-                )
-            audit(request.user, "prescription.signed", prescription, request=request)
-        messages.success(request, f"Prescription with {len(lines)} item(s) signed and sent to pharmacy for pricing.")
-        return redirect("patient_detail", pk=encounter.patient_id)
-    return render(request, "hospital/prescription_form.html", {"form": form, "formset": formset, "encounter": encounter})
-
-
-@role_required(Role.OWNER, Role.CLINICIAN)
-def service_order_create(request, encounter_id):
-    encounter = get_object_or_404(Encounter.objects.select_related("patient"), pk=encounter_id)
-    form = ServiceOrderForm(request.POST or None)
-    if request.method == "POST" and form.is_valid():
-        order = form.save(commit=False)
-        order.encounter = encounter
-        order.requested_by = request.user
-        order.save()
-        encounter.status = Encounter.Status.TESTS
-        encounter.save(update_fields=["status", "updated_at"])
-        audit(request.user, "service_order.requested", order, request=request)
-        messages.success(request, f"{order.service.name} sent to {order.service.department}.")
-        return redirect("departments")
-    return render(request, "hospital/service_order_form.html", {"form": form, "encounter": encounter})
-
-
-@role_required(Role.OWNER, Role.PHARMACY, Role.RECEPTION)
-def pharmacy_orders(request):
-    orders = PharmacyOrder.objects.select_related("patient", "prepared_by").prefetch_related(
-        Prefetch("invoice", queryset=with_invoice_financials(Invoice.objects.all()))
-    ).order_by("-created_at")[:100]
-    pending_prescriptions = Prescription.objects.filter(status="active", pharmacyorder__isnull=True).select_related("encounter__patient", "prescriber").prefetch_related("items__product") if user_role(request.user) == Role.PHARMACY else []
-    return render(request, "hospital/pharmacy_orders.html", {"orders": orders, "pending_prescriptions": pending_prescriptions})
-
-
-@role_required(Role.OWNER, Role.PHARMACY)
-def pharmacy_prepare_prescription(request, prescription_id):
-    if request.method != "POST":
-        raise Http404
-    prescription = get_object_or_404(Prescription.objects.select_related("encounter__patient").prefetch_related("items__product"), pk=prescription_id, status="active")
-    if PharmacyOrder.objects.filter(prescription=prescription).exists():
-        messages.info(request, "This prescription already has a pharmacy order.")
-        return redirect("pharmacy_orders")
-    try:
-        order = prepare_pharmacy_order(
-            actor=request.user,
-            customer_name=prescription.encounter.patient.full_name,
-            patient=prescription.encounter.patient,
-            encounter=prescription.encounter,
-            prescription=prescription,
-            items=[(item.product, item.quantity_base_units) for item in prescription.items.all()],
-            request=request,
-        )
-        for order_item, prescription_item in zip(order.items.order_by("pk"), prescription.items.order_by("pk")):
-            order_item.prescription_item = prescription_item
-            order_item.save(update_fields=["prescription_item"])
-        messages.success(request, f"Prescription priced as {order.order_number}; reception can now collect payment.")
-        return redirect("pharmacy_order_detail", pk=order.pk)
-    except ValidationError as exc:
-        messages.error(request, _validation_message(exc))
-        return redirect("pharmacy_orders")
-
-
-@role_required(Role.OWNER, Role.PHARMACY)
-def pharmacy_order_create(request):
-    form = PharmacyBasketForm(request.POST or None)
-    if request.method == "POST" and form.is_valid():
-        patient = None
-        if form.cleaned_data["patient_number"]:
-            patient = Patient.objects.filter(patient_number__iexact=form.cleaned_data["patient_number"]).first()
-            if not patient:
-                form.add_error("patient_number", "No patient has that number.")
-        if not form.errors:
-            try:
-                order = prepare_pharmacy_order(
-                    actor=request.user,
-                    customer_name=form.cleaned_data["customer_name"],
-                    patient=patient,
-                    items=[(form.cleaned_data["product"], form.cleaned_data["quantity"])],
-                    request=request,
-                )
-                messages.success(request, f"Basket {order.order_number} sent to reception for payment.")
-                return redirect("pharmacy_order_detail", pk=order.pk)
-            except ValidationError as exc:
-                form.add_error(None, _validation_message(exc))
-    return render(request, "hospital/pharmacy_order_form.html", {"form": form})
-
-
-@role_required(Role.OWNER, Role.PHARMACY, Role.RECEPTION)
-def pharmacy_order_detail(request, pk):
-    order = get_object_or_404(PharmacyOrder.objects.select_related("patient", "invoice", "prepared_by", "dispensed_by"), pk=pk)
-    return render(request, "hospital/pharmacy_order_detail.html", {"order": order})
-
-
-@role_required(Role.OWNER, Role.PHARMACY)
-def pharmacy_dispense(request, pk):
-    if request.method != "POST":
-        raise Http404
-    try:
-        order = dispense_order(actor=request.user, order_id=pk, idempotency_key=request.POST.get("idempotency_key") or str(pk), request=request)
-        messages.success(request, f"{order.order_number} dispensed and stock posted once.")
-    except ValidationError as exc:
-        messages.error(request, _validation_message(exc))
-    return redirect("pharmacy_order_detail", pk=pk)
-
-
-STOCK_VIEWS = {
-    "all": "All stock",
-    "low": "At or below reorder level",
-    "expiring": "Expiring soon",
-    "expired": "Expired",
-    "quarantine": "Quarantined",
-}
-
-
-@role_required(Role.PHARMACY, Role.PROCUREMENT, Role.OWNER, Role.REVIEWER)
-def stock_view(request):
-    """Stock position, valuation and the movements that produced them."""
-    query = request.GET.get("q", "").strip()
-    selected = request.GET.get("view", "all")
-    if selected not in STOCK_VIEWS:
-        selected = "all"
-    days = _period_days(request.GET.get("days", "7"))
-
-    position = stock_position()
-    activity = stock_activity(days)
-
-    products = position["products"]
-    if selected == "low":
-        products = [row for row in products if row["below_reorder"]]
-    elif selected == "expiring":
-        products = [row for row in products if row["has_near_expiry"]]
-    elif selected == "expired":
-        products = [row for row in products if row["has_expired"]]
-    elif selected == "quarantine":
-        quarantined_items = {row["item"].pk for row in position["quarantined"]}
-        products = [row for row in products if row["item"].pk in quarantined_items]
-    if query:
-        needle = query.lower()
-        matching_batch_items = {
-            row["item"].pk for row in position["rows"]
-            if needle in row["batch"].batch_number.lower()
-        }
-        products = [
-            row for row in products
-            if needle in row["item"].name.lower()
-            or needle in row["item"].code.lower()
-            or row["item"].pk in matching_batch_items
-        ]
-
-    batches_by_item = {}
-    for row in position["rows"]:
-        batches_by_item.setdefault(row["item"].pk, []).append(row)
-    for row in products:
-        row["batches"] = batches_by_item.get(row["item"].pk, [])
-
-    movements = StockMovement.objects.select_related(
-        "batch__item", "entered_by__staff_profile"
-    ).order_by("-event_at", "-entered_at")
-    if query:
-        movements = movements.filter(
-            Q(batch__item__name__icontains=query)
-            | Q(batch__item__code__icontains=query)
-            | Q(batch__batch_number__icontains=query)
-        )
-    page = Paginator(movements, 40).get_page(request.GET.get("page"))
-
-    return render(request, "hospital/stock.html", {
-        "position": position,
-        "activity": activity,
-        "products": products,
-        "movements": page,
-        "page": page,
-        "filter_query": _filter_query(q=query, view=selected, days=days),
-        "query": query,
-        "selected_view": selected,
-        "selected_view_label": STOCK_VIEWS[selected],
-        "stock_views": STOCK_VIEWS,
-        "days": days,
-        "can_receive": has_capability(user_role(request.user), "receive_delivery"),
-        "can_count": has_capability(user_role(request.user), "start_stock_count"),
-        "can_dispose": has_capability(user_role(request.user), "review_write_off"),
-        "can_request_write_off": has_capability(user_role(request.user), "request_write_off"),
-    })
-
-
-@role_required(Role.PROCUREMENT, Role.PHARMACY, Role.REVIEWER, Role.OWNER)
-def deliveries(request):
-    """Every delivery received, with its invoice evidence and check status."""
-    receipts = GoodsReceipt.objects.select_related(
-        "purchase_order__supplier", "received_by__staff_profile", "checked_by__staff_profile"
-    ).prefetch_related("lines__order_line__item")
-    awaiting = Paginator(
-        receipts.filter(checked_by__isnull=True).order_by("-delivered_at", "-pk"), 20
-    ).get_page(request.GET.get("check_page"))
-    history = Paginator(
-        receipts.order_by("-delivered_at", "-pk"), 50
-    ).get_page(request.GET.get("history_page"))
-    open_orders = PurchaseOrder.objects.filter(
-        status__in=["approved", "part_received"]
-    ).select_related("supplier").prefetch_related("lines__item").order_by("-created_at")
-    return render(request, "hospital/deliveries.html", {
-        "receipts": history,
-        "awaiting_check": awaiting,
-        "open_orders": open_orders,
-        "summary": receiving_summary(30),
-        "can_receive": has_capability(user_role(request.user), "receive_delivery"),
-    })
-
-
-@role_required(Role.OWNER, Role.PROCUREMENT, Role.PHARMACY)
-def goods_receipt_create(request, pk):
-    """Record what physically arrived and photograph the invoice that came with it."""
-    order = get_object_or_404(
-        PurchaseOrder.objects.select_related("supplier").prefetch_related("lines__item"), pk=pk
-    )
-    if order.status not in {"approved", "part_received"}:
-        messages.error(request, "Only an independently approved order can receive stock.")
-        return redirect("deliveries")
-
-    form = GoodsReceiptForm(request.POST or None, request.FILES or None)
-    lines = GoodsReceiptLineFormSet(request.POST or None, prefix="lines", order=order)
-    if request.method == "POST" and form.is_valid() and lines.is_valid():
-        payload = [
-            {
-                "order_line": row.cleaned_data["order_line"],
-                "quantity_received": row.cleaned_data["quantity_received"],
-                "batch_number": row.cleaned_data["batch_number"],
-                "expiry_date": row.cleaned_data.get("expiry_date"),
-                "actual_unit_cost": row.cleaned_data["actual_unit_cost"],
-            }
-            for row in lines
-            if row.cleaned_data and not row.cleaned_data.get("DELETE")
-        ]
-        delivered_on = form.cleaned_data["delivered_on"]
-        try:
-            receipt = receive_delivery(
-                actor=request.user,
-                purchase_order_id=order.pk,
-                supplier_invoice_reference=form.cleaned_data["supplier_invoice_reference"],
-                invoice_amount=form.cleaned_data["invoice_amount"],
-                invoice_date=form.cleaned_data.get("invoice_date"),
-                invoice_photo=form.cleaned_data["invoice_photo"],
-                lines=payload,
-                delivered_at=timezone.make_aware(
-                    timezone.datetime.combine(delivered_on, timezone.localtime().time())
-                ),
-                request=request,
-            )
-        except ValidationError as exc:
-            messages.error(request, _validation_message(exc))
-        else:
-            messages.success(
-                request,
-                f"{receipt.receipt_number} posted. Stock increased against invoice {receipt.supplier_invoice_reference}; a different member of staff must now check the delivery.",
-            )
-            return redirect("goods_receipt_detail", pk=receipt.pk)
-
-    order_lines = list(order.lines.all())
-    received_so_far = dict(
-        GoodsReceiptLine.objects.filter(order_line__order=order)
-        .values("order_line_id").annotate(total=Sum("quantity_received"))
-        .values_list("order_line_id", "total")
-    )
-    return render(request, "hospital/goods_receipt_form.html", {
-        "form": form,
-        "formset": lines,
-        "order": order,
-        "received_so_far": [
-            (line, received_so_far.get(line.pk, Decimal("0.000")), Decimal(str(line.quantity_base_units)) - received_so_far.get(line.pk, Decimal("0.000")))
-            for line in order_lines
-        ],
-    })
-
-
-@role_required(Role.PROCUREMENT, Role.PHARMACY, Role.REVIEWER, Role.OWNER)
-def goods_receipt_detail(request, pk):
-    receipt = get_object_or_404(
-        GoodsReceipt.objects.select_related(
-            "purchase_order__supplier", "received_by__staff_profile", "checked_by__staff_profile"
-        ).prefetch_related("lines__order_line__item", "lines__batch"),
-        pk=pk,
-    )
-    movements = StockMovement.objects.filter(
-        reference_type="GoodsReceipt", reference_id=str(receipt.pk)
-    ).select_related("batch__item")
-    evidence_name = receipt.invoice_photo_name or (receipt.invoice_photo.name if receipt.invoice_photo else "")
-    return render(request, "hospital/goods_receipt_detail.html", {
-        "receipt": receipt,
-        "movements": movements,
-        "check_form": DeliveryCheckForm(),
-        # A PDF scan cannot be shown inline, so the checker is offered the file.
-        "is_pdf_evidence": evidence_name.lower().endswith(".pdf"),
-        "can_check": (
-            receipt.checked_by_id is None
-            and receipt.received_by_id != request.user.id
-            and user_role(request.user) in {Role.PROCUREMENT, Role.PHARMACY, Role.REVIEWER, Role.OWNER}
-        ),
-    })
-
-
-@role_required(Role.PROCUREMENT, Role.PHARMACY, Role.REVIEWER, Role.OWNER)
-def goods_receipt_invoice(request, pk):
-    """Serve the stored invoice photograph to authorised staff only."""
-    receipt = get_object_or_404(GoodsReceipt, pk=pk)
-    if not receipt.invoice_photo:
-        raise Http404
-    name = receipt.invoice_photo_name or Path(receipt.invoice_photo.name).name
-    content_type = mimetypes.guess_type(name)[0] or "application/octet-stream"
-    receipt.invoice_photo.open("rb")
-    response = FileResponse(receipt.invoice_photo, content_type=content_type)
-    response["Content-Disposition"] = content_disposition_header(False, name)
-    response["X-Content-Type-Options"] = "nosniff"
-    audit(request.user, "goods_receipt.invoice_viewed", receipt, request=request)
-    return response
-
-
-@role_required(Role.PROCUREMENT, Role.PHARMACY, Role.REVIEWER, Role.OWNER)
-def goods_receipt_check(request, pk):
-    if request.method != "POST":
-        raise Http404
-    form = DeliveryCheckForm(request.POST)
-    if not form.is_valid():
-        messages.error(request, "Check notes could not be recorded.")
-        return redirect("goods_receipt_detail", pk=pk)
-    try:
-        receipt = check_delivery(
-            actor=request.user,
-            receipt_id=pk,
-            discrepancy_notes=form.cleaned_data["discrepancy_notes"],
-            request=request,
-        )
-        messages.success(request, f"{receipt.receipt_number} independently checked.")
-    except ValidationError as exc:
-        messages.error(request, _validation_message(exc))
-    return redirect("goods_receipt_detail", pk=pk)
-
-
-@role_required(Role.PHARMACY, Role.PROCUREMENT, Role.REVIEWER, Role.OWNER)
-def stock_counts(request):
-    counts = StockCount.objects.select_related(
-        "counted_by__staff_profile", "reviewed_by__staff_profile"
-    ).prefetch_related("lines__batch__item")
-    return render(request, "hospital/stock_counts.html", {
-        "counts": counts[:40],
-        "open_form": StockCountOpenForm(),
-        "can_open": has_capability(user_role(request.user), "start_stock_count"),
-        "can_review": has_capability(user_role(request.user), "review_stock_count"),
-    })
-
-
-@role_required(Role.OWNER, Role.PHARMACY, Role.PROCUREMENT)
-def stock_count_open(request):
-    if request.method != "POST":
-        raise Http404
-    form = StockCountOpenForm(request.POST)
-    if not form.is_valid():
-        messages.error(request, "Only Pharmacy stock can be counted against this ledger.")
-        return redirect("stock_counts")
-    try:
-        count = open_stock_count(
-            actor=request.user,
-            location=form.cleaned_data["location"],
-            blind_count=form.cleaned_data["blind_count"],
-            notes=form.cleaned_data["notes"],
-            request=request,
-        )
-    except ValidationError as exc:
-        messages.error(request, _validation_message(exc))
-        return redirect("stock_counts")
-    messages.success(request, f"{count.reference} frozen at {timezone.localtime(count.cutoff_at):%H:%M}. Count the shelf and enter what you find.")
-    return redirect("stock_count_detail", pk=count.pk)
-
-
-@role_required(Role.PHARMACY, Role.PROCUREMENT, Role.REVIEWER, Role.OWNER)
-def stock_count_detail(request, pk):
-    count = get_object_or_404(
-        StockCount.objects.select_related("counted_by__staff_profile", "reviewed_by__staff_profile"), pk=pk
-    )
-    lines = list(count.lines.select_related("batch__item").order_by("batch__item__name", "batch__expiry_date"))
-    form_error = ""
-    if request.method == "POST":
-        counted = {}
-        reasons = {}
-        quantity_field = forms.DecimalField(max_digits=14, decimal_places=3, min_value=Decimal("0"))
-        for line in lines:
-            line.submitted_counted = request.POST.get(f"counted-{line.pk}", "")
-            line.submitted_reason = request.POST.get(f"reason-{line.pk}", "")
-            reasons[line.pk] = line.submitted_reason.strip()
-            try:
-                counted[line.pk] = quantity_field.clean(line.submitted_counted)
-            except ValidationError as exc:
-                line.count_error = _validation_message(exc)
-        if any(getattr(line, "count_error", "") for line in lines):
-            form_error = "Correct the marked counts. Your other entries are still here."
-        else:
-            try:
-                submit_stock_count(actor=request.user, count_id=count.pk, counted=counted, reasons=reasons, request=request)
-            except ValidationError as exc:
-                form_error = _validation_message(exc)
-                count.refresh_from_db()
-            else:
-                messages.success(request, f"{count.reference} submitted. A delegated reviewer must approve before any adjustment is posted.")
-                return redirect("stock_count_detail", pk=count.pk)
-
-    role = user_role(request.user)
-    return render(request, "hospital/stock_count_detail.html", {
-        "count": count,
-        "lines": lines,
-        "review_form": StockCountReviewForm(),
-        "can_enter": count.status == StockCount.Status.FROZEN and count.counted_by_id == request.user.id,
-        "can_review": (
-            count.status == StockCount.Status.SUBMITTED
-            and role in {Role.REVIEWER, Role.OWNER}
-            and count.counted_by_id != request.user.id
-        ),
-        "show_expected": not count.blind_count or count.status != StockCount.Status.FROZEN,
-        "form_error": form_error,
-    })
-
-
-@role_required(Role.REVIEWER, Role.OWNER)
-def stock_count_review(request, pk):
-    if request.method != "POST":
-        raise Http404
-    form = StockCountReviewForm(request.POST)
-    notes = form.cleaned_data["review_notes"] if form.is_valid() else ""
-    try:
-        count = review_stock_count(
-            actor=request.user,
-            count_id=pk,
-            approve=request.POST.get("decision") == "approve",
-            review_notes=notes,
-            request=request,
-        )
-    except ValidationError as exc:
-        messages.error(request, _validation_message(exc))
-    else:
-        if count.status == StockCount.Status.APPROVED:
-            messages.success(request, f"{count.reference} approved. Adjustment movements posted for every variance.")
-        else:
-            messages.success(request, f"{count.reference} rejected. No stock balance was changed.")
-    return redirect("stock_count_detail", pk=pk)
 
 
 @role_required(Role.OWNER, Role.REVIEWER)
@@ -1346,112 +580,6 @@ def settings_view(request):
     return render(request, "hospital/settings.html", {"settings_rows": settings_rows})
 
 
-@role_required(Role.PROCUREMENT, Role.REVIEWER, Role.OWNER)
-def supplier_changes(request):
-    suppliers = Supplier.objects.order_by("name")
-    changes = SupplierChangeRequest.objects.select_related(
-        "supplier", "requested_by", "reviewed_by",
-    ).order_by("-created_at")[:100]
-    return render(request, "hospital/supplier_changes.html", {
-        "suppliers": suppliers, "changes": changes,
-    })
-
-
-@role_required(Role.PROCUREMENT, Role.OWNER)
-def supplier_change_request(request, pk):
-    supplier = get_object_or_404(Supplier, pk=pk)
-    form = SupplierChangeForm(request.POST or None, initial={
-        "proposed_name": supplier.name,
-        "proposed_phone": supplier.phone,
-        "proposed_payment_details": supplier.payment_details,
-        "proposed_active": supplier.active,
-    })
-    if request.method == "POST" and form.is_valid():
-        try:
-            request_supplier_change(actor=request.user, supplier_id=pk, request=request, **form.cleaned_data)
-        except ValidationError as exc:
-            form.add_error(None, _validation_message(exc))
-        else:
-            messages.success(request, "Supplier change sent for independent review.")
-            return redirect("supplier_changes")
-    return render(request, "hospital/supplier_change_form.html", {"supplier": supplier, "form": form})
-
-
-@role_required(Role.REVIEWER, Role.OWNER)
-def supplier_change_review(request, pk):
-    if request.method != "POST":
-        raise Http404
-    get_object_or_404(SupplierChangeRequest, pk=pk)
-    try:
-        decision = request.POST.get("decision")
-        if decision not in {"approve", "reject"}:
-            raise ValidationError("Choose a valid review decision.")
-        review_supplier_change(actor=request.user, change_id=pk, approve=decision == "approve", request=request)
-        messages.success(request, "Supplier change reviewed.")
-    except ValidationError as exc:
-        messages.error(request, _validation_message(exc))
-    return redirect("supplier_changes")
-
-
-@role_required(Role.PROCUREMENT, Role.REVIEWER, Role.OWNER)
-def purchasing(request):
-    # The template prints both staff profiles per row; without them on the
-    # select_related chain that is two extra queries for every purchase order.
-    orders = PurchaseOrder.objects.select_related(
-        "supplier", "requested_by__staff_profile", "approved_by__staff_profile"
-    ).prefetch_related("lines__item", "receipts")
-    active, active_links = _worklist_page(
-        request, orders.filter(status__in=["requested", "approved", "part_received"])
-        .order_by("-created_at", "-pk"), 30, "active_page", "active-orders",
-    )
-    history, history_links = _worklist_page(
-        request, orders.filter(status__in=["received", "cancelled"])
-        .order_by("-created_at", "-pk"), 30, "history_page", "order-history",
-    )
-    return render(request, "hospital/purchasing.html", {
-        "orders": active, "active_links": active_links,
-        "history": history, "history_links": history_links,
-    })
-
-
-@role_required(Role.OWNER, Role.PROCUREMENT)
-def purchase_order_create(request):
-    form = PurchaseOrderForm(request.POST or None)
-    lines = PurchaseOrderLineFormSet(request.POST or None, prefix="lines")
-    if request.method == "POST" and form.is_valid() and lines.is_valid():
-        line_data = [
-            row.cleaned_data for row in lines
-            if row.cleaned_data and not row.cleaned_data.get("DELETE")
-        ]
-        with transaction.atomic():
-            order = form.save(commit=False)
-            order.requested_by = request.user
-            order.save()
-            for line in line_data:
-                PurchaseOrderLine.objects.create(
-                    order=order,
-                    item=line["product"],
-                    quantity_base_units=line["quantity_base_units"],
-                    quoted_unit_cost=line["quoted_unit_cost"],
-                )
-            audit(request.user, "purchase_order.requested", order, request=request)
-        messages.success(request, f"Purchase request {order.order_number} with {len(line_data)} line(s) submitted for independent review.")
-        return redirect("purchasing")
-    return render(request, "hospital/purchase_order_form.html", {"form": form, "formset": lines})
-
-
-@role_required(Role.REVIEWER, Role.OWNER)
-def purchase_order_approve(request, pk):
-    if request.method != "POST":
-        raise Http404
-    try:
-        order = approve_purchase_order(actor=request.user, order_id=pk, request=request)
-        messages.success(request, f"{order.order_number} approved independently.")
-    except ValidationError as exc:
-        messages.error(request, _validation_message(exc))
-    return redirect("purchasing")
-
-
 @login_required
 def screen_lock(request):
     profile = request.user.staff_profile
@@ -1502,196 +630,6 @@ class ThrottledLoginView(LoginView):
             context["lockout_minutes"] = LoginAttempt.LOCKOUT_WINDOW_MINUTES
             return self.render_to_response(context, status=429)
         return super().post(request, *args, **kwargs)
-
-
-@role_required(Role.PHARMACY, Role.NURSE, Role.CLINICIAN, Role.PROCUREMENT, Role.OWNER, Role.REVIEWER)
-def custody(request):
-    """Stock that left the pharmacy and has not yet been accounted for."""
-    position = departmental_custody()
-    issues = DepartmentIssue.objects.select_related("patient", "issued_by__staff_profile")
-    outstanding, outstanding_links = _worklist_page(
-        request,
-        issues.filter(status=DepartmentIssue.Status.OUTSTANDING)
-        .prefetch_related("lines__batch__item").order_by("issued_at", "pk"),
-        40, "outstanding_page", "outstanding-issues",
-    )
-    settled, settled_links = _worklist_page(
-        request, issues.filter(status=DepartmentIssue.Status.SETTLED).order_by("-issued_at", "-pk"),
-        15, "settled_page", "settled-issues",
-    )
-    role = user_role(request.user)
-    return render(request, "hospital/custody.html", {
-        "position": position,
-        "outstanding": outstanding,
-        "outstanding_links": outstanding_links,
-        "settled": settled,
-        "settled_links": settled_links,
-        "can_issue": role == Role.PHARMACY,
-        "can_account": role in {Role.NURSE, Role.CLINICIAN, Role.PHARMACY},
-    })
-
-
-@role_required(Role.OWNER, Role.PHARMACY)
-def custody_issue(request):
-    form = DepartmentIssueForm(request.POST or None)
-    lines = DepartmentIssueLineFormSet(request.POST or None, prefix="lines")
-    if request.method == "POST" and form.is_valid() and lines.is_valid():
-        patient = None
-        number = form.cleaned_data.get("patient_number", "").strip()
-        if number:
-            patient = Patient.objects.filter(patient_number__iexact=number).first()
-            if not patient:
-                form.add_error("patient_number", "No patient carries that number.")
-        if not form.errors:
-            payload = [
-                {"batch": row.cleaned_data["batch"], "quantity": row.cleaned_data["quantity"]}
-                for row in lines
-                if row.cleaned_data and not row.cleaned_data.get("DELETE")
-            ]
-            try:
-                issue = issue_to_department(
-                    actor=request.user,
-                    department=form.cleaned_data["department"],
-                    received_by_name=form.cleaned_data["received_by_name"],
-                    kind=form.cleaned_data["kind"],
-                    patient=patient,
-                    notes=form.cleaned_data["notes"],
-                    lines=payload,
-                    request=request,
-                )
-            except ValidationError as exc:
-                messages.error(request, _validation_message(exc))
-            else:
-                messages.success(
-                    request,
-                    f"{issue.reference} issued to {issue.department}. It stays outstanding until {issue.received_by_name} accounts for it.",
-                )
-                return redirect("custody")
-    return render(request, "hospital/custody_issue_form.html", {"form": form, "formset": lines})
-
-
-@role_required(Role.OWNER, Role.NURSE, Role.CLINICIAN, Role.PHARMACY)
-def custody_account(request, pk):
-    issue = get_object_or_404(
-        DepartmentIssue.objects.select_related("patient").prefetch_related("lines__batch__item"), pk=pk
-    )
-    if request.method == "POST":
-        outcomes = {}
-        for line in issue.lines.all():
-            def amount(prefix):
-                raw = request.POST.get(f"{prefix}-{line.pk}", "").strip()
-                return Decimal(raw) if raw else Decimal("0")
-            try:
-                outcomes[line.pk] = {
-                    "consumed": amount("consumed"),
-                    "returned": amount("returned"),
-                    "wasted": amount("wasted"),
-                }
-            except (ArithmeticError, ValueError):
-                messages.error(request, f"{line.batch.item.name}: enter numbers only.")
-                outcomes = None
-                break
-        if outcomes is not None:
-            try:
-                issue = account_for_issue(actor=request.user, issue_id=issue.pk, outcomes=outcomes, request=request)
-            except ValidationError as exc:
-                messages.error(request, _validation_message(exc))
-            else:
-                if issue.status == DepartmentIssue.Status.SETTLED:
-                    messages.success(request, f"{issue.reference} is fully accounted for.")
-                else:
-                    messages.success(
-                        request,
-                        f"{issue.reference} updated. {issue.outstanding_quantity} units remain in departmental custody.",
-                    )
-                return redirect("custody")
-    return render(request, "hospital/custody_account_form.html", {"issue": issue})
-
-
-@role_required(Role.PHARMACY, Role.PROCUREMENT, Role.REVIEWER, Role.OWNER)
-def write_offs(request):
-    records = StockWriteOff.objects.select_related(
-        "batch__item", "requested_by__staff_profile", "reviewed_by__staff_profile"
-    )
-    role = user_role(request.user)
-    return render(request, "hospital/write_offs.html", {
-        "pending": records.filter(status=StockWriteOff.Status.PENDING),
-        "decided": records.exclude(status=StockWriteOff.Status.PENDING)[:25],
-        "form": WriteOffRequestForm() if has_capability(role, "request_write_off") else None,
-        "review_form": WriteOffReviewForm(),
-        "can_request": has_capability(role, "request_write_off"),
-        "can_review": has_capability(role, "review_write_off"),
-        "expired": stock_position()["expired"],
-    })
-
-
-@role_required(Role.OWNER, Role.PHARMACY, Role.PROCUREMENT)
-def write_off_request(request):
-    if request.method != "POST":
-        raise Http404
-    form = WriteOffRequestForm(request.POST)
-    if not form.is_valid():
-        messages.error(request, " ".join(error for errors in form.errors.values() for error in errors))
-        return redirect("write_offs")
-    try:
-        write_off = request_write_off(
-            actor=request.user,
-            batch_id=form.cleaned_data["batch"].pk,
-            quantity=form.cleaned_data["quantity"],
-            reason=form.cleaned_data["reason"],
-            narrative=form.cleaned_data["narrative"],
-            request=request,
-        )
-        messages.success(
-            request,
-            f"{write_off.reference} proposed for KES {write_off.value_at_cost:,.2f}. Stock stays on the balance until a reviewer approves it.",
-        )
-    except ValidationError as exc:
-        messages.error(request, _validation_message(exc))
-    return redirect("write_offs")
-
-
-@role_required(Role.REVIEWER, Role.OWNER)
-def write_off_review(request, pk):
-    if request.method != "POST":
-        raise Http404
-    form = WriteOffReviewForm(request.POST)
-    notes = form.cleaned_data["review_notes"] if form.is_valid() else ""
-    try:
-        write_off = review_write_off(
-            actor=request.user,
-            write_off_id=pk,
-            approve=request.POST.get("decision") == "approve",
-            review_notes=notes,
-            request=request,
-        )
-    except ValidationError as exc:
-        messages.error(request, _validation_message(exc))
-    else:
-        if write_off.status == StockWriteOff.Status.APPROVED:
-            messages.success(request, f"{write_off.reference} approved; KES {write_off.value_at_cost:,.2f} removed from stock.")
-        else:
-            messages.success(request, f"{write_off.reference} rejected. No balance changed.")
-    return redirect("write_offs")
-
-
-@role_required(Role.REVIEWER, Role.OWNER)
-def batch_disposition(request, pk):
-    if request.method != "POST":
-        raise Http404
-    form = BatchDispositionForm(request.POST)
-    if not form.is_valid():
-        messages.error(request, "Record a disposition and the reason for it.")
-        return redirect("stock")
-    try:
-        batch = set_batch_disposition(
-            actor=request.user, batch_id=pk,
-            status=form.cleaned_data["status"], reason=form.cleaned_data["reason"], request=request,
-        )
-        messages.success(request, f"{batch.item.name} batch {batch.batch_number} is now {batch.get_status_display().lower()}.")
-    except ValidationError as exc:
-        messages.error(request, _validation_message(exc))
-    return redirect("stock")
 
 
 @role_required(Role.OWNER, Role.REVIEWER, Role.PROCUREMENT)

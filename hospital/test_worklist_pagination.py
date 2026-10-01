@@ -24,7 +24,7 @@ from .models import (
     StockBatch,
     Supplier,
 )
-from .tests import HospitalFixtureMixin
+from .test_support import HospitalFixtureMixin
 
 
 @override_settings(PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])

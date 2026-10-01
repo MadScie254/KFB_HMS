@@ -31,8 +31,8 @@ The walk-in sale and outpatient registration/note/service-request/payment/dispen
 
 | Area | Status | Evidence / boundary |
 |---|---|---|
-| Clinical chart | Working core | Locked note numbering prevents concurrent version collisions, prescriptions accept multiple items, protected attachments are authenticated, and access-record PDFs are available. Replacement and amendment UI remain. |
-| Laboratory / imaging | Working core | Request, in-progress/review/release states and authored results. The requester cannot release their own result. Amendments and charge automation remain. |
+| Clinical chart | Working core | Locked note numbering prevents concurrent version collisions, prescriptions accept multiple items, protected attachments are authenticated, and access-record PDFs are available. Signed note amendments are linked to their originals and require a reason; prescription replacement UI remains. |
+| Laboratory / imaging | Working core | Request, in-progress/review/release states and authored results. The requester cannot release their own result. Release posts one approved-price service charge; result amendment workflow remains unavailable. |
 | Inpatient | Admission and discharge workflow | Configurable beds, admission and discharge screens are available. `MedicationAdministration`, `NursingHandover` and `BedTransfer` are retained schema only: there is no recording or review screen for them. Detailed nursing, transfer and observation workflows remain unavailable. |
 | Maternity / dental / theatre | Reserved schema | `MaternityRecord`, `NewbornLink`, `DentalRecord` and `TheatreCase` have no application writer or reader. Clinician-reviewed templates and guided workflows are required before use; no clinical thresholds or advice are invented. |
 | Eye clinic | Working core | Waiting list/session display, unique patients vs eyes, package price snapshot, completion service and one case payable. `EyePackageItem` is retained schema only: package contents are not charged, dispensed or deducted from stock. Full session edit screens remain unavailable. |
@@ -72,7 +72,7 @@ These are modelled but still have no screen, and are not claimed as working:
 
 The hosted workflow has never completed a run. Every GitHub Actions run in this repository, including those predating the stock-control work, fails within one to five seconds with no runner assigned and empty check output, because the account is billing-locked. No commit can change that; the billing hold has to be cleared by a repository admin.
 
-Until it is, `scripts/checks.sh` reproduces the workflow's demo job: Ruff, the test suite, a migrations-match-models check and Django's deployment check. The separate PostgreSQL job runs the database-specific race and audit-trigger tests; [README.md](../README.md#checks) shows how to reproduce it on a disposable database. A test checks that the demo and CI check lists stay aligned.
+Until it is, `scripts/checks.sh` reproduces the workflow's demo job: Ruff, the test suite, a migrations-match-models check and Django's deployment check. The separate PostgreSQL job runs the database-specific race and audit-trigger tests; [README.md](../README.md#checks) shows how to reproduce it on a disposable database. A test runs the local script with a probe interpreter and compares its commands and environment settings with the CI demo job.
 
 ## Acceptance checks executed
 

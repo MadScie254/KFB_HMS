@@ -81,11 +81,13 @@
   </section>
   {% endif %}
 
+  {% if show_exceptions %}
   {# Full width: a single-column panel here left two empty columns beside it. #}
   <section class="panel span-all">
-    <div class="panel-head"><div><p class="eyebrow">Review, not accusation</p><h2>Exceptions</h2></div>{% if 'exceptions' in allowed_navigation %}<a href="{% url 'exceptions' %}">Open centre</a>{% endif %}</div>
+    <div class="panel-head"><div><p class="eyebrow">Review, not accusation</p><h2>Exceptions</h2></div><a href="{% url 'exceptions' %}">Open centre</a></div>
     {% if exceptions %}<ul class="exception-list columned">{% for item in exceptions %}<li><span class="severity {{ item.severity }}">{{ item.get_severity_display }}</span><div><strong>{{ item.summary }}</strong><small>{{ item.created_at|timesince }} ago</small></div></li>{% endfor %}</ul>{% else %}<div class="empty compact"><strong>No unresolved exceptions.</strong><p>Discrepancies will appear here for review.</p></div>{% endif %}
   </section>
+  {% endif %}
 </div>
 {% endblock %}
 
