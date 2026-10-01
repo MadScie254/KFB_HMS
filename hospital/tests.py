@@ -3419,12 +3419,14 @@ class OwnerVisibilityTests(HospitalFixtureMixin, TestCase):
     those rules are deliberately untouched by the wider navigation.
     """
 
-    views_source = Path(settings.BASE_DIR) / "hospital" / "views.py"
+    views_directory = Path(settings.BASE_DIR) / "hospital"
 
     def role_protected_views(self):
-        source = self.views_source.read_text()
         pattern = re.compile(r"@role_required\(([^)]*)\)\s*\ndef (\w+)\(", re.S)
-        return {fn: roles for roles, fn in pattern.findall(source)}
+        protected = {}
+        for path in self.views_directory.glob("*views.py"):
+            protected.update({fn: roles for roles, fn in pattern.findall(path.read_text())})
+        return protected
 
     def test_no_role_protected_view_excludes_the_owner(self):
         missing = [fn for fn, roles in self.role_protected_views().items() if "Role.OWNER" not in roles]

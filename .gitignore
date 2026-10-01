@@ -6,7 +6,6 @@ logs/
 media/
 *.log
 .env
-media/
 staticfiles/
 backups/
 .sites-runtime/

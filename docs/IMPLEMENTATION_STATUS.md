@@ -72,7 +72,7 @@ These are modelled but still have no screen, and are not claimed as working:
 
 The hosted workflow has never completed a run. Every GitHub Actions run in this repository, including those predating the stock-control work, fails within one to five seconds with no runner assigned and empty check output, because the account is billing-locked. No commit can change that; the billing hold has to be cleared by a repository admin.
 
-Until it is, `scripts/checks.sh` runs exactly what the workflow runs — ruff, the test suite, a migrations-match-models check and Django's deployment check — and a test fails if the script and the workflow drift apart.
+Until it is, `scripts/checks.sh` reproduces the workflow's demo job: Ruff, the test suite, a migrations-match-models check and Django's deployment check. The separate PostgreSQL job runs the database-specific race and audit-trigger tests; [README.md](../README.md#checks) shows how to reproduce it on a disposable database. A test checks that the demo and CI check lists stay aligned.
 
 ## Acceptance checks executed
 

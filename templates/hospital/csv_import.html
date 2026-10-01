@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load static %}
 {% block title %}CSV imports{% endblock %}
 {% block content %}
 <div class="page-heading">
@@ -12,7 +13,7 @@
   </form>
   <aside class="panel">
     <h2>Download templates</h2><p>Choose the template matching the import type. Spreadsheet formulas are not evaluated.</p>
-    <ul class="plain-list"><li><a href="/static/csv/products_template.csv">Products and prices</a></li><li><a href="/static/csv/patients_template.csv">Patients</a></li><li><a href="/static/csv/opening_stock_template.csv">Witnessed opening stock</a></li><li><a href="/static/csv/opening_receivables_template.csv">Reviewed opening receivables</a></li></ul>
+    <ul class="plain-list"><li><a href="{% static 'csv/products_template.csv' %}">Products and prices</a></li><li><a href="{% static 'csv/patients_template.csv' %}">Patients</a></li><li><a href="{% static 'csv/opening_stock_template.csv' %}">Witnessed opening stock</a></li><li><a href="{% static 'csv/opening_receivables_template.csv' %}">Reviewed opening receivables</a></li></ul>
     <p class="help-text">Maximum 5,000 data rows. Check the source CSV before committing; the dry run checks structure and current references.</p>
   </aside>
   {% if preview_job %}

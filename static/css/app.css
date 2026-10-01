@@ -180,9 +180,6 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .status-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 4px var(--success-bg); }
 .topbar-actions { display: flex; align-items: center; gap: .9rem; }
 .shift-chip { font-size: .78rem; padding: .35rem .55rem; border: 1px solid var(--line); border-radius: 99px; color: var(--muted); }
-.user-chip strong, .user-chip small { display: block; line-height: 1.25; text-align: right; }
-.user-chip strong { font-size: .87rem; }.user-chip small { color: var(--muted); font-size: .73rem; }
-.quiet-link, .quiet-button { border: 0; background: none; color: var(--navy); padding: .45rem; font-size: .82rem; cursor: pointer; }
 .inline-form { display: inline; margin: 0; }
 .menu-button { display: none; }
 .demo-banner { background: #ffe8a3; color: #593800; padding: .48rem 2rem; border-bottom: 1px solid #e1bc54; font-size: .84rem; }
@@ -206,14 +203,14 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .button.ghost { color: var(--navy); background: transparent; border-color: var(--line); }
 .button.small { min-height: 36px; padding: .4rem .65rem; font-size: .8rem; }
 .button.full { width: 100%; margin-top: .9rem; }.button.disabled { background: var(--button-disabled-bg); color: var(--button-disabled-ink); border-color: var(--button-disabled-line); cursor: not-allowed; }
-.kpi-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: .8rem; margin-bottom: 1.25rem; }
+.kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: .8rem; margin-bottom: 1.25rem; }
 .kpi { position: relative; min-height: 128px; padding: 1rem; display: flex; flex-direction: column; justify-content: space-between; background: var(--surface); border: 1px solid var(--line); border-top: 4px solid var(--teal); border-radius: var(--radius); color: var(--ink); text-decoration: none; box-shadow: var(--shadow); }
 .kpi span { color: var(--muted); font-size: .8rem; font-weight: 700; }.kpi strong { color: var(--navy); font-size: clamp(1.2rem, 2vw, 1.65rem); }.kpi small { color: var(--muted); font-size: .72rem; }.kpi.warning { border-top-color: #bf7300; }.kpi.unavailable { border-top-color: #75808f; }
-.compact-grid { grid-template-columns: repeat(3, minmax(0,1fr)); max-width: 900px; }
-.task-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .8rem; margin-bottom: 1.25rem; }
+.compact-grid { max-width: 900px; }
+.task-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .8rem; margin-bottom: 1.25rem; }
 .task-card { min-height: 135px; display: grid; grid-template-columns: 36px 1fr; grid-template-rows: auto auto; align-content: center; gap: .2rem .7rem; padding: 1rem; color: var(--ink); text-decoration: none; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); }
 .task-card > span { grid-row: 1 / 3; width: 34px; height: 34px; display: grid; place-items: center; border-radius: 7px; background: #e4f2f3; color: var(--teal-dark); font-weight: 800; }.task-card strong { color: var(--navy); font-size: 1.05rem; }.task-card small { color: var(--muted); }.task-card.primary-task { background: var(--navy); border-color: var(--navy); }.task-card.primary-task strong, .task-card.primary-task small { color: #fff; }.task-card.primary-task > span { background: var(--teal); color: #fff; }.task-card.attention { border-color: #d89a2d; background: #fffbf1; }
-.content-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 1rem; margin-bottom: 1rem; }.span-2 { grid-column: span 2; }
+.content-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); align-items: start; gap: 1rem; margin-bottom: 1rem; }.span-2 { grid-column: span 2; }
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 1rem; min-width: 0; }
 .panel-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; margin-bottom: .85rem; }.panel h2, .panel-head h2 { color: var(--navy); font-size: 1.06rem; margin: 0; }.panel-head > span { color: var(--muted); font-size: .78rem; }.panel-head a { font-size: .82rem; font-weight: 700; }
 .table-wrap { overflow-x: auto; margin: 0 -.25rem; }.table-wrap table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: .87rem; }.table-wrap th { position: sticky; top: 0; z-index: 1; padding: .7rem; text-align: left; color: #546071; background: var(--surface-header); border-bottom: 1px solid var(--line); font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }.table-wrap td { padding: .75rem .7rem; border-bottom: 1px solid var(--row-rule); vertical-align: middle; }.table-wrap tr:last-child td { border-bottom: 0; }.table-wrap td small, .table-wrap td a small { display: block; color: var(--muted); margin-top: .15rem; }.table-wrap td.numeric, th.numeric { text-align: right; font-variant-numeric: tabular-nums; }
@@ -232,9 +229,9 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .downtime-pages { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 1rem; }.paper-form { min-height: 520px; padding: 1.4rem; background: var(--surface); border: 2px solid #1f2937; color: #111; break-inside: avoid; }.paper-form header { display: grid; gap: .25rem; padding-bottom: .7rem; border-bottom: 2px solid #111; }.paper-form header span { font-size: 1.2rem; font-weight: 800; }.paper-form header em { font-style: normal; }.paper-lines { display: grid; gap: 1.1rem; margin: 1.5rem 0; }.paper-form footer { margin-top: 2rem; padding-top: .7rem; border-top: 1px solid #111; font-size: .8rem; }
 .visually-hidden { position: absolute!important; width: 1px!important; height: 1px!important; padding: 0!important; margin: -1px!important; overflow: hidden!important; clip: rect(0,0,0,0)!important; white-space: nowrap!important; border: 0!important; }
 
-@media (max-width: 1080px) { .kpi-grid { grid-template-columns: repeat(3,minmax(0,1fr)); }.task-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }.content-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }.span-2 { grid-column: span 2; }.ward-grid { grid-template-columns: 1fr; } }
+@media (max-width: 1080px) { .ward-grid { grid-template-columns: 1fr; } }
 @media (max-width: 780px) {
-  .app-shell { grid-template-columns: 1fr; }.sidebar { position: fixed; left: -270px; width: 250px; transition: left .2s ease; box-shadow: 12px 0 30px rgba(0,0,0,.25); }.sidebar.open { left: 0; }.menu-button { display: inline-flex; min-height: 40px; align-items: center; border: 1px solid var(--line); background: var(--surface); border-radius: 6px; padding: 0 .7rem; }.topbar { padding: .65rem 1rem; }.connection span:not(.status-dot), .connection small, .shift-chip { display: none; }.topbar-actions { gap: .4rem; }.user-chip { display: none; }.content { padding: 1.2rem 1rem 2.5rem; }.demo-banner { padding: .5rem 1rem; }.page-heading { align-items: flex-start; flex-direction: column; }.page-heading .actions { width: 100%; }.page-heading .actions .button { flex: 1; }.kpi-grid, .compact-grid, .task-grid, .content-grid, .form-grid, .downtime-pages { grid-template-columns: 1fr; }.span-2 { grid-column: auto; }.kpi { min-height: 112px; }.patient-banner { grid-template-columns: 1fr; }.allergy { min-width: 0; }.bed-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }.login-shell { grid-template-columns: 1fr; }.login-context { display: none; }.login-panel { padding: 2rem 1.25rem; }.receipt { padding: 1.2rem; }.form-actions { flex-wrap: wrap; }.form-actions .button { flex: 1; }.quiet-link { display: none; }
+  .app-shell { grid-template-columns: 1fr; }.sidebar { position: fixed; left: -270px; width: 250px; transition: left .2s ease; box-shadow: 12px 0 30px rgba(0,0,0,.25); }.sidebar.open { left: 0; }.menu-button { display: inline-flex; min-height: 40px; align-items: center; border: 1px solid var(--line); background: var(--surface); border-radius: 6px; padding: 0 .7rem; }.topbar { padding: .65rem 1rem; }.connection span:not(.status-dot), .connection small, .shift-chip { display: none; }.topbar-actions { gap: .4rem; }.content { padding: 1.2rem 1rem 2.5rem; }.demo-banner { padding: .5rem 1rem; }.page-heading { align-items: flex-start; flex-direction: column; }.page-heading .actions { width: 100%; }.page-heading .actions .button { flex: 1; }.form-grid, .downtime-pages { grid-template-columns: 1fr; }.kpi { min-height: 112px; }.patient-banner { grid-template-columns: 1fr; }.allergy { min-width: 0; }.bed-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }.login-shell { grid-template-columns: 1fr; }.login-context { display: none; }.login-panel { padding: 2rem 1.25rem; }.receipt { padding: 1.2rem; }.form-actions { flex-wrap: wrap; }.form-actions .button { flex: 1; }
 }
 @media print {
   .sidebar, .topbar, .demo-banner, .messages, .no-print, .receipt-actions { display: none!important; }.app-shell { display: block; }.content { max-width: none; padding: 0; }.workspace { display: block; }.receipt { box-shadow: none; border: 0; }.downtime-pages { display: block; }.paper-form { page-break-after: always; min-height: 95vh; }.paper-form:last-child { page-break-after: auto; }
@@ -327,16 +324,8 @@ a.kpi:hover { border-color: #9eb7c1; box-shadow: 0 10px 28px rgba(20, 45, 78, .1
    Layout corrections and the interaction layer added 20 Sep 2026
    ============================================================ */
 
-/* A fixed five-column KPI grid stranded a sixth card alone on its own row with
-   four empty columns beside it. Letting the track count follow the width keeps
-   every row full at any count. */
-.kpi-grid { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
-.task-grid { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
-
-/* Quantity queries. auto-fit picks a column count from the width alone, so six
-   cards in a five-column row still strand the sixth on its own with four empty
-   columns beside it. Choosing the count from how many cards there actually are
-   keeps every row full: six become two rows of three, eight two rows of four. */
+/* Choose the track count from the card count at desktop widths: six cards make
+   two rows of three and eight cards make two rows of four. */
 @media (min-width: 1000px) {
   .kpi-grid:has(> :nth-child(4):last-child),
   .kpi-grid:has(> :nth-child(8):last-child) { grid-template-columns: repeat(4, minmax(0, 1fr)); }
@@ -347,23 +336,13 @@ a.kpi:hover { border-color: #9eb7c1; box-shadow: 0 10px 28px rgba(20, 45, 78, .1
   .task-grid:has(> :nth-child(8):last-child) { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
 
-/* Panels sit in a 3-column grid; a single-column panel left two columns of
-   nothing beside it. Panels now flow and fill. */
-/* Explicit tracks at desktop width. With repeat(auto-fit, ...) the collapsed
-   empty tracks make `grid-column: 1 / -1` span a single column instead of the
-   row, so a panel asking for the full width silently gets one third of it. */
-.content-grid { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); align-items: start; }
-@media (min-width: 1100px) {
-  .content-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .span-2 { grid-column: span 2; }
-}
+/* Explicit tracks keep full-width panels spanning the intended columns. */
 @media (min-width: 720px) and (max-width: 1099px) {
   .content-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .span-2 { grid-column: span 2; }
 }
 @media (max-width: 719px) {
   .content-grid { grid-template-columns: 1fr; }
-  .span-2, .span-all { grid-column: auto; }
+  .span-2 { grid-column: auto; }
 }
 
 /* An empty panel should be quiet, not a tall hollow box. */
@@ -420,7 +399,7 @@ th[data-sortable]:focus-visible { outline: 3px solid var(--focus-ring); outline-
   }
   .table-wrap.stacked td:empty { display: none; }
   .table-wrap.stacked tfoot td { grid-template-columns: 1fr; }
-  .table-wrap { overflow-x: visible; }
+  .table-wrap.stacked { overflow-x: visible; }
 }
 
 /* ---- Topbar identity on a phone -------------------------------------------
@@ -442,7 +421,7 @@ th[data-sortable]:focus-visible { outline: 3px solid var(--focus-ring); outline-
   position: fixed; inset: 0; z-index: 200; display: none;
   padding: 10vh 1rem 1rem; background: var(--scrim);
 }
-.palette-backdrop[open], .palette-backdrop.is-open { display: block; }
+.palette-backdrop.is-open { display: block; }
 .palette {
   max-width: 640px; margin: 0 auto; background: var(--surface);
   border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 24px 60px rgba(0,0,0,.35);

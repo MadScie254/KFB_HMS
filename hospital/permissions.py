@@ -1,9 +1,7 @@
 from functools import wraps
 
-from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import ObjectDoesNotExist, PermissionDenied
-from django.shortcuts import redirect
 
 from .models import Role
 
@@ -33,18 +31,6 @@ def role_required(*allowed_roles):
         return wrapped
 
     return decorator
-
-
-def unlocked_required(view):
-    @login_required
-    @wraps(view)
-    def wrapped(request, *args, **kwargs):
-        if getattr(request.user.staff_profile, "locked_at", None):
-            messages.warning(request, "Unlock your screen to continue.")
-            return redirect("screen_unlock")
-        return view(request, *args, **kwargs)
-
-    return wrapped
 
 
 # Navigation and visible actions use the same role capabilities. Service-layer

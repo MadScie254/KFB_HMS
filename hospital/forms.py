@@ -78,9 +78,6 @@ class SeparatorTolerantMixin:
 
     GROUPED_FIELDS = (forms.DecimalField, forms.IntegerField, forms.FloatField)
 
-    def clean(self):
-        return super().clean()
-
     def _clean_fields(self):
         for name, field in self.fields.items():
             if not isinstance(field, self.GROUPED_FIELDS):

@@ -325,19 +325,6 @@ class StockBatch(TimeStampedModel):
     def is_expired(self):
         return bool(self.expiry_date) and self.expiry_date < timezone.localdate()
 
-    def days_to_expiry(self):
-        if not self.expiry_date:
-            return None
-        return (self.expiry_date - timezone.localdate()).days
-
-    def balance_at(self, cutoff):
-        """Ledger balance as at a cutoff, by actual event time.
-
-        A count sheet frozen at 14:00 must be compared with the stock the
-        ledger says was there at 14:00, not with what it says now.
-        """
-        return self.movements.filter(event_at__lte=cutoff).aggregate(total=Sum("quantity_delta"))["total"] or Decimal("0.000")
-
     def __str__(self):
         return f"{self.item.name} · {self.batch_number}"
 

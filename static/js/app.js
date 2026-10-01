@@ -171,7 +171,6 @@
       if (th.hasAttribute('data-no-sort')) return;
       th.setAttribute('data-sortable', '');
       th.setAttribute('tabindex', '0');
-      th.setAttribute('role', 'button');
       const sort = () => {
         const current = th.getAttribute('data-sort');
         const direction = current === 'asc' ? 'desc' : 'asc';
@@ -243,9 +242,11 @@
       input.blur();
       // Only return focus somewhere that can actually hold it; otherwise the
       // hidden search box keeps it and eats every following keystroke.
-      if (lastFocus && lastFocus !== document.body && typeof lastFocus.focus === 'function') {
+      if (lastFocus && lastFocus !== document.body && lastFocus.isConnected !== false &&
+          typeof lastFocus.focus === 'function') {
         lastFocus.focus();
       }
+      lastFocus = null;
     };
 
     const render = (results) => {
@@ -317,7 +318,7 @@
       else if (event.key === 'Enter') {
         const items = links();
         if (items[active]) { event.preventDefault(); items[active].click(); }
-      } else if (event.key === 'Escape') { close(); }
+      }
     });
     palette.addEventListener('click', (event) => { if (event.target === palette) close(); });
     document.querySelectorAll('[data-palette-open]').forEach((b) => b.addEventListener('click', open));
@@ -336,10 +337,27 @@
         palette.classList.contains('is-open') ? close() : open();
         return;
       }
+      if (palette.classList.contains('is-open')) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          close();
+        } else if (event.key === 'Tab') {
+          const items = [input, ...links()];
+          const first = items[0];
+          const last = items[items.length - 1];
+          if (event.shiftKey && (document.activeElement === first || !items.includes(document.activeElement))) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && (document.activeElement === last || !items.includes(document.activeElement))) {
+            event.preventDefault();
+            first.focus();
+          }
+        }
+        return;
+      }
       if (typing(event.target) || event.metaKey || event.ctrlKey || event.altKey) return;
 
       if (event.key === '/') { event.preventDefault(); open(); return; }
-      if (event.key === '?') { event.preventDefault(); document.querySelector('[data-shortcut-help]')?.toggleAttribute('hidden'); return; }
       if (event.key === 'g') {
         chord = 'g';
         window.clearTimeout(chordTimer);
