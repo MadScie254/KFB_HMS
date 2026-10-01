@@ -1,0 +1,7 @@
+{% if page.has_other_pages %}
+<nav class="pagination" aria-label="{{ label }} pages">
+  {% if links.previous %}<a class="button ghost small" href="{{ links.previous }}">Previous</a>{% endif %}
+  <span>Page {{ page.number }} of {{ page.paginator.num_pages }} · {{ page.paginator.count }} total{% if sort_is_page_only %} · Column sorting applies to this page only.{% endif %}</span>
+  {% if links.next %}<a class="button ghost small" href="{{ links.next }}">Next</a>{% endif %}
+</nav>
+{% endif %}

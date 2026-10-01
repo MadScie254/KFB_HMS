@@ -161,6 +161,21 @@ def _filter_query(**params):
     return f"&{urlencode(active)}" if active else ""
 
 
+def _worklist_page(request, queryset, per_page, parameter, anchor):
+    """Page a worklist while preserving the other lists' current pages."""
+    page = Paginator(queryset, per_page).get_page(request.GET.get(parameter))
+
+    def link(number):
+        query = request.GET.copy()
+        query[parameter] = number
+        return f"?{query.urlencode()}#{anchor}"
+
+    return page, {
+        "previous": link(page.previous_page_number()) if page.has_previous() else None,
+        "next": link(page.next_page_number()) if page.has_next() else None,
+    }
+
+
 def invoiced_total(invoices):
     """Billed value of an invoice queryset in one query."""
     return InvoiceLine.objects.filter(invoice__in=invoices).aggregate(v=Sum("line_total"))["v"] or Decimal("0.00")
@@ -424,15 +439,47 @@ def patient_detail(request, pk):
     patient = get_object_or_404(Patient, pk=pk)
     role = user_role(request.user)
     audit(request.user, "patient.viewed", patient, request=request)
-    invoices = with_invoice_financials(patient.invoices.all()) if has_capability(role, "view_billing") else []
-    notes = ClinicalNote.objects.filter(encounter__patient=patient).select_related("author", "parent_note") if has_capability(role, "view_notes") else []
-    attachments = patient.attachments.select_related("uploaded_by", "encounter") if has_capability(role, "view_attachments") else []
+    active_encounters, active_links = _worklist_page(
+        request, patient.encounters.exclude(status=Encounter.Status.CLOSED).order_by("-created_at", "-pk"),
+        10, "active_page", "visits",
+    )
+    encounter_history, visit_links = _worklist_page(
+        request, patient.encounters.filter(status=Encounter.Status.CLOSED).order_by("-created_at", "-pk"),
+        20, "visit_page", "visits",
+    )
+    notes = attachments = invoices = None
+    note_links = attachment_links = invoice_links = None
+    if has_capability(role, "view_notes"):
+        notes, note_links = _worklist_page(
+            request,
+            ClinicalNote.objects.filter(encounter__patient=patient)
+            .select_related("author", "parent_note")
+            .order_by("-created_at", "-pk"),
+            20, "note_page", "notes",
+        )
+    if has_capability(role, "view_attachments"):
+        attachments, attachment_links = _worklist_page(
+            request,
+            patient.attachments.select_related("uploaded_by__staff_profile").order_by("-created_at", "-pk"),
+            20, "attachment_page", "attachments",
+        )
+    if has_capability(role, "view_billing"):
+        invoices, invoice_links = _worklist_page(
+            request, with_invoice_financials(patient.invoices.order_by("-created_at", "-pk")),
+            20, "invoice_page", "billing",
+        )
     return render(request, "hospital/patient_detail.html", {
         "patient": patient,
         "invoices": invoices,
+        "invoice_links": invoice_links,
         "notes": notes,
-        "encounters": patient.encounters.all(),
+        "note_links": note_links,
+        "active_encounters": active_encounters,
+        "active_links": active_links,
+        "encounter_history": encounter_history,
+        "visit_links": visit_links,
         "attachments": attachments,
+        "attachment_links": attachment_links,
         "attachment_form": ClinicalAttachmentForm() if has_capability(role, "upload_attachment") else None,
     })
 
@@ -545,9 +592,10 @@ def queue(request):
         open_clinical_encounters()
         .select_related("patient", "assigned_clinician")
         .annotate(triage_rank=TRIAGE_RANK)
-        .order_by("triage_rank", "created_at")
+        .order_by("triage_rank", "created_at", "pk")
     )
-    return render(request, "hospital/queue.html", {"encounters": encounters})
+    encounters, queue_links = _worklist_page(request, encounters, 50, "page", "queue-list")
+    return render(request, "hospital/queue.html", {"encounters": encounters, "queue_links": queue_links})
 
 
 @role_required(Role.OWNER, Role.CLINICIAN)
@@ -1365,8 +1413,21 @@ def audit_review(request):
 
 @role_required(Role.OWNER, Role.CLINICIAN, Role.NURSE, Role.LAB)
 def departments(request):
-    work = ServiceOrder.objects.select_related("encounter__patient", "service", "requested_by").order_by("status", "created_at")
-    return render(request, "hospital/departments.html", {"work": work})
+    orders = ServiceOrder.objects.select_related(
+        "encounter__patient", "service", "requested_by__staff_profile"
+    )
+    work, work_links = _worklist_page(
+        request, orders.exclude(status=ServiceOrder.Status.RELEASED).order_by("created_at", "pk"),
+        40, "work_page", "active-work",
+    )
+    history, history_links = _worklist_page(
+        request, orders.filter(status=ServiceOrder.Status.RELEASED).order_by("-released_at", "-pk"),
+        30, "history_page", "work-history",
+    )
+    return render(request, "hospital/departments.html", {
+        "work": work, "work_links": work_links,
+        "history": history, "history_links": history_links,
+    })
 
 
 @role_required(Role.OWNER, Role.LAB, Role.CLINICIAN)
@@ -1520,8 +1581,19 @@ def purchasing(request):
     # select_related chain that is two extra queries for every purchase order.
     orders = PurchaseOrder.objects.select_related(
         "supplier", "requested_by__staff_profile", "approved_by__staff_profile"
-    ).prefetch_related("lines__item", "receipts").order_by("-created_at")
-    return render(request, "hospital/purchasing.html", {"orders": orders})
+    ).prefetch_related("lines__item", "receipts")
+    active, active_links = _worklist_page(
+        request, orders.filter(status__in=["requested", "approved", "part_received"])
+        .order_by("-created_at", "-pk"), 30, "active_page", "active-orders",
+    )
+    history, history_links = _worklist_page(
+        request, orders.filter(status__in=["received", "cancelled"])
+        .order_by("-created_at", "-pk"), 30, "history_page", "order-history",
+    )
+    return render(request, "hospital/purchasing.html", {
+        "orders": active, "active_links": active_links,
+        "history": history, "history_links": history_links,
+    })
 
 
 @role_required(Role.OWNER, Role.PROCUREMENT)
@@ -2008,14 +2080,24 @@ class ThrottledLoginView(LoginView):
 def custody(request):
     """Stock that left the pharmacy and has not yet been accounted for."""
     position = departmental_custody()
-    issues = DepartmentIssue.objects.select_related("patient", "issued_by__staff_profile").prefetch_related(
-        "lines__batch__item"
+    issues = DepartmentIssue.objects.select_related("patient", "issued_by__staff_profile")
+    outstanding, outstanding_links = _worklist_page(
+        request,
+        issues.filter(status=DepartmentIssue.Status.OUTSTANDING)
+        .prefetch_related("lines__batch__item").order_by("issued_at", "pk"),
+        40, "outstanding_page", "outstanding-issues",
+    )
+    settled, settled_links = _worklist_page(
+        request, issues.filter(status=DepartmentIssue.Status.SETTLED).order_by("-issued_at", "-pk"),
+        15, "settled_page", "settled-issues",
     )
     role = user_role(request.user)
     return render(request, "hospital/custody.html", {
         "position": position,
-        "outstanding": issues.filter(status=DepartmentIssue.Status.OUTSTANDING)[:40],
-        "settled": issues.filter(status=DepartmentIssue.Status.SETTLED)[:15],
+        "outstanding": outstanding,
+        "outstanding_links": outstanding_links,
+        "settled": settled,
+        "settled_links": settled_links,
         "can_issue": role == Role.PHARMACY,
         "can_account": role in {Role.NURSE, Role.CLINICIAN, Role.PHARMACY},
     })

@@ -4,10 +4,10 @@
 <div class="page-heading">
   <div><p class="breadcrumbs"><a href="{% url 'dashboard' %}">Home</a> / Queue</p><h1>Patient queue</h1><p>Clinical urgency can override routine payment gates when the reason is recorded.</p></div>
 </div>
-<section class="panel">
+<section class="panel" id="queue-list">
 {% if encounters %}
   <div class="table-toolbar">
-    <span class="help-text">{{ encounters|length }} waiting · most urgent first, then longest waiting. Tap a column to re-sort.</span>
+    <span class="help-text">{{ encounters.paginator.count }} waiting · most urgent first, then longest waiting. Column sorting applies to this page only.</span>
     <span class="spacer"></span>
     <button type="button" class="chip-button" data-density-toggle aria-pressed="false">Compact rows</button>
   </div>
@@ -21,6 +21,7 @@
     <td>{% if current_role == 'clinician' or current_role == 'owner' %}<div class="table-actions"><a href="{% url 'clinical_note' e.pk %}">Clinical note</a><a href="{% url 'prescription_create' e.pk %}">Prescription</a><a href="{% url 'service_order_create' e.pk %}">Request service</a><a href="{% url 'admission_create' e.pk %}">Admit</a><form method="post" action="{% url 'encounter_close' e.pk %}">{% csrf_token %}<label class="visually-hidden" for="close-{{ e.pk }}">Reason to close {{ e.encounter_number }}</label><input class="field-control" id="close-{{ e.pk }}" name="reason" placeholder="Closure reason" required><button class="button secondary small" type="submit">Close visit</button></form></div>{% else %}<a href="{% url 'patient_detail' e.patient_id %}">View patient</a>{% endif %}</td>
   </tr>{% endfor %}
   </tbody></table></div>
+  {% include "hospital/_worklist_pagination.html" with page=encounters links=queue_links label="Patient queue" sort_is_page_only=True %}
 {% else %}<div class="empty"><strong>The queue is clear.</strong><p>Visits started at reception will appear here.</p></div>{% endif %}
 </section>
 {% endblock %}

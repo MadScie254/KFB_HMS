@@ -1,0 +1,8 @@
+<div class="table-wrap"><table>
+  <thead><tr><th>Patient</th><th>Requested service</th><th>Department</th><th>Status</th><th>Requested by</th><th></th></tr></thead>
+  <tbody>
+    {% for order in orders %}
+    <tr><td>{{ order.encounter.patient.full_name }}<small>{{ order.encounter.patient.patient_number }}</small></td><td>{{ order.service.name }}</td><td>{{ order.service.department }}</td><td><span class="status {{ order.status }}">{{ order.get_status_display }}</span></td><td>{{ order.requested_by.staff_profile }}</td><td><a href="{% url 'service_order_update' order.pk %}">Open work item</a></td></tr>
+    {% endfor %}
+  </tbody>
+</table></div>

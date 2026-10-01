@@ -28,10 +28,10 @@
 </section>
 
 <div class="content-grid">
-  <section class="panel span-2">
+  <section class="panel span-2" id="outstanding-issues">
     <div class="panel-head">
       <div><p class="eyebrow">Awaiting an account</p><h2>Outstanding issues</h2></div>
-      <span>{{ outstanding|length }} open</span>
+      <span>{{ outstanding.paginator.count }} open</span>
     </div>
     {% if outstanding %}
     <div class="table-wrap">
@@ -54,6 +54,7 @@
         </tbody>
       </table>
     </div>
+    {% include "hospital/_worklist_pagination.html" with page=outstanding links=outstanding_links label="Outstanding custody issues" sort_is_page_only=True %}
     {% else %}
     <div class="empty">
       <strong>Nothing is outstanding.</strong>
@@ -61,13 +62,15 @@
     </div>
     {% endif %}
 
+    <div class="section-divider" id="settled-issues"><div><p class="eyebrow">Closed</p><h2>Fully accounted for</h2></div><span>{{ settled.paginator.count }} settled</span></div>
     {% if settled %}
-    <div class="section-divider"><div><p class="eyebrow">Closed</p><h2>Fully accounted for</h2></div></div>
     <ul class="record-list compact-list">
       {% for issue in settled %}
       <li><div><strong>{{ issue.reference }}</strong><p>{{ issue.department }} · {{ issue.received_by_name }}</p><small>{{ issue.issued_at|date:"j M Y" }}</small></div><span class="status confirmed">Settled</span></li>
       {% endfor %}
     </ul>
+    {% include "hospital/_worklist_pagination.html" with page=settled links=settled_links label="Settled custody issues" %}
+    {% else %}<div class="empty compact"><strong>No settled issues yet.</strong></div>
     {% endif %}
   </section>
 

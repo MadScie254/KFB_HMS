@@ -1,0 +1,26 @@
+<div class="table-wrap">
+  <table>
+    <thead><tr><th>Visit</th><th>Department</th><th>Started</th><th>Status</th><th>Next action</th></tr></thead>
+    <tbody>
+      {% for e in encounters %}
+      <tr>
+        <td>{{ e.encounter_number }}</td>
+        <td>{{ e.department }}</td>
+        <td>{{ e.created_at|date:"j M Y, H:i" }}</td>
+        <td><span class="status {{ e.status }}">{{ e.get_status_display }}</span></td>
+        <td>
+          {% if current_role == 'clinician' %}
+          <div class="row-actions">
+            <a href="{% url 'clinical_note' e.pk %}">Open chart</a>
+            {% if e.status != 'closed' %}
+            <a href="{% url 'prescription_create' e.pk %}">Prescribe</a>
+            <a href="{% url 'service_order_create' e.pk %}">Order service</a>
+            {% endif %}
+          </div>
+          {% else %}-{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>

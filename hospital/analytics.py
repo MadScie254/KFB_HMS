@@ -12,6 +12,7 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.db.models import (
+    BooleanField,
     Case,
     Count,
     DecimalField,
@@ -346,42 +347,70 @@ def departmental_custody():
     total is reported separately rather than folded into stock value, because
     "on the shelf" and "somewhere in the hospital" are different questions.
     """
-    lines = (
-        DepartmentIssueLine.objects
-        .filter(issue__status=DepartmentIssue.Status.OUTSTANDING)
-        .select_related("batch__item", "issue")
+    now = timezone.now()
+    stale_before = now - timedelta(days=7)
+    outstanding = ExpressionWrapper(
+        F("quantity_issued") - F("quantity_consumed") - F("quantity_returned") - F("quantity_wasted"),
+        output_field=DecimalField(max_digits=17, decimal_places=3),
     )
-    rows = []
+    lines = DepartmentIssueLine.objects.filter(
+        issue__status=DepartmentIssue.Status.OUTSTANDING
+    ).annotate(outstanding_units=outstanding).filter(outstanding_units__gt=0)
+    grouped = lines.annotate(
+        is_stale=Case(
+            When(issue__issued_at__lte=stale_before, then=Value(True)),
+            default=Value(False), output_field=BooleanField(),
+        )
+    ).values(
+        "issue__department", "outstanding_units", "batch__purchase_cost_per_base_unit", "is_stale"
+    ).annotate(line_count=Count("pk"))
     total_units = Decimal("0.000")
     total_value = Decimal("0.00")
     by_department = {}
-    for line in lines:
-        outstanding = line.outstanding
-        if outstanding <= 0:
-            continue
-        value = (outstanding * line.batch.purchase_cost_per_base_unit).quantize(Decimal("0.01"))
-        age_days = (timezone.now() - line.issue.issued_at).days
-        rows.append({
-            "line": line, "issue": line.issue, "item": line.batch.item,
-            "outstanding": outstanding, "value": value, "age_days": age_days,
-        })
-        total_units += outstanding
+    stale_value = Decimal("0.00")
+    # Group equal quantities and unit costs before applying the same per-line
+    # cent rounding as the old ledger calculation. SQL now returns aggregates,
+    # not one model instance (and its relationships) per outstanding line.
+    for group in grouped.iterator(chunk_size=500):
+        count = group["line_count"]
+        units = group["outstanding_units"] * count
+        value = (
+            group["outstanding_units"] * group["batch__purchase_cost_per_base_unit"]
+        ).quantize(Decimal("0.01")) * count
+        total_units += units
         total_value += value
-        bucket = by_department.setdefault(line.issue.department, {"department": line.issue.department, "units": Decimal("0.000"), "value": Decimal("0.00")})
-        bucket["units"] += outstanding
+        department = group["issue__department"]
+        bucket = by_department.setdefault(department, {
+            "department": department, "units": Decimal("0.000"), "value": Decimal("0.00"),
+        })
+        bucket["units"] += units
         bucket["value"] += value
+        if group["is_stale"]:
+            stale_value += value
 
-    rows.sort(key=lambda row: row["age_days"], reverse=True)
-    stale = [row for row in rows if row["age_days"] >= 7]
+    issue_counts = lines.aggregate(
+        total=Count("issue_id", distinct=True),
+        stale=Count("issue_id", filter=Q(issue__issued_at__lte=stale_before), distinct=True),
+    )
+    stale = []
+    for line in lines.filter(issue__issued_at__lte=stale_before).select_related(
+        "batch__item", "issue"
+    ).order_by("issue__issued_at", "pk")[:6]:
+        quantity = line.outstanding
+        stale.append({
+            "line": line, "issue": line.issue, "item": line.batch.item,
+            "outstanding": quantity,
+            "value": (quantity * line.batch.purchase_cost_per_base_unit).quantize(Decimal("0.01")),
+            "age_days": (now - line.issue.issued_at).days,
+        })
     return {
-        "rows": rows,
         "by_department": sorted(by_department.values(), key=lambda row: row["value"], reverse=True),
         "outstanding_units": total_units,
         "outstanding_value": total_value,
-        "issue_count": len({row["issue"].pk for row in rows}),
+        "issue_count": issue_counts["total"],
         "stale_rows": stale,
-        "stale_count": len(stale),
-        "stale_value": sum((row["value"] for row in stale), Decimal("0.00")),
+        "stale_count": issue_counts["stale"],
+        "stale_value": stale_value,
     }
 
 
